@@ -23,6 +23,18 @@ def evaluate(agent, guide, inputs, infos, min_score=None, num_threads=None, desc
 
     def evaluate_single(i):
         try:
+            """create a new env for each thread"""
+            from tau_bench.envs import get_env
+            env = get_env(
+            env_name="retail",
+            user_strategy="llm",
+            user_model="gemini-2.0-flash",
+            user_provider="vertex_ai",
+            task_split="test",
+            task_index=0  # Will be overridden during training
+        )
+            agent.set_env(env)
+            
             output = agent(inputs[i]).data
             score = guide.metric(inputs[i], output, infos[i])
         except:
