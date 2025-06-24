@@ -337,9 +337,23 @@ class UCBSearchAlgorithm(MinibatchAlgorithm):
                 print_color(f"Log @ Iter {iteration}: Best score in buffer: {log_data['best_score']:.4f}, Buffer size: {log_data['buffer_size']}, Total samples: {total_samples}", 'green')
 
             if test_dataset is not None and iteration % eval_frequency == 0:
+                # Save current agent parameters
+                current_params = {p: copy.deepcopy(p.data) for p in self.optimizer.parameters}
+                
+                # Find the best candidate in the buffer (highest mean score)
+                best_candidate = max(self.buffer, key=lambda c: c['score_sum'] / (c['eval_count'] or 1E-9))
+                
+                # Load best candidate's parameters into the agent for evaluation
+                self.optimizer.update(best_candidate['params'])
+                
+                # Evaluate the best candidate on test set
                 test_score = self.evaluate(self.agent, guide, test_dataset['inputs'], test_dataset['infos'],
                               min_score=self.min_score, num_threads=num_threads,
-                              description=f"Evaluating agent (iteration {iteration})")  # and log
+                              description=f"Evaluating best candidate (iteration {iteration})")
+                
+                # Restore original agent parameters
+                self.optimizer.update(current_params)
+                
                 self.logger.log('Test score', test_score, iteration, color='green')
                 
             # Save agent (e.g., the one with highest mean score in buffer)
