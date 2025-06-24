@@ -51,7 +51,7 @@ class BeamsearchAlgorithm(MinibatchAlgorithm):
             Other parameters are the same as MinibatchAlgorithm.train()
         """
         self.total_samples = 0
-
+        self.total_proposals = 0
         print_color(f"Running BeamsearchAlgorithm with beam_width={beam_width}, max_depth={max_depth}", 'blue')
         
         # Use train dataset for validation if not specified
@@ -93,7 +93,7 @@ class BeamsearchAlgorithm(MinibatchAlgorithm):
             print_color(f"Initial test score: {initial_test_score:.4f}", 'yellow')
             
             # Log initial test score
-            self.logger.log('Initial test score', initial_test_score, 0, color='blue')
+            self.logger.log('Test score', initial_test_score, 0, color='blue')
             
             # Add initial score to metrics for logging
             metrics['test_scores'].append(initial_test_score)
@@ -137,7 +137,7 @@ class BeamsearchAlgorithm(MinibatchAlgorithm):
                     num_proposals=num_proposals,
                     num_threads=num_threads
                 )
-                
+                self.total_proposals += num_proposals
                 # Add all candidates to the pool for selection
                 all_candidates.extend(beam_candidates)
                 self.total_samples += batch_size
@@ -168,7 +168,8 @@ class BeamsearchAlgorithm(MinibatchAlgorithm):
                 self.logger.log('Average validation score', np.mean(scores), step_num, color='cyan')
                 self.logger.log('Min validation score', min(scores), step_num, color='yellow')
                 self.logger.log('Max validation score', max(scores), step_num, color='magenta')
-                
+                self.logger.log('Total samples', self.total_samples, step_num, color='red')
+                self.logger.log('Total proposals', self.total_proposals, step_num, color='yellow')
                 # Evaluate on test set every test_frequency steps
                 if test_dataset is not None and ((depth + 1) % test_frequency == 0):
                     # Update agent with best parameters from this depth
@@ -204,7 +205,7 @@ class BeamsearchAlgorithm(MinibatchAlgorithm):
                     print_color(f"Depth {depth+1} - Test score: {test_score:.4f}", 'magenta')
                     
                     # Log test score
-                    self.logger.log('Periodic test score', test_score, step_num, color='magenta')
+                    self.logger.log('Test score', test_score, step_num, color='magenta')
         
         # Final selection - choose the best beam using FULL validation set
         print_color("\n===== Final Selection Using Full Validation Set =====", 'blue')
@@ -488,6 +489,7 @@ class BeamsearchHistoryAlgorithm(BeamsearchAlgorithm):
             Other args are the same as BeamsearchAlgorithm.train()
         """
         self.total_samples = 0    
+        self.total_proposals = 0
         self.min_score = kwargs.get('min_score', 0)
         print_color(f"Running BeamsearchHistoryAlgorithm with beam_width={beam_width}, max_depth={max_depth}, max_history_size={max_history_size}", 'blue')
 
@@ -530,7 +532,7 @@ class BeamsearchHistoryAlgorithm(BeamsearchAlgorithm):
             print_color(f"Initial test score: {initial_test_score:.4f}", 'yellow')
             
             # Log initial test score
-            self.logger.log('Initial test score', initial_test_score, 0, color='blue')
+            self.logger.log('Test score', initial_test_score, 0, color='blue')
             
             metrics['test_scores'].append(initial_test_score)
             metrics['test_depths'].append(1) # Start depth at 1 for consistency
@@ -558,6 +560,7 @@ class BeamsearchHistoryAlgorithm(BeamsearchAlgorithm):
                 )
                 all_candidates.extend(beam_candidates)
                 self.total_samples += batch_size
+                self.total_proposals += num_proposals
             # Select top candidates
             beams, scores = self.select(
                 candidates=all_candidates, validate_guide=validate_guide,
@@ -596,7 +599,8 @@ class BeamsearchHistoryAlgorithm(BeamsearchAlgorithm):
                     self.logger.log('Min validation score', min(scores), step_num, color='yellow')
                     self.logger.log('Max validation score', max(scores), step_num, color='magenta')
                     self.logger.log('History buffer size', len(self.parameter_history), step_num, color='orange')
-                
+                    self.logger.log('Total samples', self.total_samples, step_num, color='red')
+                    self.logger.log('Total proposals', self.total_proposals, step_num, color='yellow')
                     best_idx = scores.index(best_score_this_depth) # Find index of best score
                     best_params = beams[best_idx] # Get corresponding params
 
@@ -634,7 +638,7 @@ class BeamsearchHistoryAlgorithm(BeamsearchAlgorithm):
                         print_color(f"Depth {depth+1} - Test score: {test_score:.4f}", 'magenta')
                         
                         # Log test score
-                        self.logger.log('Periodic test score', test_score, step_num, color='magenta')
+                        self.logger.log('Test score', test_score, step_num, color='magenta')
 
         # >>> End Main Loop <<<
 

@@ -137,6 +137,7 @@ class UCBSearchAlgorithm(MinibatchAlgorithm):
               train_dataset: Dict[str, List[Any]],
               *,
               validation_dataset: Optional[Dict[str, List[Any]]] = None,  # Validation set for evaluation, defaults to train_dataset
+              test_dataset: Optional[Dict[str, List[Any]]] = None,
               num_search_iterations: int = 100,
               train_batch_size: int = 2, 
               evaluation_batch_size: int = 20, # Renamed from validation_batch_size, used for all explicit evaluations
@@ -155,12 +156,14 @@ class UCBSearchAlgorithm(MinibatchAlgorithm):
         # Default validation_dataset to train_dataset if not provided
         if validation_dataset is None:
             validation_dataset = train_dataset
-            
+        if test_dataset is None:
+            test_dataset = train_dataset
+
         num_threads = num_threads or self.num_threads
         log_frequency = log_frequency or eval_frequency
         self.min_score = min_score_for_agent_update # Used by parent's evaluate if called, or our own _evaluate_candidate
         total_samples = 0
-
+        self.total_proposals = 0
         # Metrics tracking
         metrics = {
             'best_candidate_scores': [], # Score of the best candidate (e.g., highest mean) found so far at each iteration
@@ -181,7 +184,7 @@ class UCBSearchAlgorithm(MinibatchAlgorithm):
 
         # Log initial evaluation
         self.logger.log('Initial UCB score', initial_score, 0, color='blue')
-        self.logger.log('Initial evaluations', initial_evals, 0, color='cyan')
+        self.logger.log('Total samples', total_samples, 0, color='cyan')
 
         initial_candidate_entry = {
             'params': initial_params_dict,
@@ -258,13 +261,13 @@ class UCBSearchAlgorithm(MinibatchAlgorithm):
             except Exception as e:
                 print_color(f"Iter {iteration}: Error during optimizer.step for a_prime: {e}. Skipping candidate generation.", 'red')
                 continue
-            
+            self.total_proposals += 1
             # 4. Evaluate 'a_prime' on samples of validation set
             a_prime_score, a_prime_evals = self._evaluate_candidate(
                 a_prime_params_dict, validation_dataset, guide, evaluation_batch_size, num_threads # Use validation_dataset and guide
             )
             self._total_evaluations_tracker += a_prime_evals
-            total_samples += evaluation_batch_size + train_batch_size
+            total_samples += evaluation_batch_size + train_batch_size # train_batch_size is used in the forward process, evaluation_batch_size is used in the evaluation process
             metrics['new_candidate_scores'].append(a_prime_score)
             
             # Log new candidate performance
@@ -328,11 +331,17 @@ class UCBSearchAlgorithm(MinibatchAlgorithm):
                 self.logger.log('Buffer size', log_data['buffer_size'], iteration, color='blue')
                 self.logger.log('Buffer average score', log_data['buffer_avg_score'], iteration, color='cyan')
                 self.logger.log('Buffer average evaluations', log_data['buffer_avg_evals'], iteration, color='orange')
-                self.logger.log('Total evaluations tracker', log_data['total_evaluations_tracker'], iteration, color='magenta')
-                self.logger.log('Total samples processed', log_data['total_samples'], iteration, color='yellow')
-                
+                # self.logger.log('Total evaluations tracker', log_data['total_evaluations_tracker'], iteration, color='magenta')
+                self.logger.log('Total samples', log_data['total_samples'], iteration, color='yellow')
+                self.logger.log('Total proposals', self.total_proposals, iteration, color='red')
                 print_color(f"Log @ Iter {iteration}: Best score in buffer: {log_data['best_score']:.4f}, Buffer size: {log_data['buffer_size']}, Total samples: {total_samples}", 'green')
-            
+
+            if test_dataset is not None and iteration % eval_frequency == 0:
+                test_score = self.evaluate(self.agent, guide, test_dataset['inputs'], test_dataset['infos'],
+                              min_score=self.min_score, num_threads=num_threads,
+                              description=f"Evaluating agent (iteration {iteration})")  # and log
+                self.logger.log('Test score', test_score, iteration, color='green')
+                
             # Save agent (e.g., the one with highest mean score in buffer)
             if save_frequency is not None and iteration % save_frequency == 0:
                 best_overall_candidate = max(self.buffer, key=lambda c: c['score_sum'] / (c['eval_count'] or 1E-9) )

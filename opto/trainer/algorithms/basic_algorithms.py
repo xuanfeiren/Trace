@@ -47,6 +47,7 @@ class Minibatch(AlgorithmBase):
         super().__init__(agent, num_threads=num_threads, logger=logger, *args, **kwargs)
         self.optimizer = optimizer
         self.n_iters = 0  # number of iterations
+        
 
 
     def train(self,
@@ -85,7 +86,7 @@ class Minibatch(AlgorithmBase):
             test_score = self.evaluate(self.agent, guide, test_dataset['inputs'], test_dataset['infos'],
                           min_score=min_score, num_threads=num_threads,
                           description=f"Evaluating agent (iteration {self.n_iters})")  # and log
-            self.logger.log('Average test score', test_score, self.n_iters, color='green')
+            self.logger.log('Test score', test_score, self.n_iters, color='green')
 
         # Save the agent before learning if save_frequency > 0
         if save_frequency is not None and save_frequency > 0:
@@ -124,7 +125,7 @@ class Minibatch(AlgorithmBase):
                     test_score = self.evaluate(self.agent, guide, test_dataset['inputs'], test_dataset['infos'],
                                   min_score=min_score, num_threads=num_threads,
                                   description=f"Evaluating agent (iteration {self.n_iters})")  # and log
-                    self.logger.log('Average test score', test_score, self.n_iters, color='green')
+                    self.logger.log('Test score', test_score, self.n_iters, color='green')
 
                 # Save the agent
                 if save_frequency is not None and save_frequency > 0 and self.n_iters % save_frequency == 0:
@@ -137,8 +138,10 @@ class Minibatch(AlgorithmBase):
                     print(f"Epoch: {i}. Iteration: {self.n_iters}")
                     self.logger.log("Instantaneous train score", score, self.n_iters)
                     self.logger.log("Average train score", np.mean(train_scores), self.n_iters)
-                    for p in self.agent.parameters():
-                        self.logger.log(f"Parameter: {p.name}", p.data, self.n_iters, color='red')
+                    self.logger.log("Total samples", self.total_samples, self.n_iters)
+                    self.logger.log("Total proposals", self.total_proposals, self.n_iters)
+                    # for p in self.agent.parameters():
+                    #     self.logger.log(f"Parameter: {p.name}", p.data, self.n_iters, color='red')
 
         return train_scores, test_score
 
@@ -167,6 +170,7 @@ class Minibatch(AlgorithmBase):
         new_score = self.evaluate(self.agent, guide, xs, infos, num_threads=num_threads,
                                  description=f"Checking improvement (iteration {self.n_iters})",
                                  *args, **kwargs)  # evaluate the updated agent
+        self.total_samples += len(xs) # more samples have been used to evaluate the agent
         if new_score is None or new_score <= current_score - threshold:
             print_color(f"Update rejected: Current score {current_score}, New score {new_score}", 'red')
             return False
@@ -299,6 +303,7 @@ class BasicSearchAlgorithm(MinibatchAlgorithm):
                               min_score=self.min_score,
                               num_threads=num_threads,
                               description="Validating proposals")
+            self.total_samples += len(self.validate_dataset['inputs']) # more samples have been used to validate
             return np.mean(scores) if all([s is not None for s in scores]) else -np.inf
 
         # TODO perhaps we can ask for multiple updates in one query or use different temperatures in different queries
