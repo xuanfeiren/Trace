@@ -106,52 +106,75 @@ class BeamsearchAlgorithm(MinibatchAlgorithm):
         for depth in range(max_depth):
             print_color(f"\n===== Beam Search Depth {depth+1}/{max_depth} with {len(beams)} beams =====", 'blue')
             
-            # Sample a validation minibatch for this depth
-            validation_xs, validation_infos = self._sample_minibatch(
-                validate_dataset, 
-                validation_dataset_size
-            )
-            
-            # Create a validation mini-dataset for this depth
-            validation_mini_dataset = {
-                'inputs': validation_xs,
-                'infos': validation_infos
-            }
-            
-            print_color(f"Sampled validation minibatch of size {len(validation_xs)} for depth {depth+1}", 'cyan')
-            
-            # Collect all expanded candidates
-            all_candidates = []
-            
-            # Process each beam in the current set
-            for beam_idx, beam_params in enumerate(beams):
-                print_color(f"Processing beam {beam_idx+1}/{len(beams)}", 'yellow')
-                
-                # Expand: Generate multiple proposals from this beam (without evaluation)
-                beam_candidates = self.expand(
-                    beam_params=beam_params,
-                    beam_idx=beam_idx,
-                    guide=guide,
-                    train_dataset=train_dataset,
-                    batch_size=batch_size,
-                    num_proposals=num_proposals,
-                    num_threads=num_threads
+            try:
+                # Sample a validation minibatch for this depth
+                validation_xs, validation_infos = self._sample_minibatch(
+                    validate_dataset, 
+                    validation_dataset_size
                 )
-                self.total_proposals += num_proposals
-                # Add all candidates to the pool for selection
-                all_candidates.extend(beam_candidates)
-                self.total_samples += batch_size
-            # Select: Evaluate all candidates and choose the top beam_width
-            beams, scores = self.select(
-                candidates=all_candidates,
-                validate_guide=validate_guide,
-                validation_mini_dataset=validation_mini_dataset,
-                beam_width=beam_width,
-                num_threads=num_threads,
-                min_score=min_score,
-                return_scores=True  # Modified to return scores as well
-            )
-            self.total_samples += validation_dataset_size*len(all_candidates)
+                
+                # Create a validation mini-dataset for this depth
+                validation_mini_dataset = {
+                    'inputs': validation_xs,
+                    'infos': validation_infos
+                }
+                
+                print_color(f"Sampled validation minibatch of size {len(validation_xs)} for depth {depth+1}", 'cyan')
+                
+                # Collect all expanded candidates
+                all_candidates = []
+                
+                # Process each beam in the current set - with error handling per beam
+                for beam_idx, beam_params in enumerate(beams):
+                    print_color(f"Processing beam {beam_idx+1}/{len(beams)}", 'yellow')
+                    
+                    try:
+                        # Expand: Generate multiple proposals from this beam (without evaluation)
+                        beam_candidates = self.expand(
+                            beam_params=beam_params,
+                            beam_idx=beam_idx,
+                            guide=guide,
+                            train_dataset=train_dataset,
+                            batch_size=batch_size,
+                            num_proposals=num_proposals,
+                            num_threads=num_threads
+                        )
+                        self.total_proposals += num_proposals
+                        # Add all candidates to the pool for selection
+                        all_candidates.extend(beam_candidates)
+                        self.total_samples += batch_size
+                    except Exception as e:
+                        print_color(f"Error expanding beam {beam_idx+1}: {str(e)}. Adding original beam parameters as fallback.", 'red')
+                        # Add the original beam parameters as a fallback candidate
+                        all_candidates.append(beam_params)
+                
+                # If no candidates were generated, use current beams as candidates
+                if not all_candidates:
+                    print_color("No candidates generated due to errors. Using current beams for next iteration.", 'yellow')
+                    all_candidates = beams.copy()
+                
+                # Select: Evaluate all candidates and choose the top beam_width
+                try:
+                    beams, scores = self.select(
+                        candidates=all_candidates,
+                        validate_guide=validate_guide,
+                        validation_mini_dataset=validation_mini_dataset,
+                        beam_width=beam_width,
+                        num_threads=num_threads,
+                        min_score=min_score,
+                        return_scores=True  # Modified to return scores as well
+                    )
+                    self.total_samples += validation_dataset_size*len(all_candidates)
+                except Exception as e:
+                    print_color(f"Error during candidate selection: {str(e)}. Keeping current beams for next iteration.", 'red')
+                    # Keep current beams and create dummy scores
+                    scores = [0.0] * len(beams)  # Dummy scores for consistency
+                    
+            except Exception as e:
+                print_color(f"Critical error at depth {depth+1}: {str(e)}. Skipping to next depth with current beams.", 'red')
+                # Skip this depth entirely - use current beams for next iteration
+                scores = [0.0] * len(beams)  # Dummy scores for consistency
+                continue
             # Track validation scores for this depth
             if len(scores) > 0:
                 best_score = max(scores)
@@ -172,64 +195,73 @@ class BeamsearchAlgorithm(MinibatchAlgorithm):
                 self.logger.log('Total proposals', self.total_proposals, step_num, color='yellow')
                 # Evaluate on test set every test_frequency steps
                 if test_dataset is not None and ((depth + 1) % test_frequency == 0):
-                    # Update agent with best parameters from this depth
-                    self.optimizer.update(best_params)
-                    # Print best parameters
-                    print_color("\nBest parameters at depth {}:".format(depth + 1), 'cyan')
-                    for key, value in best_params.items():
-                        # Try to get a clean string name from the key, which might be a parameter object
-                        if hasattr(key, 'name'):
-                            # Extract string name from parameter object
-                            param_name = key.name
-                        else:
-                            # If it's already a string or doesn't have a name attribute, use it directly
-                            param_name = str(key)
-                        print_color(f"{param_name}: {value}", 'cyan')
-                    print_color("", 'cyan')  # Empty line for readability
-                    # Evaluate on test set
-                    test_scores = evaluate(
-                        self.agent,
-                        guide,
-                        test_dataset['inputs'],
-                        test_dataset['infos'],
-                        min_score=min_score,
-                        num_threads=num_threads,
-                        description=f"Evaluating best parameters at depth {depth+1} on test set"
-                    )
-                    test_score = np.mean(test_scores) if all([s is not None for s in test_scores]) else -np.inf
-                    
-                    # Record the test score
-                    metrics['test_scores'].append(test_score)
-                    metrics['test_depths'].append(depth + 1)
-                    
-                    print_color(f"Depth {depth+1} - Test score: {test_score:.4f}", 'magenta')
-                    
-                    # Log test score
-                    self.logger.log('Test score', test_score, step_num, color='magenta')
+                    try:
+                        # Update agent with best parameters from this depth
+                        self.optimizer.update(best_params)
+                        # Print best parameters
+                        print_color("\nBest parameters at depth {}:".format(depth + 1), 'cyan')
+                        for key, value in best_params.items():
+                            # Try to get a clean string name from the key, which might be a parameter object
+                            if hasattr(key, 'name'):
+                                # Extract string name from parameter object
+                                param_name = key.name
+                            else:
+                                # If it's already a string or doesn't have a name attribute, use it directly
+                                param_name = str(key)
+                            print_color(f"{param_name}: {value}", 'cyan')
+                        print_color("", 'cyan')  # Empty line for readability
+                        # Evaluate on test set
+                        test_scores = evaluate(
+                            self.agent,
+                            guide,
+                            test_dataset['inputs'],
+                            test_dataset['infos'],
+                            min_score=min_score,
+                            num_threads=num_threads,
+                            description=f"Evaluating best parameters at depth {depth+1} on test set"
+                        )
+                        test_score = np.mean(test_scores) if all([s is not None for s in test_scores]) else -np.inf
+                        
+                        # Record the test score
+                        metrics['test_scores'].append(test_score)
+                        metrics['test_depths'].append(depth + 1)
+                        
+                        print_color(f"Depth {depth+1} - Test score: {test_score:.4f}", 'magenta')
+                        
+                        # Log test score
+                        self.logger.log('Test score', test_score, step_num, color='magenta')
+                    except Exception as e:
+                        print_color(f"Error during test evaluation at depth {depth+1}: {str(e)}. Skipping test evaluation.", 'red')
         
         # Final selection - choose the best beam using FULL validation set
         print_color("\n===== Final Selection Using Full Validation Set =====", 'blue')
         
-        # Use select method with the full validation dataset
-        full_validation_dataset = {
-            'inputs': validate_dataset['inputs'],
-            'infos': validate_dataset['infos']
-        }
-        
-        # Select the single best beam from the final candidates
-        best_beams, final_val_scores = self.select(
-            candidates=beams,
-            validate_guide=validate_guide,
-            validation_mini_dataset=full_validation_dataset,
-            beam_width=1,  # Only select the best one
-            num_threads=num_threads,
-            min_score=min_score,
-            return_scores=True  # Return scores too
-        )
-        
-        # Get the best parameters
-        best_params = best_beams[0]
-        final_validation_score = final_val_scores[0] if final_val_scores else -np.inf
+        try:
+            # Use select method with the full validation dataset
+            full_validation_dataset = {
+                'inputs': validate_dataset['inputs'],
+                'infos': validate_dataset['infos']
+            }
+            
+            # Select the single best beam from the final candidates
+            best_beams, final_val_scores = self.select(
+                candidates=beams,
+                validate_guide=validate_guide,
+                validation_mini_dataset=full_validation_dataset,
+                beam_width=1,  # Only select the best one
+                num_threads=num_threads,
+                min_score=min_score,
+                return_scores=True  # Return scores too
+            )
+            
+            # Get the best parameters
+            best_params = best_beams[0]
+            final_validation_score = final_val_scores[0] if final_val_scores else -np.inf
+        except Exception as e:
+            print_color(f"Error during final selection: {str(e)}. Using first available beam as fallback.", 'red')
+            # Use the first beam as fallback
+            best_params = beams[0] if beams else original_params
+            final_validation_score = -np.inf
         
         # Log final validation score
         final_step = max_depth + 1
@@ -261,16 +293,20 @@ class BeamsearchAlgorithm(MinibatchAlgorithm):
         
         # Evaluate on test set for reporting (if provided)
         if test_dataset is not None:
-            final_test_scores = evaluate(
-                self.agent,
-                guide,
-                test_dataset['inputs'],
-                test_dataset['infos'],
-                min_score=min_score,
-                num_threads=num_threads,
-                description="Evaluating best beam on test set"
-            )
-            final_test_score = np.mean(final_test_scores) if all([s is not None for s in final_test_scores]) else -np.inf
+            try:
+                final_test_scores = evaluate(
+                    self.agent,
+                    guide,
+                    test_dataset['inputs'],
+                    test_dataset['infos'],
+                    min_score=min_score,
+                    num_threads=num_threads,
+                    description="Evaluating best beam on test set"
+                )
+                final_test_score = np.mean(final_test_scores) if all([s is not None for s in final_test_scores]) else -np.inf
+            except Exception as e:
+                print_color(f"Error during final test evaluation: {str(e)}. Setting test score to -inf.", 'red')
+                final_test_score = -np.inf
         else:
             final_test_score = None
             
@@ -553,30 +589,53 @@ class BeamsearchHistoryAlgorithm(BeamsearchAlgorithm):
         for depth in range(max_depth):
             print_color(f"\n===== Beam Search Depth {depth+1}/{max_depth} with {len(beams)} beams =====", 'blue')
 
-            # Sample validation minibatch
-            validation_xs, validation_infos = self._sample_minibatch(validate_dataset, validation_dataset_size)
-            validation_mini_dataset = {'inputs': validation_xs, 'infos': validation_infos}
-            print_color(f"Sampled validation minibatch of size {len(validation_xs)} for depth {depth+1}", 'cyan')
+            try:
+                # Sample validation minibatch
+                validation_xs, validation_infos = self._sample_minibatch(validate_dataset, validation_dataset_size)
+                validation_mini_dataset = {'inputs': validation_xs, 'infos': validation_infos}
+                print_color(f"Sampled validation minibatch of size {len(validation_xs)} for depth {depth+1}", 'cyan')
 
-            # Expand all current beams
-            all_candidates = []
-            for beam_idx, beam_params in enumerate(beams):
-                print_color(f"Processing beam {beam_idx+1}/{len(beams)}", 'yellow')
-                beam_candidates = self.expand( # Calls the overridden expand method
-                    beam_params=beam_params, beam_idx=beam_idx, guide=guide,
-                    train_dataset=train_dataset, batch_size=batch_size,
-                    num_proposals=num_proposals, num_threads=num_threads
-                )
-                all_candidates.extend(beam_candidates)
-                self.total_samples += batch_size
-                self.total_proposals += num_proposals
-            # Select top candidates
-            beams, scores = self.select(
-                candidates=all_candidates, validate_guide=validate_guide,
-                validation_mini_dataset=validation_mini_dataset, beam_width=beam_width,
-                num_threads=num_threads, min_score=self.min_score, return_scores=True
-            )
-            self.total_samples += validation_dataset_size*len(all_candidates)
+                # Expand all current beams - with error handling per beam
+                all_candidates = []
+                for beam_idx, beam_params in enumerate(beams):
+                    print_color(f"Processing beam {beam_idx+1}/{len(beams)}", 'yellow')
+                    try:
+                        beam_candidates = self.expand( # Calls the overridden expand method
+                            beam_params=beam_params, beam_idx=beam_idx, guide=guide,
+                            train_dataset=train_dataset, batch_size=batch_size,
+                            num_proposals=num_proposals, num_threads=num_threads
+                        )
+                        all_candidates.extend(beam_candidates)
+                        self.total_samples += batch_size
+                        self.total_proposals += num_proposals
+                    except Exception as e:
+                        print_color(f"Error expanding beam {beam_idx+1}: {str(e)}. Adding original beam parameters as fallback.", 'red')
+                        # Add the original beam parameters as a fallback candidate
+                        all_candidates.append(beam_params)
+                
+                # If no candidates were generated, use current beams as candidates
+                if not all_candidates:
+                    print_color("No candidates generated due to errors. Using current beams for next iteration.", 'yellow')
+                    all_candidates = beams.copy()
+                
+                # Select top candidates
+                try:
+                    beams, scores = self.select(
+                        candidates=all_candidates, validate_guide=validate_guide,
+                        validation_mini_dataset=validation_mini_dataset, beam_width=beam_width,
+                        num_threads=num_threads, min_score=self.min_score, return_scores=True
+                    )
+                    self.total_samples += validation_dataset_size*len(all_candidates)
+                except Exception as e:
+                    print_color(f"Error during candidate selection: {str(e)}. Keeping current beams for next iteration.", 'red')
+                    # Keep current beams and create dummy scores
+                    scores = [0.0] * len(beams)  # Dummy scores for consistency
+                    
+            except Exception as e:
+                print_color(f"Critical error at depth {depth+1}: {str(e)}. Skipping to next depth with current beams.", 'red')
+                # Skip this depth entirely - use current beams for next iteration
+                scores = [0.0] * len(beams)  # Dummy scores for consistency
+                continue
             # --- Populate History Log ---
             if scores:
                 best_score_this_depth = -np.inf
@@ -615,53 +674,62 @@ class BeamsearchHistoryAlgorithm(BeamsearchAlgorithm):
 
                     # Evaluate on test set periodically
                     if test_dataset is not None and ((depth + 1) % test_frequency == 0):
-                        self.optimizer.update(best_params) # Use best params from this depth
-                        print_color("\nBest parameters at depth {}:".format(depth + 1), 'cyan')
+                        try:
+                            self.optimizer.update(best_params) # Use best params from this depth
+                            print_color("\nBest parameters at depth {}:".format(depth + 1), 'cyan')
 
-                        for param in self.agent.parameters():
-            # Use a try-except block to handle parameter lookup
-                            try:
-                                # Check if parameter object is directly available as a key
-                                if param in best_params:
-                                    param_value = best_params[param]
-                                # Try to find by name if available
-                                elif hasattr(param, 'name') and param.name in best_params:
-                                    param_value = best_params[param.name]
-                                else:
-                                    param_value = "Parameter not found in best_params"
-                                
-                                # Get the parameter name directly
-                                param_name = param.name if hasattr(param, 'name') else str(param)
-                                print_color(f"{param_name}: {param_value}", 'blue')
-                            except Exception as e:
-                                print_color(f"Error accessing parameter {getattr(param, 'name', str(param))}: {e}", 'red')
-                                continue
-                        test_scores_eval = evaluate(
-                            self.agent, guide, test_dataset['inputs'], test_dataset['infos'],
-                            min_score=self.min_score, num_threads=num_threads,
-                            description=f"Evaluating best parameters at depth {depth+1} on test set"
-                        )
-                        test_score = np.mean(test_scores_eval) if all([s is not None for s in test_scores_eval]) else -np.inf
-                        metrics['test_scores'].append(test_score)
-                        metrics['test_depths'].append(depth + 1)
-                        print_color(f"Depth {depth+1} - Test score: {test_score:.4f}", 'magenta')
-                        
-                        # Log test score
-                        self.logger.log('Test score', test_score, step_num, color='magenta')
+                            for param in self.agent.parameters():
+                # Use a try-except block to handle parameter lookup
+                                try:
+                                    # Check if parameter object is directly available as a key
+                                    if param in best_params:
+                                        param_value = best_params[param]
+                                    # Try to find by name if available
+                                    elif hasattr(param, 'name') and param.name in best_params:
+                                        param_value = best_params[param.name]
+                                    else:
+                                        param_value = "Parameter not found in best_params"
+                                    
+                                    # Get the parameter name directly
+                                    param_name = param.name if hasattr(param, 'name') else str(param)
+                                    print_color(f"{param_name}: {param_value}", 'blue')
+                                except Exception as e:
+                                    print_color(f"Error accessing parameter {getattr(param, 'name', str(param))}: {e}", 'red')
+                                    continue
+                            test_scores_eval = evaluate(
+                                self.agent, guide, test_dataset['inputs'], test_dataset['infos'],
+                                min_score=self.min_score, num_threads=num_threads,
+                                description=f"Evaluating best parameters at depth {depth+1} on test set"
+                            )
+                            test_score = np.mean(test_scores_eval) if all([s is not None for s in test_scores_eval]) else -np.inf
+                            metrics['test_scores'].append(test_score)
+                            metrics['test_depths'].append(depth + 1)
+                            print_color(f"Depth {depth+1} - Test score: {test_score:.4f}", 'magenta')
+                            
+                            # Log test score
+                            self.logger.log('Test score', test_score, step_num, color='magenta')
+                        except Exception as e:
+                            print_color(f"Error during test evaluation at depth {depth+1}: {str(e)}. Skipping test evaluation.", 'red')
 
         # >>> End Main Loop <<<
 
         # Final selection using full validation set
         print_color("\n===== Final Selection Using Full Validation Set =====", 'blue')
-        full_validation_dataset = {'inputs': validate_dataset['inputs'], 'infos': validate_dataset['infos']}
-        best_beams, final_val_scores = self.select(
-            candidates=beams, validate_guide=validate_guide,
-            validation_mini_dataset=full_validation_dataset, beam_width=1, # Select only the best
-            num_threads=num_threads, min_score=self.min_score, return_scores=True
-        )
+        try:
+            full_validation_dataset = {'inputs': validate_dataset['inputs'], 'infos': validate_dataset['infos']}
+            best_beams, final_val_scores = self.select(
+                candidates=beams, validate_guide=validate_guide,
+                validation_mini_dataset=full_validation_dataset, beam_width=1, # Select only the best
+                num_threads=num_threads, min_score=self.min_score, return_scores=True
+            )
 
-        final_validation_score = final_val_scores[0] if final_val_scores else -np.inf
-        best_params = best_beams[0] if best_beams else original_params # Fallback to original if empty
+            final_validation_score = final_val_scores[0] if final_val_scores else -np.inf
+            best_params = best_beams[0] if best_beams else original_params # Fallback to original if empty
+        except Exception as e:
+            print_color(f"Error during final selection: {str(e)}. Using first available beam as fallback.", 'red')
+            # Use the first beam as fallback
+            best_params = beams[0] if beams else original_params
+            final_validation_score = -np.inf
 
         # Log final validation score
         final_step = max_depth + 1
@@ -676,16 +744,20 @@ class BeamsearchHistoryAlgorithm(BeamsearchAlgorithm):
         # Final evaluation on test set
         final_test_score = None
         if test_dataset is not None:
-            final_test_scores_eval = evaluate(
-                self.agent, guide, test_dataset['inputs'], test_dataset['infos'],
-                min_score=self.min_score, num_threads=num_threads,
-                description="Evaluating best beam on test set"
-            )
-            final_test_score = np.mean(final_test_scores_eval) if all([s is not None for s in final_test_scores_eval]) else -np.inf
-            print_color(f"BEST BEAM - Test score: {final_test_score:.4f}", 'green')
+            try:
+                final_test_scores_eval = evaluate(
+                    self.agent, guide, test_dataset['inputs'], test_dataset['infos'],
+                    min_score=self.min_score, num_threads=num_threads,
+                    description="Evaluating best beam on test set"
+                )
+                final_test_score = np.mean(final_test_scores_eval) if all([s is not None for s in final_test_scores_eval]) else -np.inf
+                print_color(f"BEST BEAM - Test score: {final_test_score:.4f}", 'green')
 
-            # Log final test score
-            self.logger.log('Final test score', final_test_score, final_step, color='green')
+                # Log final test score
+                self.logger.log('Final test score', final_test_score, final_step, color='green')
+            except Exception as e:
+                print_color(f"Error during final test evaluation: {str(e)}. Setting test score to -inf.", 'red')
+                final_test_score = -np.inf
 
         # Save agent if configured
         if kwargs.get('save_frequency', None) is not None and kwargs['save_frequency'] > 0:
