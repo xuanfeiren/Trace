@@ -99,7 +99,7 @@ class UCBSearchAlgorithm(MinibatchAlgorithm):
 
         self.optimizer.update(original_params) 
 
-        avg_score = np.mean(eval_scores) if eval_scores and all(s is not None for s in eval_scores) else -np.inf
+        avg_score = np.mean(eval_scores) if eval_scores and all(s is not None for s in eval_scores) else 0
         eval_count = len(eval_xs) 
         
         return float(avg_score), eval_count
@@ -123,7 +123,27 @@ class UCBSearchAlgorithm(MinibatchAlgorithm):
                            math.sqrt(math.log(total_tracked_evaluations) / candidate_buffer_entry['eval_count'])
         
         return mean_score + exploration_term
-
+    
+    def _calculate_lcb(self, candidate_buffer_entry: Dict, total_tracked_evaluations: int) -> float:
+        """Calculates Lower Confidence Bound for a candidate in the buffer."""
+        if candidate_buffer_entry['eval_count'] == 0:
+            return float('-inf')  # Unvisited states get lowest bound
+        
+        mean_score = candidate_buffer_entry['score_sum'] / candidate_buffer_entry['eval_count']
+        
+        # Add 1 to total_tracked_evaluations to prevent log(0) if it's the first evaluation overall
+        # and to ensure log argument is > 0.
+        # Add 1 to eval_count in denominator as well to ensure it's robust if eval_count is small.
+        if total_tracked_evaluations == 0: # Should not happen if we init with one eval
+             total_tracked_evaluations = 1
+        
+        # LCB exploration term: ucb_exploration_factor scales the confidence interval
+        # Higher factor = more exploration, lower factor = more exploitation
+        exploration_term = self.ucb_exploration_factor * \
+                           math.sqrt(math.log(total_tracked_evaluations) / candidate_buffer_entry['eval_count'])
+        
+        return mean_score - exploration_term
+            
     def _update_buffer_ucb_scores(self):
         """Recalculates and updates UCB scores for all candidates in the buffer."""
         if not self.buffer:
@@ -131,6 +151,138 @@ class UCBSearchAlgorithm(MinibatchAlgorithm):
         
         for candidate_entry in self.buffer:
             candidate_entry['ucb_score'] = self._calculate_ucb(candidate_entry, self._total_evaluations_tracker)
+
+    def print_intervals(self, buffer):
+        """Print confidence intervals for debugging in the form of open intervals (LCB, UCB)"""
+        print_color("Confidence intervals for all candidates:", 'cyan')
+        for i, candidate_entry in enumerate(buffer):
+            lcb = self._calculate_lcb(candidate_entry, self._total_evaluations_tracker)
+            ucb = candidate_entry['ucb_score']
+            mean_score = candidate_entry['score_sum'] / (candidate_entry['eval_count'] or 1)
+            eval_count = candidate_entry['eval_count']
+            
+            # Format as open interval (LCB, UCB) with mean score and evaluation count
+            interval_str = f"Action {i+1}: ({lcb:.4f}, {ucb:.4f}) [mean: {mean_score:.4f}, n: {eval_count}]"
+            print_color(interval_str, 'cyan')
+
+    def _process_single_candidate(self, 
+                                 action_candidate_a: Dict,
+                                 guide,
+                                 train_dataset: Dict[str, List[Any]],
+                                 validation_dataset: Dict[str, List[Any]],
+                                 train_batch_size: int,
+                                 evaluation_batch_size: int,
+                                 num_threads: Optional[int],
+                                 iteration: int) -> Tuple[bool, float, float, int]:
+        """
+        Process a single candidate: generate a_prime, evaluate both a and a_prime,
+        update stats for 'a', and add 'a_prime' to buffer.
+        
+        Returns:
+            Tuple of (success, a_prime_score, score_for_a_on_train_batch, samples_used)
+        """
+        # 2. Load parameters of 'a' into the agent for the optimizer update step
+        self.optimizer.update(action_candidate_a['params'])
+
+        # 3. Draw minibatch from the training set, do update from 'a' to get 'a_prime'
+        train_xs, train_infos = self._sample_minibatch(train_dataset, train_batch_size)
+        if not train_xs:
+            print_color(f"Iter {iteration}: Training minibatch empty for candidate, skipping.", 'yellow')
+            return False, -np.inf, -np.inf, 0
+
+        # Perform forward pass and get feedback for agent parameters 'a'
+        use_asyncio = self._use_asyncio(num_threads)
+        if use_asyncio:
+            outputs_for_a = async_run([self.forward]*len(train_xs),
+                               [(self.agent, x, guide, info) for x, info in zip(train_xs, train_infos)],
+                               max_workers=num_threads,
+                               description=f"Iter {iteration}: Forward pass for action 'a'")
+        else:
+            outputs_for_a = [self.forward(self.agent, x, guide, info) for x, info in zip(train_xs, train_infos)]
+
+        scores_from_train, targets_from_train, feedbacks_from_train = [], [], []
+        for target, score, feedback in outputs_for_a:
+            scores_from_train.append(score)
+            targets_from_train.append(target)
+            feedbacks_from_train.append(feedback)
+        
+        if not scores_from_train:
+            print_color(f"Iter {iteration}: No outputs from forward pass for candidate. Skipping.", 'yellow')
+            return False, -np.inf, -np.inf, 0
+
+        target_for_a = batchify(*targets_from_train)
+        feedback_for_a = batchify(*feedbacks_from_train).data
+        score_for_a_on_train_batch = np.mean([s for s in scores_from_train if s is not None]) if any(s is not None for s in scores_from_train) else -np.inf
+
+        self.optimizer.zero_feedback()
+        self.optimizer.backward(target_for_a, feedback_for_a)
+
+        try:
+            a_prime_params_dict = self.optimizer.step(bypassing=True, verbose=False) 
+            if not isinstance(a_prime_params_dict, dict) or not a_prime_params_dict:
+                print_color(f"Iter {iteration}: Optimizer.step did not return valid params. Using current agent params.", 'yellow')
+                a_prime_params_dict = {p: copy.deepcopy(p.data) for p in self.optimizer.parameters}
+            self.total_proposals += 1
+        except Exception as e:
+            print_color(f"Iter {iteration}: Error during optimizer.step: {e}. Skipping.", 'red')
+            return False, -np.inf, -np.inf, 0
+        
+        # 4. Evaluate 'a' and 'a_prime' on samples of validation set in parallel
+        if use_asyncio:
+            evaluation_results = async_run(
+                [self._evaluate_candidate, self._evaluate_candidate],
+                [
+                    (action_candidate_a['params'], validation_dataset, guide, evaluation_batch_size, num_threads),
+                    (a_prime_params_dict, validation_dataset, guide, evaluation_batch_size, num_threads)
+                ],
+                max_workers=2,
+                description=f"Iter {iteration}: Parallel evaluation of 'a' and 'a_prime'"
+            )
+            (a_score, a_evals), (a_prime_score, a_prime_evals) = evaluation_results
+        else:
+            a_score, a_evals = self._evaluate_candidate(
+                action_candidate_a['params'], validation_dataset, guide, evaluation_batch_size, num_threads
+            )
+            a_prime_score, a_prime_evals = self._evaluate_candidate(
+                a_prime_params_dict, validation_dataset, guide, evaluation_batch_size, num_threads
+            )
+        
+        # 5. Update statistics for the original candidate 'a' 
+        if score_for_a_on_train_batch > -np.inf:
+            action_candidate_a['score_sum'] += score_for_a_on_train_batch * len(train_xs)
+            action_candidate_a['eval_count'] += len(train_xs)
+            self._total_evaluations_tracker += len(train_xs)
+        
+        action_candidate_a['score_sum'] += a_score * a_evals
+        action_candidate_a['eval_count'] += a_evals
+        
+        # 6. Add 'a_prime' to the buffer (with eviction logic if needed)
+        if a_prime_score > -np.inf and a_prime_evals > 0:
+            new_candidate_entry = {
+                'params': a_prime_params_dict,
+                'score_sum': a_prime_score * a_prime_evals,
+                'eval_count': a_prime_evals,
+                'ucb_score': None,  # Will be updated later
+                'iteration_created': iteration
+            }
+            
+            # Eviction logic before adding if buffer is at max capacity
+            if len(self.buffer) >= self.max_buffer_size:
+                self._update_buffer_ucb_scores()  # Ensure UCBs are current before eviction
+                candidate_to_evict = min(self.buffer, key=lambda c: c['ucb_score'])
+                self.buffer.remove(candidate_to_evict)
+                print_color(f"Iter {iteration}: Buffer full. Evicted candidate (UCB: {candidate_to_evict['ucb_score']:.4f})", 'magenta')
+            
+            self.buffer.append(new_candidate_entry)
+            print_color(f"Iter {iteration}: Added new candidate to buffer (score: {a_prime_score:.4f})", 'magenta')
+        else:
+            print_color(f"Iter {iteration}: New candidate a_prime had invalid score/evals, not added to buffer.", 'yellow')
+
+        # Update tracking
+        self._total_evaluations_tracker += a_evals + a_prime_evals
+        samples_used = 2 * evaluation_batch_size + train_batch_size
+        
+        return True, a_prime_score, score_for_a_on_train_batch, samples_used
 
     def train(self,
               guide,  # Guide for train_dataset (feedback generation AND evaluation)
@@ -148,6 +300,7 @@ class UCBSearchAlgorithm(MinibatchAlgorithm):
               min_score_for_agent_update: Optional[float] = None, # Renamed from min_score to avoid conflict with evaluate's min_score
               verbose: Union[bool, str] = False,
               num_threads: Optional[int] = None,
+              print_confidence_interval: bool = True,
               **kwargs
               ) -> Tuple[Dict[str, Any], float]: # Returns metrics and best score
         """
@@ -205,104 +358,33 @@ class UCBSearchAlgorithm(MinibatchAlgorithm):
 
             # 1. Pick the candidate 'a' with the highest UCB from the buffer
             self._update_buffer_ucb_scores() # Ensure UCB scores are fresh
+                
             action_candidate_a = self.select(self.buffer)
-            
+            if print_confidence_interval:
+                self.print_intervals(self.buffer)
             # Log selected action UCB score
             self.logger.log('Selected action UCB', action_candidate_a['ucb_score'], iteration, color='magenta')
             self.logger.log('Selected action mean score', action_candidate_a['score_sum']/(action_candidate_a['eval_count'] or 1), iteration, color='cyan')
             
             print_color(f"Iter {iteration}/{num_search_iterations}: ", 'blue')
             
-
-            # 2. Load parameters of 'a' into the agent for the optimizer update step
-            self.optimizer.update(action_candidate_a['params'])
-
-            # 3. Draw minibatch from the training set, do update from 'a' to get 'a_prime'
-            train_xs, train_infos = self._sample_minibatch(train_dataset, train_batch_size)
-            if not train_xs:
-                print_color(f"Iter {iteration}: Training minibatch empty, skipping optimizer step.", 'yellow')
-                continue 
-
-            # Perform forward pass and get feedback for agent parameters 'a'
-            outputs_for_a = []
-            use_asyncio = self._use_asyncio(num_threads)
-            if use_asyncio:
-                outputs_for_a = async_run([self.forward]*len(train_xs),
-                                   [(self.agent, x, guide, info) for x, info in zip(train_xs, train_infos)],
-                                   max_workers=num_threads,
-                                   description=f"Iter {iteration}: Forward pass for action 'a' ")
-            else:
-                outputs_for_a = [self.forward(self.agent, x, guide, info) for x, info in zip(train_xs, train_infos)]
-
-            scores_from_train, targets_from_train, feedbacks_from_train = [], [], []
-            for target, score, feedback in outputs_for_a:
-                scores_from_train.append(score)
-                targets_from_train.append(target)
-                feedbacks_from_train.append(feedback)
-            
-            if not scores_from_train: # Should not happen if train_xs was not empty
-                print_color(f"Iter {iteration}: No outputs from forward pass for candidate 'a'. Skipping.", 'yellow')
-                continue
-
-            target_for_a = batchify(*targets_from_train)
-            feedback_for_a = batchify(*feedbacks_from_train).data
-            score_for_a_on_train_batch = np.mean([s for s in scores_from_train if s is not None]) if any(s is not None for s in scores_from_train) else -np.inf
-
-            self.optimizer.zero_feedback()
-            self.optimizer.backward(target_for_a, feedback_for_a) # Grads for 'a' are now in optimizer
-
-            try:
-                a_prime_params_dict = self.optimizer.step(bypassing=True, verbose='output') 
-                if not isinstance(a_prime_params_dict, dict) or not a_prime_params_dict:
-                    print_color(f"Iter {iteration}: Optimizer.step did not return a valid param dict for a_prime. Using current agent params as a_prime.", 'yellow')
-                    # Fallback: if step modified agent in-place and didn't return dict, current agent state is a_prime
-                    a_prime_params_dict = {p: copy.deepcopy(p.data) for p in self.optimizer.parameters}
-
-            except Exception as e:
-                print_color(f"Iter {iteration}: Error during optimizer.step for a_prime: {e}. Skipping candidate generation.", 'red')
-                continue
-            self.total_proposals += 1
-            # 4. Evaluate 'a_prime' on samples of validation set
-            a_prime_score, a_prime_evals = self._evaluate_candidate(
-                a_prime_params_dict, validation_dataset, guide, evaluation_batch_size, num_threads # Use validation_dataset and guide
+            # Process the selected candidate
+            success, a_prime_score, score_for_a_on_train_batch, samples_used = self._process_single_candidate(
+                action_candidate_a, guide, train_dataset, validation_dataset,
+                train_batch_size, evaluation_batch_size, num_threads, iteration
             )
-            self._total_evaluations_tracker += a_prime_evals
-            total_samples += evaluation_batch_size + train_batch_size # train_batch_size is used in the forward process, evaluation_batch_size is used in the evaluation process
-            metrics['new_candidate_scores'].append(a_prime_score)
             
+            if not success:  # Error occurred in processing
+                continue
+                
+            total_samples += samples_used
+            metrics['new_candidate_scores'].append(a_prime_score)
+
             # Log new candidate performance
             self.logger.log('New candidate score', a_prime_score, iteration, color='green')
             self.logger.log('Training batch score', score_for_a_on_train_batch, iteration, color='yellow')
             
-            print_color(f"Iter {iteration}: New candidate a_prime generated. Validation Score: {a_prime_score:.4f}, Evals: {a_prime_evals}", 'cyan')
-
-            # 5. Update the stats of 'a' (action_candidate_a) based on the training batch experience
-            if score_for_a_on_train_batch > -np.inf:
-                action_candidate_a['score_sum'] += score_for_a_on_train_batch * len(train_xs) # score is often an average
-                action_candidate_a['eval_count'] += len(train_xs) # or 1 if score is total
-                self._total_evaluations_tracker += len(train_xs) # training batch also counts as evaluations for UCB total T
-
-            # 6. Add 'a_prime' (with its validation stats) to the buffer
-            if a_prime_score > -np.inf and a_prime_evals > 0:
-                new_candidate_entry = {
-                    'params': a_prime_params_dict, 
-                    'score_sum': a_prime_score * a_prime_evals, # Store sum
-                    'eval_count': a_prime_evals,
-                    'ucb_score': None, # avoid accidental reads before it's initializad
-                    'iteration_created': iteration
-                }
-                
-                # Eviction logic before adding if buffer is at max_len
-                if len(self.buffer) == self.max_buffer_size:
-                    self._update_buffer_ucb_scores() # Ensure UCBs are current before eviction
-                    candidate_to_evict = min(self.buffer, key=lambda c: c['ucb_score'])
-                    self.buffer.remove(candidate_to_evict)
-                    print_color(f"Iter {iteration}: Buffer full. Evicted a candidate (UCB: {candidate_to_evict['ucb_score']:.4f})", 'magenta')
-                
-                self.buffer.append(new_candidate_entry)
-                print_color(f"Iter {iteration}: Added new candidate to buffer.", 'magenta')
-            else:
-                print_color(f"Iter {iteration}: New candidate a_prime had invalid score/evals, not added to buffer.", 'yellow')
+            print_color(f"Iter {iteration}: New candidate a_prime generated. Validation Score: {a_prime_score:.4f}", 'cyan')
 
             # Update all UCB scores in the buffer after potential additions/removals/stat updates
             self._update_buffer_ucb_scores()
@@ -322,7 +404,7 @@ class UCBSearchAlgorithm(MinibatchAlgorithm):
                     "buffer_size": len(self.buffer),
                     "buffer_avg_score": metrics['buffer_avg_score'][-1],
                     "buffer_avg_evals": metrics['buffer_avg_evals'][-1],
-                    "total_evaluations_tracker": self._total_evaluations_tracker,
+                    "total_evaluations_tracker": self._total_evaluations_tracker, # used in calculating ucb scores
                     "total_samples": total_samples # Add new metric
                 }
                 
@@ -395,3 +477,219 @@ class UCBSearchAlgorithm(MinibatchAlgorithm):
     def select(self, buffer):
         '''Could be subclassed to implement different selection strategies'''
         return max(buffer, key=lambda c: c['ucb_score'])
+
+
+class UCBSearchParallelAlgorithm(UCBSearchAlgorithm):
+    """
+    Parallel UCB Search Algorithm.
+    
+    Instead of selecting one candidate with highest UCB score, selects top-k candidates
+    and processes them in parallel to generate k new candidates per iteration.
+    """
+
+    def __init__(self,
+                 agent: trace.Module,
+                 optimizer,
+                 max_buffer_size: int = 10,
+                 ucb_exploration_factor: float = 1.0,
+                 parallel_k: int = 2,  # Number of top candidates to process in parallel
+                 logger=None,
+                 num_threads: int = None,
+                 *args,
+                 **kwargs):
+        super().__init__(agent, optimizer, max_buffer_size, ucb_exploration_factor, 
+                         logger, num_threads, *args, **kwargs)
+        self.parallel_k = parallel_k
+
+    def select_top_k(self, buffer, k):
+        """Select top k candidates with highest UCB scores"""
+        if len(buffer) <= k:
+            return buffer.copy()
+        
+        # Sort by UCB score and return top k
+        sorted_candidates = sorted(buffer, key=lambda c: c['ucb_score'], reverse=True)
+        return sorted_candidates[:k]
+
+    def train(self,
+              guide,
+              train_dataset: Dict[str, List[Any]],
+              *,
+              validation_dataset: Optional[Dict[str, List[Any]]] = None,
+              test_dataset: Optional[Dict[str, List[Any]]] = None,
+              num_search_iterations: int = 100,
+              train_batch_size: int = 2,
+              evaluation_batch_size: int = 20,
+              eval_frequency: int = 1,
+              log_frequency: Optional[int] = None,
+              save_frequency: Optional[int] = None,
+              save_path: str = "checkpoints/ucb_parallel_agent.pkl",
+              min_score_for_agent_update: Optional[float] = None,
+              verbose: Union[bool, str] = False,
+              num_threads: Optional[int] = None,
+              print_confidence_interval: bool = True,
+              **kwargs
+              ) -> Tuple[Dict[str, Any], float]:
+        """
+        Main training loop for Parallel UCB Search Algorithm.
+        """
+        # Default validation_dataset to train_dataset if not provided
+        if validation_dataset is None:
+            validation_dataset = train_dataset
+        if test_dataset is None:
+            test_dataset = train_dataset
+
+        num_threads = num_threads or self.num_threads
+        log_frequency = log_frequency or eval_frequency
+        self.min_score = min_score_for_agent_update
+        total_samples = 0
+        self.total_proposals = 0
+        
+        # Metrics tracking
+        metrics = {
+            'best_candidate_scores': [],
+            'selected_actions_ucb': [],  # UCB scores of selected top-k actions
+            'new_candidate_scores': [],  # Scores of all new candidates
+            'buffer_avg_score': [],
+            'buffer_avg_evals': [],
+            'parallel_k_used': [],  # Track how many candidates were actually processed
+        }
+
+        # Initialize with first candidate (same as parent)
+        print_color("Evaluating initial parameters using validation_dataset samples...", 'cyan')
+        initial_params_dict = {p: copy.deepcopy(p.data) for p in self.optimizer.parameters}
+        initial_score, initial_evals = self._evaluate_candidate(
+            initial_params_dict, validation_dataset, guide, evaluation_batch_size, num_threads
+        )
+        self._total_evaluations_tracker += initial_evals 
+        total_samples += initial_evals
+
+        # Log initial evaluation
+        self.logger.log('Initial UCB score', initial_score, 0, color='blue')
+        self.logger.log('Total samples', total_samples, 0, color='cyan')
+
+        initial_candidate_entry = {
+            'params': initial_params_dict,
+            'score_sum': initial_score * initial_evals if initial_score > -np.inf else 0,
+            'eval_count': initial_evals,
+            'ucb_score': None,
+            'iteration_created': 0
+        }
+        self.buffer.append(initial_candidate_entry)
+        self._update_buffer_ucb_scores()
+        print_color(f"Initial candidate: Score {initial_score:.4f}, Evals {initial_evals}", 'yellow')
+
+        # Main search loop
+        for iteration in range(1, num_search_iterations + 1):
+            if not self.buffer:
+                print_color("Buffer is empty, stopping search.", 'red')
+                break
+
+            # 1. Select top-k candidates with highest UCB scores
+            self._update_buffer_ucb_scores()
+            top_k_candidates = self.select_top_k(self.buffer, self.parallel_k)
+            
+            if print_confidence_interval:
+                self.print_intervals(self.buffer)
+            
+            print_color(f"Iter {iteration}/{num_search_iterations}: Processing {len(top_k_candidates)} candidates in parallel", 'blue')
+            
+            # Log selected actions UCB scores
+            selected_ucb_scores = [c['ucb_score'] for c in top_k_candidates]
+            metrics['selected_actions_ucb'].append(selected_ucb_scores)
+            avg_selected_ucb = np.mean(selected_ucb_scores)
+            self.logger.log('Average selected UCB', avg_selected_ucb, iteration, color='magenta')
+
+            # 2. Process all top-k candidates sequentially
+            candidate_results = []
+            for candidate in top_k_candidates:
+                result = self._process_single_candidate(
+                    candidate, guide, train_dataset, validation_dataset,
+                    train_batch_size, evaluation_batch_size, num_threads, iteration
+                )
+                candidate_results.append(result)
+
+            # 3. Process results and update statistics
+            iteration_new_scores = []
+            
+            for i, (candidate, result) in enumerate(zip(top_k_candidates, candidate_results)):
+                success, a_prime_score, score_for_a_on_train_batch, samples_used = result
+                
+                if not success:  # Error occurred
+                    print_color(f"Iter {iteration}: Candidate {i+1} processing failed, skipping.", 'yellow')
+                    continue                
+                # Track new candidate score
+                iteration_new_scores.append(a_prime_score)
+                
+                # Update tracking
+                total_samples += samples_used
+
+            metrics['new_candidate_scores'].extend(iteration_new_scores)
+            
+            # Log iteration performance
+            if iteration_new_scores:
+                avg_new_score = np.mean(iteration_new_scores)
+                max_new_score = max(iteration_new_scores)
+                self.logger.log('Average new candidate score', avg_new_score, iteration, color='green')
+                self.logger.log('Max new candidate score', max_new_score, iteration, color='green')
+                print_color(f"Iter {iteration}: Generated {len(iteration_new_scores)} new candidates. Avg score: {avg_new_score:.4f}, Max: {max_new_score:.4f}", 'cyan')
+
+            # Update UCB scores and track metrics
+            self._update_buffer_ucb_scores()
+            
+            if self.buffer:
+                best_in_buffer = max(self.buffer, key=lambda c: c['score_sum']/(c['eval_count'] or 1))
+                best_score = best_in_buffer['score_sum']/(best_in_buffer['eval_count'] or 1)
+                metrics['best_candidate_scores'].append(best_score)
+                metrics['buffer_avg_score'].append(np.mean([c['score_sum']/(c['eval_count'] or 1) for c in self.buffer if c['eval_count'] > 0]))
+                metrics['buffer_avg_evals'].append(np.mean([c['eval_count'] for c in self.buffer]))
+
+                # Logging
+                if iteration % log_frequency == 0:
+                    self.logger.log('Best candidate score', best_score, iteration, color='green')
+                    self.logger.log('Buffer size', len(self.buffer), iteration, color='blue')
+                    self.logger.log('Buffer average score', metrics['buffer_avg_score'][-1], iteration, color='cyan')
+                    self.logger.log('Total samples', total_samples, iteration, color='yellow')
+                    self.logger.log('Total proposals', self.total_proposals, iteration, color='red')
+                    print_color(f"Log @ Iter {iteration}: Best score: {best_score:.4f}, Buffer size: {len(self.buffer)}, Total samples: {total_samples}", 'green')
+
+            # Test evaluation (same as parent)
+            if test_dataset is not None and iteration % eval_frequency == 0:
+                current_params = {p: copy.deepcopy(p.data) for p in self.optimizer.parameters}
+                best_candidate = max(self.buffer, key=lambda c: c['score_sum'] / (c['eval_count'] or 1E-9))
+                self.optimizer.update(best_candidate['params'])
+                
+                test_score = self.evaluate(self.agent, guide, test_dataset['inputs'], test_dataset['infos'],
+                              min_score=self.min_score, num_threads=num_threads,
+                              description=f"Evaluating best candidate (iteration {iteration})")
+                
+                self.optimizer.update(current_params)
+                self.logger.log('Test score', test_score, iteration, color='green')
+                
+            # Save agent (same as parent)
+            if save_frequency is not None and iteration % save_frequency == 0:
+                best_overall_candidate = max(self.buffer, key=lambda c: c['score_sum'] / (c['eval_count'] or 1E-9))
+                self.optimizer.update(best_overall_candidate['params'])
+                self.save_agent(save_path, iteration)
+                print_color(f"Iter {iteration}: Saved agent based on best candidate in buffer.", 'green')
+
+        # End of search (same as parent)
+        print_color("Parallel UCB search finished.", 'blue')
+        
+        final_iteration = num_search_iterations
+        self.logger.log('Parallel UCB search completed', final_iteration, final_iteration, color='blue')
+        self.logger.log('Final total samples', total_samples, final_iteration, color='magenta')
+        
+        if not self.buffer:
+            print_color("Buffer is empty at the end of search. No best candidate found.", 'red')
+            return metrics, -np.inf
+            
+        final_best_candidate = max(self.buffer, key=lambda c: c['score_sum'] / (c['eval_count'] or 1E-9))
+        final_best_score = final_best_candidate['score_sum'] / (final_best_candidate['eval_count'] or 1E-9)
+        
+        self.logger.log('Final best score', final_best_score, final_iteration, color='green')
+        print_color(f"Final best candidate: Mean Score {final_best_score:.4f}, Evals {final_best_candidate['eval_count']}", 'green')
+
+        # Load best parameters into the agent
+        self.optimizer.update(final_best_candidate['params'])
+
+        return metrics, float(final_best_score)
