@@ -7,7 +7,12 @@ from opto import trace
 from opto.trainer.utils import async_run # Assuming print_color is in utils
 from opto.optimizers.utils import print_color
 from opto.trainer.algorithms.basic_algorithms import MinibatchAlgorithm, evaluate, batchify # evaluate and batchify might be useful
-
+import json # For LLM output parsing
+import random # Added for alpha probability
+from opto.utils.llm import LLM # For the selector LLM
+from opto.trace.nodes import ParameterNode
+import warnings
+from black import format_str, FileMode
 class UCBSearchAlgorithm(MinibatchAlgorithm):
     """
     UCB Search Algorithm.
