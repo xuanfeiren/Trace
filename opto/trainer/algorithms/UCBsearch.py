@@ -8,11 +8,48 @@ from opto.trainer.utils import async_run # Assuming print_color is in utils
 from opto.optimizers.utils import print_color
 from opto.trainer.algorithms.basic_algorithms import MinibatchAlgorithm, evaluate, batchify # evaluate and batchify might be useful
 import json # For LLM output parsing
+import re # For smart quote replacement
 import random # Added for alpha probability
 from opto.utils.llm import LLM # For the selector LLM
 from opto.trace.nodes import ParameterNode
 import warnings
 from black import format_str, FileMode
+def smart_quote_replacement(text: str) -> str:
+    """
+    Intelligently replace single quotes with double quotes for JSON parsing.
+    Handles the specific case where we have mixed quotes like:
+    {'key': "value with 'nested' quotes"}
+    """
+    # For the specific pattern we're seeing, let's handle it step by step:
+    
+    # Step 1: Replace single quotes around keys
+    # Pattern: 'key': -> "key":
+    text = re.sub(r"'([^']*?)'(\s*:)", r'"\1"\2', text)
+    
+    # Step 2: For values that start with double quotes and contain single quotes,
+    # we need to escape the internal single quotes or convert them properly
+    
+    # Let's try a more direct approach for the problematic case:
+    # Find patterns like: "text with 'word' more text"
+    # We need to escape the internal single quotes
+    def escape_internal_quotes(match):
+        content = match.group(1)
+        # Replace single quotes inside with escaped single quotes
+        # Actually, for JSON we can leave single quotes as-is inside double quotes
+        return f'"{content}"'
+    
+    # Replace the pattern: : "content with 'quotes'" -> : "content with 'quotes'"
+    # (This should already be valid JSON)
+    
+    # The main issue is with the outer structure, let's fix that:
+    # If the string starts/ends with single quotes around the whole thing
+    text = text.strip()
+    if text.startswith("{'") and text.endswith("'}"):
+        # Replace the outer single quotes but preserve the content
+        # This is the pattern: {'str0': "content", 'str1': "more content"}
+        text = '{"' + text[2:-2] + '"}'
+    
+    return text
 class UCBSearchAlgorithm(MinibatchAlgorithm):
     """
     UCB Search Algorithm.
