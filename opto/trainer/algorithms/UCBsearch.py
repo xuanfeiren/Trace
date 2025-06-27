@@ -761,8 +761,8 @@ class HybridUCB_LLM(MinibatchAlgorithm):
                  agent: trace.Module,
                  optimizer,
                  max_buffer_size: int = 10,
-                 ucb_exploration_factor: float = 1.0,
-                 alpha: float = 0.7,
+                 ucb_exploration_factor: float = 0.3,
+                 alpha: float = 0.3,
                  llm_model: str = None,
                  logger=None,
                  num_threads: int = None,
@@ -859,7 +859,27 @@ class HybridUCB_LLM(MinibatchAlgorithm):
                            math.sqrt(math.log(total_tracked_evaluations + 1e-9) / candidate_buffer_entry['eval_count'])
         
         return mean_score + exploration_term
-
+    
+    def _calculate_lcb(self, candidate_buffer_entry: Dict, total_tracked_evaluations: int) -> float:
+        """Calculates Lower Confidence Bound for a candidate in the buffer."""
+        if candidate_buffer_entry['eval_count'] == 0:
+            return float('-inf')  # Unvisited states get lowest bound
+        
+        mean_score = candidate_buffer_entry['score_sum'] / candidate_buffer_entry['eval_count']
+        
+        # Add 1 to total_tracked_evaluations to prevent log(0) if it's the first evaluation overall
+        # and to ensure log argument is > 0.
+        # Add 1 to eval_count in denominator as well to ensure it's robust if eval_count is small.
+        if total_tracked_evaluations == 0: # Should not happen if we init with one eval
+             total_tracked_evaluations = 1
+        
+        # LCB exploration term: ucb_exploration_factor scales the confidence interval
+        # Higher factor = more exploration, lower factor = more exploitation
+        exploration_term = self.ucb_exploration_factor * \
+                           math.sqrt(math.log(total_tracked_evaluations) / candidate_buffer_entry['eval_count'])
+        
+        return mean_score - exploration_term
+    
     def _update_buffer_ucb_scores(self):
         """Recalculates and updates UCB scores for all candidates in the buffer."""
         if not self.buffer:
@@ -867,6 +887,19 @@ class HybridUCB_LLM(MinibatchAlgorithm):
         
         for candidate_entry in self.buffer:
             candidate_entry['ucb_score'] = self._calculate_ucb(candidate_entry, self._total_evaluations_tracker)
+    
+    def print_intervals(self, buffer):
+        """Print confidence intervals for debugging in the form of open intervals (LCB, UCB)"""
+        print_color("Confidence intervals for all candidates:", 'cyan')
+        for i, candidate_entry in enumerate(buffer):
+            lcb = self._calculate_lcb(candidate_entry, self._total_evaluations_tracker)
+            ucb = candidate_entry['ucb_score']
+            mean_score = candidate_entry['score_sum'] / (candidate_entry['eval_count'] or 1)
+            eval_count = candidate_entry['eval_count']
+            
+            # Format as open interval (LCB, UCB) with mean score and evaluation count
+            interval_str = f"Action {i+1}: ({lcb:.4f}, {ucb:.4f}) [mean: {mean_score:.4f}, n: {eval_count}]"
+            print_color(interval_str, 'cyan')
 
     def _llm_generate_candidate(self) -> Optional[Dict[trace.nodes.ParameterNode, str]]:
         """
@@ -922,7 +955,7 @@ class HybridUCB_LLM(MinibatchAlgorithm):
             print_color("LLM response was empty after cleaning markdown/whitespace.", "red")
             return None
 
-        print_color(f"Cleaned LLM response: '{cleaned_llm_response_str}'", "magenta")
+        # print_color(f"Cleaned LLM response: '{cleaned_llm_response_str}'", "magenta")
         
         # Fix common JSON formatting issues from LLM responses
         try:
@@ -981,8 +1014,6 @@ class HybridUCB_LLM(MinibatchAlgorithm):
               num_search_iterations: int = 100,
               train_batch_size: int = 5, 
               evaluation_batch_size: int = 5,
-              ensure_improvement: bool = False,
-              improvement_threshold: float = 0.,
               eval_frequency: int = 1, 
               log_frequency: Optional[int] = None,
               save_frequency: Optional[int] = None,
@@ -990,6 +1021,7 @@ class HybridUCB_LLM(MinibatchAlgorithm):
               min_score_for_agent_update: Optional[float] = None,
               verbose: Union[bool, str] = False,
               num_threads: Optional[int] = None,
+              print_confidence_interval: bool = True,
               **kwargs
               ) -> Tuple[Dict[str, Any], float]:
         
@@ -1047,7 +1079,8 @@ class HybridUCB_LLM(MinibatchAlgorithm):
                 if not self.buffer:
                     print_color(f"Iter {iteration} (UCB Path): Buffer empty, cannot select action. Skipping.", "red")
                     continue
-
+                if print_confidence_interval:
+                    self.print_intervals(self.buffer)
                 action_candidate_a = self.select(self.buffer)
                 
                 selected_mean_score = action_candidate_a['score_sum'] / action_candidate_a['eval_count'] if action_candidate_a['eval_count'] > 0 else -np.inf
@@ -1093,7 +1126,7 @@ class HybridUCB_LLM(MinibatchAlgorithm):
 
                 # Get a_prime by optimizer step
                 try:
-                    returned_params = self.optimizer.step(bypassing=True, verbose=(verbose if isinstance(verbose, str) else 'output')) 
+                    returned_params = self.optimizer.step(bypassing=True, verbose=False) 
                     if not isinstance(returned_params, dict) or not returned_params:
                         print_color(f"Iter {iteration} (UCB Path): Optimizer.step did not return a valid param dict for a_prime. Using current agent params.", 'yellow')
                         a_prime_params_dict = {p: copy.deepcopy(p.data) for p in self.agent.parameters()}
@@ -1303,7 +1336,7 @@ class UCBSearchFunctionApproximationAlgorithm(UCBSearchAlgorithm):
             print_color("LLM response was empty after cleaning markdown/whitespace.", "red")
             return None
 
-        print_color(f"Cleaned LLM response: '{cleaned_llm_response_str}'", "magenta")
+        # print_color(f"Cleaned LLM response: '{cleaned_llm_response_str}'", "magenta")
         
         # Fix common JSON formatting issues from LLM responses
         try:
