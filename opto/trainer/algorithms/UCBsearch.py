@@ -89,7 +89,7 @@ class UCBSearchAlgorithm(MinibatchAlgorithm):
         original_params = {p: copy.deepcopy(p.data) for p in self.optimizer.parameters}
         self.optimizer.update(params_to_eval_dict)      
 
-        eval_xs, eval_infos = self._sample_minibatch(dataset, evaluation_batch_size) # Use evaluation_batch_size
+        eval_xs, eval_infos = self._sample_minibatch(dataset, evaluation_batch_size)
         
         if not eval_xs:
             print_color("Evaluation minibatch is empty. Returning score -inf, count 0.", color='yellow')
@@ -753,6 +753,7 @@ class HybridUCB_LLM(MinibatchAlgorithm):
                  ucb_exploration_factor: float = 0.3,
                  alpha: float = 0.3,
                  llm_model: str = None,
+                 num_samples_in_prompt: int = 5,
                  logger=None,
                  num_threads: int = None,
                  *args,
@@ -761,6 +762,7 @@ class HybridUCB_LLM(MinibatchAlgorithm):
         
         self.alpha = alpha
         self.llm_model = llm_model
+        self.num_samples_in_prompt = num_samples_in_prompt
         self.llm_prompt_budget_factor = 0.5
         
         self.buffer = deque(maxlen=max_buffer_size) 
@@ -901,8 +903,25 @@ class HybridUCB_LLM(MinibatchAlgorithm):
             return None
 
         sorted_buffer = sorted(list(self.buffer), key=lambda c: c.get('ucb_score', -float('inf')), reverse=True)
-        prompt_candidates = sorted_buffer
-
+        # Include first, last, and evenly spaced middle candidates
+        if len(sorted_buffer) <= self.num_samples_in_prompt:
+            prompt_candidates = sorted_buffer
+        elif self.num_samples_in_prompt <= 2:
+            # If only 1-2 samples requested, take first and optionally last
+            prompt_candidates = sorted_buffer[:self.num_samples_in_prompt]
+        else:
+            # Take first, last, and evenly spaced middle candidates
+            prompt_candidates = [sorted_buffer[0]]  # First (highest UCB)
+            if self.num_samples_in_prompt > 2:
+                # Calculate indices for middle candidates
+                middle_count = self.num_samples_in_prompt - 2  # Exclude first and last
+                if middle_count > 0 and len(sorted_buffer) > 2:
+                    # Evenly space middle candidates between index 1 and len-2
+                    middle_indices = [int(1 + i * (len(sorted_buffer) - 2) / (middle_count + 1)) 
+                                    for i in range(1, middle_count + 1)]
+                    prompt_candidates.extend([sorted_buffer[i] for i in middle_indices])
+            prompt_candidates.append(sorted_buffer[-1])  # Last (lowest UCB)
+        
         serializable_candidate_summaries = []
         for cand_entry in prompt_candidates:
             summary = {
@@ -1043,6 +1062,8 @@ class HybridUCB_LLM(MinibatchAlgorithm):
                 a_prime_score = 0
                 a_prime_evals = 0
                 generation_method = "none"
+                if print_confidence_interval:
+                    self.print_intervals(self.buffer)
 
                 if iteration<=2 or random.random() < self.alpha: # UCB Path, for the first 2 iterations, we always use UCB because the buffer size is small, it's hard for LLM to generate good candidates
                     generation_method = "ucb"
@@ -1050,8 +1071,7 @@ class HybridUCB_LLM(MinibatchAlgorithm):
                     if not self.buffer:
                         print_color(f"Iter {iteration} (UCB Path): Buffer empty, cannot select action. Skipping.", "red")
                         continue
-                    if print_confidence_interval:
-                        self.print_intervals(self.buffer)
+                    
                     action_candidate_a = self.select(self.buffer)
                     
                     selected_mean_score = action_candidate_a['score_sum'] / action_candidate_a['eval_count'] if action_candidate_a['eval_count'] > 0 else -np.inf
@@ -1300,10 +1320,11 @@ class UCBSearchFunctionApproximationAlgorithm(UCBSearchAlgorithm):
     UCB Search Algorithm that uses LLM function approximation to select candidates.
     """
     
-    def __init__(self, llm_model, *args, **kwargs):
+    def __init__(self, llm_model,num_samples_in_prompt:int=5, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.llm_model = llm_model
         self.llm = LLM(model=self.llm_model)
+        self.num_samples_in_prompt = num_samples_in_prompt
         print_color(f"Initialized UCBSearchFunctionApproximationAlgorithm with LLM model={self.llm_model}", "cyan")
     
     def select(self, buffer): 
@@ -1329,8 +1350,25 @@ class UCBSearchFunctionApproximationAlgorithm(UCBSearchAlgorithm):
             return None
 
         sorted_buffer = sorted(list(self.buffer), key=lambda c: c.get('ucb_score', -float('inf')), reverse=True)
-        prompt_candidates = sorted_buffer
-
+        # Include first, last, and evenly spaced middle candidates
+        if len(sorted_buffer) <= self.num_samples_in_prompt:
+            prompt_candidates = sorted_buffer
+        elif self.num_samples_in_prompt <= 2:
+            # If only 1-2 samples requested, take first and optionally last
+            prompt_candidates = sorted_buffer[:self.num_samples_in_prompt]
+        else:
+            # Take first, last, and evenly spaced middle candidates
+            prompt_candidates = [sorted_buffer[0]]  # First (highest UCB)
+            if self.num_samples_in_prompt > 2:
+                # Calculate indices for middle candidates
+                middle_count = self.num_samples_in_prompt - 2  # Exclude first and last
+                if middle_count > 0 and len(sorted_buffer) > 2:
+                    # Evenly space middle candidates between index 1 and len-2
+                    middle_indices = [int(1 + i * (len(sorted_buffer) - 2) / (middle_count + 1)) 
+                                    for i in range(1, middle_count + 1)]
+                    prompt_candidates.extend([sorted_buffer[i] for i in middle_indices])
+            prompt_candidates.append(sorted_buffer[-1])  # Last (lowest UCB)
+        
         serializable_candidate_summaries = []
         for cand_entry in prompt_candidates:
             summary = {
