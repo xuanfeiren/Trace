@@ -8,7 +8,6 @@ from opto.trainer.utils import async_run # Assuming print_color is in utils
 from opto.optimizers.utils import print_color
 from opto.trainer.algorithms.basic_algorithms import MinibatchAlgorithm, evaluate, batchify # evaluate and batchify might be useful
 import json # For LLM output parsing
-import re # For smart quote replacement
 import random # Added for alpha probability
 from opto.utils.llm import LLM # For the selector LLM
 from opto.trace.nodes import ParameterNode
@@ -1076,11 +1075,11 @@ class HybridUCB_LLM(MinibatchAlgorithm):
                     
                     selected_mean_score = action_candidate_a['score_sum'] / action_candidate_a['eval_count'] if action_candidate_a['eval_count'] > 0 else -np.inf
                     print_color(f"Iter {iteration} (UCB Path): Selected action candidate (UCB: {action_candidate_a['ucb_score']:.4f}, MeanScore: {selected_mean_score:.4f} Evals: {action_candidate_a['eval_count']})", 'blue')
-                    metrics['selected_action_ucb'].append(action_candidate_a['ucb_score'])
+                    # metrics['selected_action_ucb'].append(action_candidate_a['ucb_score'])
                     
                     # Log selected action UCB score
-                    self.logger.log('Selected action UCB', action_candidate_a['ucb_score'], iteration, color='magenta')
-                    self.logger.log('Selected action mean score', selected_mean_score, iteration, color='cyan')
+                    # self.logger.log('Selected action UCB', action_candidate_a['ucb_score'], iteration, color='magenta')
+                    # self.logger.log('Selected action mean score', selected_mean_score, iteration, color='cyan')
 
                     self.optimizer.update(action_candidate_a['params'])
 
