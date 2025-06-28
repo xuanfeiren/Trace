@@ -1398,6 +1398,7 @@ class UCBSearchFunctionApproximationAlgorithm(UCBSearchAlgorithm):
 
         try:
             llm_params_raw = json.loads(cleaned_llm_response_str)
+            self.total_proposals += 1
         except json.JSONDecodeError as e:
             print_color(f"JSON parsing attempts failed: {e}", "red")
             print_color("Returning the candidate with the highest UCB score in the buffer.", "red")
