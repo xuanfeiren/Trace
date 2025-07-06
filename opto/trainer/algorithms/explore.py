@@ -456,16 +456,23 @@ class ExplorewithLLM(ExploreAlgorithm):
             self.total_proposals += 1
         except json.JSONDecodeError as e:
             print_color(f"JSON parsing attempts failed: {e}", "red")
-            print_color("Returning the candidate with the highest UCB score in the buffer.", "red")
-            return max(self.buffer, key=lambda c: c.get('ucb_score', -float('inf')))['params']
+            print_color("Returning None.", "red")
+            return None
 
         if not isinstance(llm_params_raw, dict):
             print_color(f"LLM output was not a JSON dictionary after parsing: {type(llm_params_raw)}", "red")
-            print_color("Returning the candidate with the highest UCB score in the buffer.", "red")
-            return max(self.buffer, key=lambda c: c.get('ucb_score', -float('inf')))['params']
+            print_color("Returning None.", "red")
+            return None
+        
+        try:
+            candidate_params_dict = self.construct_update_dict(llm_params_raw)
+        except Exception as e:
+            print_color(f"Error constructing update dict: {e}", "red")
+            print_color("Returning None.", "red")
+            return None
 
-        candidate_params_dict = self.construct_update_dict(llm_params_raw)
         return candidate_params_dict
+           
     
     def construct_update_dict(self, suggestion: Dict[str, Any]) -> Dict[ParameterNode, Any]:
         """Convert the suggestion in text into the right data type."""
