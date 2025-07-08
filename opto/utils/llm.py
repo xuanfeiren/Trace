@@ -239,6 +239,110 @@ _LLM_REGISTRY = {
     "CustomLLM": CustomLLM,
 }
 
+class LLMFactory:
+    """Factory for creating LLM instances with predefined profiles.
+    
+    The code comes with these built-in profiles:
+
+        llm_default = LLM(profile="default")     # gpt-4o-mini
+        llm_premium = LLM(profile="premium")     # gpt-4  
+        llm_cheap = LLM(profile="cheap")         # gpt-4o-mini
+        llm_fast = LLM(profile="fast")           # gpt-3.5-turbo-mini
+        llm_reasoning = LLM(profile="reasoning") # o1-mini
+    
+    You can override those built-in profiles:
+
+        LLMFactory.register_profile("default", "LiteLLM", model="gpt-4o", temperature=0.5)
+        LLMFactory.register_profile("premium", "LiteLLM", model="o1-preview", max_tokens=8000)
+        LLMFactory.register_profile("cheap", "LiteLLM", model="gpt-3.5-turbo", temperature=0.9)
+        LLMFactory.register_profile("fast", "LiteLLM", model="gpt-3.5-turbo", max_tokens=500)
+        LLMFactory.register_profile("reasoning", "LiteLLM", model="o1-preview")
+        
+    An Example of using Different Backends
+
+        # Register custom profiles for different use cases
+        LLMFactory.register_profile("advanced_reasoning", "LiteLLM", model="o1-preview", max_tokens=4000)
+        LLMFactory.register_profile("claude_sonnet", "LiteLLM", model="claude-3-5-sonnet-latest", temperature=0.3)
+        LLMFactory.register_profile("custom_server", "CustomLLM", model="llama-3.1-8b")
+
+        # Use in different contexts
+        reasoning_llm = LLM(profile="advanced_reasoning")  # For complex reasoning
+        claude_llm = LLM(profile="claude_sonnet")          # For Claude responses
+        local_llm = LLM(profile="custom_server")           # For local deployment
+
+        # Single LLM optimizer with custom profile
+        optimizer1 = OptoPrime(parameters, llm=LLM(profile="advanced_reasoning"))
+
+        # Multi-LLM optimizer with multiple profiles
+        optimizer2 = OptoPrimeMulti(parameters, llm_profiles=["cheap", "premium", "claude_sonnet"], generation_technique="multi_llm")
+    """
+    
+    # Default profiles for different use cases
+    _profiles = {
+        'default': {'backend': 'LiteLLM', 'params': {'model': 'gpt-4o-mini'}},
+        'premium': {'backend': 'LiteLLM', 'params': {'model': 'gpt-4'}},
+        'cheap': {'backend': 'LiteLLM', 'params': {'model': 'gpt-4o-mini'}},
+        'fast': {'backend': 'LiteLLM', 'params': {'model': 'gpt-3.5-turbo-mini'}},
+        'reasoning': {'backend': 'LiteLLM', 'params': {'model': 'o1-mini'}},
+    }
+    
+    @classmethod
+    def get_llm(cls, profile: str = 'default') -> AbstractModel:
+        """Get an LLM instance for the specified profile."""
+        if profile not in cls._profiles:
+            raise ValueError(f"Unknown profile '{profile}'. Available profiles: {list(cls._profiles.keys())}")
+        
+        config = cls._profiles[profile]
+        backend_cls = _LLM_REGISTRY[config['backend']]
+        return backend_cls(**config['params'])
+    
+    @classmethod
+    def register_profile(cls, name: str, backend: str, **params):
+        """Register a new LLM profile."""
+        cls._profiles[name] = {'backend': backend, 'params': params}
+    
+    @classmethod
+    def list_profiles(cls):
+        """List all available profiles."""
+        return list(cls._profiles.keys())
+    
+    @classmethod
+    def get_profile_info(cls, profile: str = None):
+        """Get information about a profile or all profiles."""
+        if profile:
+            return cls._profiles.get(profile)
+        return cls._profiles
+
+
+class DummyLLM(AbstractModel):
+    """A dummy LLM that does nothing. Used for testing purposes."""
+    
+    def __init__(self, 
+                 callable,
+                 reset_freq: Union[int, None] = None) -> None:
+        # self.message = message
+        self.callable = callable
+        factory = lambda: self._factory()
+        super().__init__(factory, reset_freq)
+
+    def _factory(self):
+
+        # set response.choices[0].message.content
+        # create a fake container with above format
+
+        class Message: 
+            def __init__(self, content):
+                self.content = content
+        class Choice:
+            def __init__(self, content):
+                self.message = Message(content)
+        class Response:
+            def __init__(self, content):
+                self.choices = [Choice(content)]
+
+        return lambda *args, **kwargs:  Response(self.callable(*args, **kwargs))
+
+
 class LLM:
     """
     A unified entry point for all supported LLM backends.
@@ -248,8 +352,15 @@ class LLM:
       llm = LLM()
       # or override explicitly
       llm = LLM(backend="AutoGen", config_list=my_configs)
+      # or use predefined profiles
+      llm = LLM(profile="premium")  # Use premium model
+      llm = LLM(profile="cheap")    # Use cheaper model
+      llm = LLM(profile="reasoning")    # Use reasoning/thinking model
     """
-    def __new__(cls, *args, backend: str = None, **kwargs):
+    def __new__(cls, *args, profile: str = None, backend: str = None, **kwargs):
+        # New: if profile is specified, use LLMFactory
+        if profile:
+            return LLMFactory.get_llm(profile)
         # Decide which backend to use
         name = backend or os.getenv("TRACE_DEFAULT_LLM_BACKEND", "LiteLLM")
         try:

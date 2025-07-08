@@ -1,7 +1,5 @@
-import warnings
-from opto import trace
+from typing import Optional
 from opto.trace.modules import Module
-from opto.trainer.utils import async_run
 from opto.trainer.loggers import DefaultLogger
 import os
 
@@ -28,7 +26,7 @@ class AlgorithmBase(AbstractAlgorithm):
 
     def __init__(self,
                  agent,  # trace.model
-                 num_threads: int = None,   # maximum number of threads to use for parallel execution
+                 num_threads: Optional[int] = None,   # maximum number of threads to use for parallel execution
                  logger=None,  # logger for tracking metrics
                  *args,
                  **kwargs):
