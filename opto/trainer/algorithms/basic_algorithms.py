@@ -148,8 +148,9 @@ class Minibatch(AlgorithmBase):
     def evaluate(self, agent, guide, xs, infos, min_score=None, num_samples=1, num_threads=None, description=None):
         """ Evaluate the agent on the given dataset. """
         num_threads = num_threads or self.num_threads  # Use provided num_threads or fall back to self.num_threads
+        num_samples = num_samples or self.num_eval_samples
         test_scores = evaluate(agent, guide, xs, infos, min_score=min_score, num_threads=num_threads,
-                               num_samples=num_samples, description=description, num_samples=self.num_eval_samples)
+                               num_samples=num_samples, description=description, )
         if all([s is not None for s in test_scores]):
             return np.mean(test_scores)
         
