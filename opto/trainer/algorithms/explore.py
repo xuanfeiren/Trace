@@ -12,8 +12,8 @@ from opto.trace.nodes import ParameterNode
 import json
 import warnings
 from black import format_str, FileMode
-
-def evaluate(agent, guide, inputs, infos, min_score=None, num_threads=None, description=None):
+from opto.trainer.evaluators import evaluate
+def evaluate(agent, guide, inputs, infos, min_score=None, num_threads=None, description=None,num_samples=1):
     """ Evaluate the agent on the inputs and return the scores
 
     Args:
@@ -26,7 +26,18 @@ def evaluate(agent, guide, inputs, infos, min_score=None, num_threads=None, desc
         description: Description to display in the progress bar
     """
 
-    def evaluate_single(i):
+    # Expand inputs and infos to have num_samples copies of each
+    expanded_inputs = []
+    expanded_infos = []
+    original_indices = []
+    
+    for i, (input_item, info_item) in enumerate(zip(inputs, infos)):
+        for _ in range(num_samples):
+            expanded_inputs.append(input_item)
+            expanded_infos.append(info_item)
+            original_indices.append(i)
+
+    def evaluate_single(expanded_i):
         try:
             """create a new env for each thread"""
             from tau_bench.envs import get_env
@@ -40,24 +51,33 @@ def evaluate(agent, guide, inputs, infos, min_score=None, num_threads=None, desc
         )
             agent.set_env(env)
             
-            output = agent(inputs[i]).data
-            score = guide.metric(inputs[i], output, infos[i])
+            output = agent(expanded_inputs[expanded_i]).data
+            score = guide.metric(expanded_inputs[expanded_i], output, expanded_infos[expanded_i])
         except:
             score = min_score
         return score
 
     N = len(inputs)
-    assert len(inputs) == len(infos), "Inputs and infos must have the same length"
+    expanded_N = len(expanded_inputs)
+    assert len(expanded_inputs) == len(expanded_infos), "Expanded inputs and infos must have the same length"
+    
     # Use asyncio if num_threads is not None and > 1
     use_asyncio = num_threads is not None and num_threads > 1
     if use_asyncio:
         # Use provided description or generate a default one
-        eval_description = description or f"Evaluating {N} examples"
-        scores = async_run([evaluate_single] * N, [(i,) for i in range(N)],
-                          max_workers=num_threads,
-                          description=eval_description) # list of tuples
+        eval_description = description or f"Evaluating {N} examples with {num_samples} samples each"
+        flat_scores = async_run([evaluate_single] * expanded_N, [(i,) for i in range(expanded_N)],
+                              max_workers=num_threads,
+                              description=eval_description)
     else:
-        scores = [evaluate_single(i) for i in range(N)]
+        flat_scores = [evaluate_single(i) for i in range(expanded_N)]
+    
+    # Group the flat scores back into the original structure
+    scores = [[] for _ in range(N)]
+    for expanded_i, score in enumerate(flat_scores):
+        original_i = original_indices[expanded_i]
+        scores[original_i].append(score)
+    
     return scores
 
 class ExploreAlgorithm(UCBSearchAlgorithm):    
@@ -79,13 +99,15 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
         self.ucb_exploration_factor = ucb_exploration_factor
         self.logger = logger
         self.num_threads = num_threads
-
+        self.num_eval_times = 3 # number of times to evaluate each candidate
+        
     def _evaluate_candidate(self, 
                               params_to_eval_dict: Dict[str, Any], 
                               dataset: Dict[str, List[Any]], 
                               guide, 
                               evaluation_batch_size: int = 10,
-                              num_threads: Optional[int] = None
+                              num_threads: Optional[int] = None,
+                              num_eval_times: int = 1
                               ) -> Tuple[float, int]:
         """Evaluates a given set of parameters on samples from the provided dataset."""
         if not dataset or not dataset.get('inputs') or not dataset.get('infos') or not dataset['inputs']:
@@ -109,6 +131,7 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
                                eval_infos,
                                min_score=self.min_score if hasattr(self, 'min_score') else None,
                                num_threads=num_threads or self.num_threads,
+                               num_samples=num_eval_times,
                                description=f"Evaluating candidate")
 
         self.optimizer.update(original_params) 
@@ -289,7 +312,7 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
         # Initialize buffer with initial candidate, do the initial test.
         initial_params_dict = {p: copy.deepcopy(p.data) for p in self.optimizer.parameters}
         test_score, test_evals = self._evaluate_candidate(
-            initial_params_dict, test_dataset, guide, len(test_dataset['inputs']), num_threads
+            initial_params_dict, test_dataset, guide, len(test_dataset['inputs']), num_threads,num_eval_times=self.num_eval_times
         )
         
         initial_candidate_entry = {
@@ -345,7 +368,8 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
                     test_dataset,
                     guide,
                     len(test_dataset['inputs']),  # Use subset for test evaluation too
-                    num_threads
+                    num_threads,
+                    num_eval_times=self.num_eval_times
                 )
                 
                 # Logging
