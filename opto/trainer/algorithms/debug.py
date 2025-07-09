@@ -23,7 +23,7 @@ from opto.trainer.guide import AutoGuide
 import litellm 
 litellm.drop_params = True
 import numpy as np
-
+import copy
 from typing import  List, Tuple, Dict, Any, Optional
 from opto import trace
 from opto.trainer.utils import async_run # Assuming print_color is in utils
@@ -270,8 +270,9 @@ def create_retail_dataset(env, num_tasks=10):
     
     return {'inputs': inputs, 'infos': infos}
 
-from opto.trainer.evaluators import evaluate
-# def evaluate(agent, guide, inputs, infos, min_score=None, num_threads=None, description=None,num_samples=1):
+from opto.trainer.evaluators import evaluate # Trace evaluate function
+
+# def evaluate(agent, guide, inputs, infos, min_score=None, num_threads=None, description=None,num_samples=1): # my evaluate function 
 #     """ Evaluate the agent on the inputs and return the scores
 
 #     Args:
@@ -294,24 +295,23 @@ from opto.trainer.evaluators import evaluate
 #             expanded_inputs.append(input_item)
 #             expanded_infos.append(info_item)
 #             original_indices.append(i)
-
-#     def evaluate_single(expanded_i):
+#         """create a new env for each thread"""
+#     from tau_bench.envs import get_env
+#     env = get_env(
+#     env_name="retail",
+#     user_strategy="llm",
+#     user_model="gemini-2.0-flash",
+#     user_provider="gemini",
+#     task_split="test",
+#     task_index=0  # Will be overridden during training
+# )   
+#     agent.set_env(copy.deepcopy(env))
+#     def evaluate_single(expanded_i,agent,guide):
 #         try:
-#             """create a new env for each thread"""
-#             from tau_bench.envs import get_env
-#             env = get_env(
-#             env_name="retail",
-#             user_strategy="llm",
-#             user_model="gemini-2.0-flash",
-#             user_provider="gemini",
-#             task_split="test",
-#             task_index=0  # Will be overridden during training
-#         )
-#             agent.set_env(env)
-            
 #             output = agent(expanded_inputs[expanded_i]).data
 #             score = guide.metric(expanded_inputs[expanded_i], output, expanded_infos[expanded_i])
-#         except:
+#         except Exception as e:
+#             print(f"Error evaluating {expanded_i}: {e}")
 #             score = min_score
 #         return score
 
@@ -324,11 +324,11 @@ from opto.trainer.evaluators import evaluate
 #     if use_asyncio:
 #         # Use provided description or generate a default one
 #         eval_description = description or f"Evaluating {N} examples with {num_samples} samples each"
-#         flat_scores = async_run([evaluate_single] * expanded_N, [(i,) for i in range(expanded_N)],
+#         flat_scores = async_run([evaluate_single] * expanded_N, [(i,agent.copy(),guide.copy() )for i in range(expanded_N)],
 #                               max_workers=num_threads,
 #                               description=eval_description)
 #     else:
-#         flat_scores = [evaluate_single(i) for i in range(expanded_N)]
+#         flat_scores = [evaluate_single(i,agent.copy(),guide.copy()) for i in range(expanded_N)]
     
 #     # Group the flat scores back into the original structure
 #     scores = [[] for _ in range(N)]
@@ -337,6 +337,7 @@ from opto.trainer.evaluators import evaluate
 #         scores[original_i].append(score)
     
 #     return scores
+
 def main():
     parser = argparse.ArgumentParser(description='Train agent using search algorithms')
     parser.add_argument('--num_train_samples', type=int, default=50,
@@ -389,6 +390,9 @@ def main():
     eval_xs, eval_infos = test_dataset['inputs'], test_dataset['infos']
     num_eval_times = 1
 
-    evaluate(agent,guide,eval_xs,eval_infos,num_samples=num_eval_times,num_threads=10,description=f"Evaluating candidate")
+    eval_scores = evaluate(agent,guide,eval_xs,eval_infos,num_samples=num_eval_times,num_threads=10,description=f"Evaluating candidate")
+    # avg_score = np.mean(eval_scores) if eval_scores and all(s is not None for s in eval_scores) else 0
+    # print(f"Average score: {avg_score}")
+
 if __name__ == "__main__":
     main() 

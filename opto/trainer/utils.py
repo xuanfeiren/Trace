@@ -101,7 +101,6 @@ def batch_run(max_workers=None, description=None):
             all_args = args + tuple(kwargs.values())
             # find all list or array-like arguments and use their length as batch size
             batch_size = max(len(arg) for arg in all_args if hasattr(arg, '__len__'))
-            
             # broadcast the batch size to all args and record the indices that are broadcasted
             args = [arg if hasattr(arg, '__len__') else [arg] * batch_size for arg in args]
             kwargs = {k: v if hasattr(v, '__len__') else [v] * batch_size for k, v in kwargs.items()}   
@@ -113,8 +112,8 @@ def batch_run(max_workers=None, description=None):
 
             # deepcopy if it is a trace.Module (as they may have mutable state)
             # Module.copy() is used to create a new instance with the same parameters
-            _args = [arg.copy() if isinstance(arg, (Module, AutoGuide)) else arg for arg in args]
-            _kwargs = {k: v.copy() if isinstance(v, (Module, AutoGuide)) else v for k, v in kwargs.items()}
+            _args = [[a.copy() if isinstance(a, (Module, AutoGuide)) else a for a in arg ] for arg in args ]
+            _kwargs = {k: [a.copy() if isinstance(a, (Module, AutoGuide)) else a  for a in v ] for k, v in kwargs.items() }
 
             # Run the forward function in parallel using asyncio with the same parameters. 
             # Since trace.Node is treated as immutable, we can safely use the same instance.
