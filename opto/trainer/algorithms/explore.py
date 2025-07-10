@@ -13,72 +13,73 @@ import json
 import warnings
 from black import format_str, FileMode
 from opto.trainer.evaluators import evaluate
-def evaluate(agent, guide, inputs, infos, min_score=None, num_threads=None, description=None,num_samples=1):
-    """ Evaluate the agent on the inputs and return the scores
 
-    Args:
-        agent: The agent to evaluate
-        guide: The guide to use for evaluation
-        inputs: List of inputs to evaluate on
-        infos: List of additional information for each input
-        min_score: Minimum score to return when an exception occurs
-        num_threads: Maximum number of threads to use for parallel evaluation
-        description: Description to display in the progress bar
-    """
+# def evaluate(agent, guide, inputs, infos, min_score=None, num_threads=None, description=None,num_samples=1):
+#     """ Evaluate the agent on the inputs and return the scores
 
-    # Expand inputs and infos to have num_samples copies of each
-    expanded_inputs = []
-    expanded_infos = []
-    original_indices = []
+#     Args:
+#         agent: The agent to evaluate
+#         guide: The guide to use for evaluation
+#         inputs: List of inputs to evaluate on
+#         infos: List of additional information for each input
+#         min_score: Minimum score to return when an exception occurs
+#         num_threads: Maximum number of threads to use for parallel evaluation
+#         description: Description to display in the progress bar
+#     """
+
+#     # Expand inputs and infos to have num_samples copies of each
+#     expanded_inputs = []
+#     expanded_infos = []
+#     original_indices = []
     
-    for i, (input_item, info_item) in enumerate(zip(inputs, infos)):
-        for _ in range(num_samples):
-            expanded_inputs.append(input_item)
-            expanded_infos.append(info_item)
-            original_indices.append(i)
+#     for i, (input_item, info_item) in enumerate(zip(inputs, infos)):
+#         for _ in range(num_samples):
+#             expanded_inputs.append(input_item)
+#             expanded_infos.append(info_item)
+#             original_indices.append(i)
 
-    def evaluate_single(expanded_i):
-        try:
-            """create a new env for each thread"""
-            from tau_bench.envs import get_env
-            env = get_env(
-            env_name="retail",
-            user_strategy="llm",
-            user_model="gemini-2.0-flash",
-            user_provider="gemini",
-            task_split="test",
-            task_index=0  # Will be overridden during training
-        )
-            agent.set_env(env)
+#     def evaluate_single(expanded_i):
+#         try:
+#             """create a new env for each thread"""
+#             from tau_bench.envs import get_env
+#             env = get_env(
+#             env_name="retail",
+#             user_strategy="llm",
+#             user_model="gemini-2.0-flash",
+#             user_provider="gemini",
+#             task_split="test",
+#             task_index=0  # Will be overridden during training
+#         )
+#             agent.set_env(env)
             
-            output = agent(expanded_inputs[expanded_i]).data
-            score = guide.metric(expanded_inputs[expanded_i], output, expanded_infos[expanded_i])
-        except:
-            score = min_score
-        return score
+#             output = agent(expanded_inputs[expanded_i]).data
+#             score = guide.metric(expanded_inputs[expanded_i], output, expanded_infos[expanded_i])
+#         except:
+#             score = min_score
+#         return score
 
-    N = len(inputs)
-    expanded_N = len(expanded_inputs)
-    assert len(expanded_inputs) == len(expanded_infos), "Expanded inputs and infos must have the same length"
+#     N = len(inputs)
+#     expanded_N = len(expanded_inputs)
+#     assert len(expanded_inputs) == len(expanded_infos), "Expanded inputs and infos must have the same length"
     
-    # Use asyncio if num_threads is not None and > 1
-    use_asyncio = num_threads is not None and num_threads > 1
-    if use_asyncio:
-        # Use provided description or generate a default one
-        eval_description = description or f"Evaluating {N} examples with {num_samples} samples each"
-        flat_scores = async_run([evaluate_single] * expanded_N, [(i,) for i in range(expanded_N)],
-                              max_workers=num_threads,
-                              description=eval_description)
-    else:
-        flat_scores = [evaluate_single(i) for i in range(expanded_N)]
+#     # Use asyncio if num_threads is not None and > 1
+#     use_asyncio = num_threads is not None and num_threads > 1
+#     if use_asyncio:
+#         # Use provided description or generate a default one
+#         eval_description = description or f"Evaluating {N} examples with {num_samples} samples each"
+#         flat_scores = async_run([evaluate_single] * expanded_N, [(i,) for i in range(expanded_N)],
+#                               max_workers=num_threads,
+#                               description=eval_description)
+#     else:
+#         flat_scores = [evaluate_single(i) for i in range(expanded_N)]
     
-    # Group the flat scores back into the original structure
-    scores = [[] for _ in range(N)]
-    for expanded_i, score in enumerate(flat_scores):
-        original_i = original_indices[expanded_i]
-        scores[original_i].append(score)
+#     # Group the flat scores back into the original structure
+#     scores = [[] for _ in range(N)]
+#     for expanded_i, score in enumerate(flat_scores):
+#         original_i = original_indices[expanded_i]
+#         scores[original_i].append(score)
     
-    return scores
+#     return scores
 
 class ExploreAlgorithm(UCBSearchAlgorithm):    
     """A phased algorithm that explores the parameter space of the agent, and use UCB to select the best candidate."""
@@ -136,7 +137,7 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
 
         self.optimizer.update(original_params) 
 
-        avg_score = np.mean(eval_scores) if eval_scores and all(s is not None for s in eval_scores) else 0
+        avg_score = np.mean(eval_scores) if  all(s is not None for s in eval_scores) else 0
         eval_count = len(eval_xs) 
         
         return float(avg_score), eval_count
@@ -289,7 +290,7 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
               num_to_sample: int = 5,
               num_threads: Optional[int] = None,
               num_phases: int = 5,
-              ucb_horizon: int = 50,
+              ucb_horizon_factor: int = 10,
               **kwargs
               ) -> Tuple[Dict[str, Any], float]:
         """Train using explore and best_candidate phases iteratively."""
@@ -347,7 +348,7 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
             # Best candidate identification phase
             print_color("Starting best candidate identification phase...", 'cyan')
             best_params = self.ucb_best_candidate(
-                horizon=ucb_horizon,
+                horizon=len(self.buffer)*ucb_horizon_factor,#horizon is the number of iterations to run the ucb best candidate identification, when there are more candidates, we need more iterations to find the best candidate
                 validation_dataset=validation_dataset,
                 guide=guide,
                 evaluation_batch_size=evaluation_batch_size,  # Pass evaluation_batch_size

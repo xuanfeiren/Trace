@@ -1,5 +1,6 @@
 import numpy as np
 import copy
+import time
 from typing import Union
 from opto import trace
 from opto.trainer.algorithms.algorithm import AlgorithmBase
@@ -9,52 +10,130 @@ from opto.optimizers.utils import print_color
 from opto.trainer.evaluators import evaluate
 
 
-def evaluate(agent, guide, inputs, infos, min_score=None, num_threads=None, description=None):
-    """ Evaluate the agent on the inputs and return the scores
-
-    Args:
-        agent: The agent to evaluate
-        guide: The guide to use for evaluation
-        inputs: List of inputs to evaluate on
-        infos: List of additional information for each input
-        min_score: Minimum score to return when an exception occurs
-        num_threads: Maximum number of threads to use for parallel evaluation
-        description: Description to display in the progress bar
+def retry_with_exponential_backoff(func, max_retries=10, base_delay=1.0, operation_name="operation"):
     """
-
-    def evaluate_single(i):
+    Retry a function with exponential backoff for rate limit and other transient errors.
+    
+    Args:
+        func: Function to retry (should be a callable with no arguments)
+        max_retries: Maximum number of retry attempts
+        base_delay: Base delay for exponential backoff
+        operation_name: Name of the operation for logging
+    
+    Returns:
+        Result of the function call
+        
+    Raises:
+        The last exception encountered if all retries fail
+    """
+    for retry_attempt in range(max_retries):
         try:
-            """create a new env for each thread"""
-            from tau_bench.envs import get_env
-            env = get_env(
-            env_name="retail",
-            user_strategy="llm",
-            user_model="gemini-2.0-flash",
-            user_provider="vertex_ai",
-            task_split="test",
-            task_index=0  # Will be overridden during training
-        )
-            agent.set_env(env)
+            return func()
+        except Exception as e:
+            error_str = str(e).lower()
+            error_type = type(e).__name__.lower()
             
-            output = agent(inputs[i]).data
-            score = guide.metric(inputs[i], output, infos[i])
-        except:
-            score = min_score
-        return score
+            # Check if it's a retryable error
+            retryable_errors = [
+                'rate limit', 'timeout', 'temporary', 'service unavailable',
+                'internal server error', 'bad gateway', 'service temporarily unavailable',
+                'too many requests', 'quota', 'overloaded', 'resource has been exhausted',
+                'resource_exhausted', 'ratelimiterror', 'quotaexceedederror',
+                'connection error', 'network', 'json decode'
+            ]
+            
+            # Also check specific litellm exceptions
+            retryable_exception_types = [
+                'ratelimiterror', 'timeouterror', 'apiconnectionerror', 
+                'serviceunavailableerror', 'internalservererror', 'jsondecodeerror'
+            ]
+            
+            is_retryable = (
+                any(err in error_str for err in retryable_errors) or
+                any(exc_type in error_type for exc_type in retryable_exception_types) or
+                'code": 429' in error_str or  # HTTP 429 Too Many Requests
+                'code": 503' in error_str or  # HTTP 503 Service Unavailable
+                'code": 502' in error_str or  # HTTP 502 Bad Gateway
+                'code": 500' in error_str     # HTTP 500 Internal Server Error
+            )
+            
+            if retry_attempt == max_retries - 1:
+                # Last attempt failed
+                # print(f"{operation_name}: Failed after {max_retries} attempts. Error: {e}")
+                raise e
+            elif is_retryable:
+                # Special handling for rate limit errors - use longer delays
+                is_rate_limit = (
+                    'rate limit' in error_str or 'ratelimiterror' in error_type or
+                    'quota' in error_str or 'resource has been exhausted' in error_str or
+                    'code": 429' in error_str
+                )
+                
+                if is_rate_limit:
+                    # Longer delays for rate limits: 2, 8, 18, 32, 50 seconds
+                    delay = 2 * (retry_attempt + 1) ** 2 + retry_attempt
+                else:
+                    # Standard exponential backoff for other errors
+                    delay = base_delay * (2 ** retry_attempt) + (0.1 * retry_attempt)
+                
+                error_type_desc = "Rate limit" if is_rate_limit else "Retryable error"
+                # print(f"{operation_name}: {error_type_desc} - Retry {retry_attempt + 1}/{max_retries} after {delay:.1f}s. Error: {e}")
+                time.sleep(delay)
+            else:
+                # Non-retryable error
+                print(f"{operation_name}: Non-retryable error: {e}")
+                raise e
+    
+    # This should never be reached, but just in case
+    raise RuntimeError(f"{operation_name}: Unexpected error - reached end of retry loop")
 
-    N = len(inputs)
-    assert len(inputs) == len(infos), "Inputs and infos must have the same length"
-    # Use asyncio if num_threads is not None and > 1
-    use_asyncio = num_threads is not None and num_threads > 1
-    if use_asyncio:
-        # Use provided description or generate a default one
-        eval_description = description or f"Evaluating {N} examples"
-        scores = async_run([evaluate_single] * N, [(i,) for i in range(N)],
-                          max_workers=num_threads,
-                          description=eval_description) # list of tuples
-    else:
-        scores = [evaluate_single(i) for i in range(N)]
-    return scores
+
+# def evaluate(agent, guide, inputs, infos, min_score=None, num_threads=None, description=None):
+#     """ Evaluate the agent on the inputs and return the scores
+
+#     Args:
+#         agent: The agent to evaluate
+#         guide: The guide to use for evaluation
+#         inputs: List of inputs to evaluate on
+#         infos: List of additional information for each input
+#         min_score: Minimum score to return when an exception occurs
+#         num_threads: Maximum number of threads to use for parallel evaluation
+#         description: Description to display in the progress bar
+#     """
+
+#     def evaluate_single(i):
+#         try:
+#             """create a new env for each thread"""
+#             from tau_bench.envs import get_env
+#             env = get_env(
+#             env_name="retail",
+#             user_strategy="llm",
+#             user_model="gemini-2.0-flash",
+#             user_provider="vertex_ai",
+#             task_split="test",
+#             task_index=0  # Will be overridden during training
+#         )
+#             agent.set_env(env)
+            
+#             output = agent(inputs[i]).data
+#             score = guide.metric(inputs[i], output, infos[i])
+#         except:
+#             score = min_score
+#         return score
+
+#     N = len(inputs)
+#     assert len(inputs) == len(infos), "Inputs and infos must have the same length"
+#     # Use asyncio if num_threads is not None and > 1
+#     use_asyncio = num_threads is not None and num_threads > 1
+#     if use_asyncio:
+#         # Use provided description or generate a default one
+#         eval_description = description or f"Evaluating {N} examples"
+#         scores = async_run([evaluate_single] * N, [(i,) for i in range(N)],
+#                           max_workers=num_threads,
+#                           description=eval_description) # list of tuples
+#     else:
+#         scores = [evaluate_single(i) for i in range(N)]
+#     return scores
 
 
 def standard_optimization_step(agent, x, guide, info, min_score=0):
@@ -108,7 +187,7 @@ class Minibatch(AlgorithmBase):
               batch_size: int = 1,  # batch size for updating the agent
               test_dataset = None,  # dataset of (x, info) pairs to evaluate the agent
               eval_frequency: int = 1,  # frequency of evaluation
-              num_eval_samples: int = 1,  # number of samples to use to evaluate each input
+              num_eval_samples: int = 3,  # number of samples to use to evaluate each input
               log_frequency: Union[int, None] = None,  # frequency of logging
               save_frequency: Union[int, None] = None,  # frequency of saving the agent
               save_path: str = "checkpoints/agent.pkl",  # path to save the agent
@@ -134,7 +213,7 @@ class Minibatch(AlgorithmBase):
         # Evaluate the agent before learning
         if eval_frequency > 0:
             test_score = self.evaluate(self.agent, guide, test_dataset['inputs'], test_dataset['infos'],
-                          min_score=min_score, num_threads=num_threads,
+                          min_score=min_score, num_threads=num_threads,num_samples=num_eval_samples,
                           description=f"Evaluating agent (iteration {self.n_iters})")  # and log
             self.logger.log('Test score', test_score, self.n_iters, color='green')
 
@@ -174,7 +253,7 @@ class Minibatch(AlgorithmBase):
                 # Evaluate the agent after update
                 if test_dataset is not None and self.n_iters % eval_frequency == 0:
                     test_score = self.evaluate(self.agent, guide, test_dataset['inputs'], test_dataset['infos'],
-                                  min_score=min_score, num_threads=num_threads,
+                                  min_score=min_score, num_threads=num_threads,num_samples=num_eval_samples,
                                   description=f"Evaluating agent (iteration {self.n_iters})")  # and log
                     self.logger.log('Test score', test_score, self.n_iters, color='green')
 
@@ -199,7 +278,6 @@ class Minibatch(AlgorithmBase):
     def evaluate(self, agent, guide, xs, infos, min_score=None, num_samples=1, num_threads=None, description=None):
         """ Evaluate the agent on the given dataset. """
         num_threads = num_threads or self.num_threads  # Use provided num_threads or fall back to self.num_threads
-        num_samples = num_samples or self.num_eval_samples
         test_scores = evaluate(agent, guide, xs, infos, min_score=min_score, num_threads=num_threads,
                                num_samples=num_samples, description=description, )
         if all([s is not None for s in test_scores]):
@@ -307,7 +385,25 @@ class MinibatchAlgorithm(Minibatch):
         """ Subclasses can implement this method to update the agent. """
         # We separate this method from the update method to allow subclasses to implement their own optimization step.
         self.total_proposals += 1
-        return self.optimizer.step(bypassing=bypassing, verbose=verbose, **kwargs)
+        
+        # Backup current parameters before attempting update
+        current_params = {p: copy.deepcopy(p.data) for p in self.agent.parameters()}
+        
+        # Wrap optimizer.step with retry logic
+        def optimizer_step_func():
+            return self.optimizer.step(bypassing=bypassing, verbose=verbose, **kwargs)
+        
+        try:
+            return retry_with_exponential_backoff(
+                optimizer_step_func, 
+                operation_name=f"Optimizer step (iteration {getattr(self, 'n_iters', 'unknown')})"
+            )
+        except Exception as e:
+            self.total_proposals -= 1
+            # If all retries failed, fall back to current parameters
+            print(f"Optimizer step failed after all retries. Falling back to current parameters. Error: {e}")
+            self.optimizer.update(current_params)
+            return current_params
 
 
 class BasicSearchAlgorithm(MinibatchAlgorithm):
@@ -336,7 +432,7 @@ class BasicSearchAlgorithm(MinibatchAlgorithm):
         self.validate_guide = validate_guide or guide
         self.min_score = min_score
         self.current_score = None
-
+        
         return super().train(guide, train_dataset, num_epochs=num_epochs, batch_size=batch_size,
                       test_dataset=test_dataset, eval_frequency=eval_frequency, log_frequency=log_frequency,
                       min_score=min_score, verbose=verbose, num_threads=num_threads, **kwargs)
