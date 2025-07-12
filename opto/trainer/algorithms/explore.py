@@ -95,7 +95,7 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
                  **kwargs): 
         super().__init__(agent, optimizer, max_buffer_size, ucb_exploration_factor, logger, num_threads, *args, **kwargs)
         
-        self.buffer = deque(maxlen=max_buffer_size) 
+        self.buffer = deque() 
         self.max_buffer_size = max_buffer_size
         self.ucb_exploration_factor = ucb_exploration_factor
         self.logger = logger
@@ -212,12 +212,6 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
                     'ucb_score': None
                 }
                 
-                # Handle buffer overflow
-                if len(self.buffer) >= self.max_buffer_size:
-                    self._update_buffer_ucb_scores()
-                    candidate_to_evict = min(self.buffer, key=lambda c: c['ucb_score'])
-                    self.buffer.remove(candidate_to_evict)
-                
                 self.buffer.append(new_candidate_entry)
                        
             except Exception as e:
@@ -274,6 +268,13 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
         # Return the candidate with highest mean score (pure exploitation)
         best_candidate = max(self.buffer, key=lambda c: c['score_sum'] / (c['eval_count'] or 1E-9))
 
+        # Handle buffer overflow - keep only max_buffer_size best candidates based on mean score
+        if len(self.buffer) > self.max_buffer_size:
+            # Sort by mean score and keep only the top max_buffer_size candidates
+            sorted_buffer = sorted(self.buffer, key=lambda c: c['score_sum'] / (c['eval_count'] or 1E-9), reverse=True)
+            self.buffer = deque(sorted_buffer[:self.max_buffer_size])
+            print_color(f"Buffer size reduced from {len(sorted_buffer)} to {len(self.buffer)} based on mean score", 'yellow')
+
         return best_candidate['params']
 
     def train(self,
@@ -290,7 +291,7 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
               num_to_sample: int = 5,
               num_threads: Optional[int] = None,
               num_phases: int = 5,
-              ucb_horizon_factor: int = 10,
+              ucb_horizon: int = 50,
               **kwargs
               ) -> Tuple[Dict[str, Any], float]:
         """Train using explore and best_candidate phases iteratively."""
@@ -348,7 +349,7 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
             # Best candidate identification phase
             print_color("Starting best candidate identification phase...", 'cyan')
             best_params = self.ucb_best_candidate(
-                horizon=len(self.buffer)*ucb_horizon_factor,#horizon is the number of iterations to run the ucb best candidate identification, when there are more candidates, we need more iterations to find the best candidate
+                horizon=ucb_horizon,
                 validation_dataset=validation_dataset,
                 guide=guide,
                 evaluation_batch_size=evaluation_batch_size,  # Pass evaluation_batch_size
