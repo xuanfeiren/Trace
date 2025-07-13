@@ -3,7 +3,7 @@ import copy
 from collections import deque
 from typing import Union, List, Tuple, Dict, Any, Optional
 from opto import trace
-from opto.trainer.utils import async_run # Assuming print_color is in utils
+from opto.trainer.utils import async_run, batch_run # Assuming print_color is in utils
 from opto.optimizers.utils import print_color
 from opto.trainer.algorithms.basic_algorithms import batchify # evaluate and batchify might be useful
 from opto.trainer.algorithms.UCBsearch import UCBSearchAlgorithm
@@ -100,7 +100,7 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
         self.ucb_exploration_factor = ucb_exploration_factor
         self.logger = logger
         self.num_threads = num_threads
-        self.num_eval_times = 3 # number of times to evaluate each candidate
+        self.num_eval_times = 5 # number of times to evaluate each candidate
         
     def _evaluate_candidate(self, 
                               params_to_eval_dict: Dict[str, Any], 
@@ -157,9 +157,31 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
             print_color("Buffer is empty, cannot explore.", 'red')
             return {}, 0
         print_color(f"Exploring with OptoPrime.", 'cyan')
-        # Randomly sample candidates from buffer
+        # Sample candidates from buffer using exponential weights of mean scores
         buffer_list = list(self.buffer)
-        sampled_candidates = np.random.choice(buffer_list, size=num_to_sample, replace=True)
+        # Filter candidates that have been evaluated (eval_count > 0)
+        evaluated_candidates = [c for c in buffer_list if c['eval_count'] > 0]
+        
+        if not evaluated_candidates:
+            # Fallback to random sampling if no candidates have been evaluated
+            print_color("No evaluated candidates found, falling back to random sampling.", 'yellow')
+            sampled_candidates = np.random.choice(buffer_list, size=num_to_sample, replace=True)
+        else:
+            # Calculate mean scores for evaluated candidates
+            mean_scores = np.array([c['score_sum'] / c['eval_count'] for c in evaluated_candidates])
+            
+            # Apply temperature scaling (lower temperature = more greedy towards higher scores)
+            temperature = 0.1  # Low temperature for more focused sampling on high-scoring candidates
+            scaled_scores = mean_scores / temperature
+            
+            # Calculate exponential weights (using softmax to avoid overflow)
+            exp_weights = np.exp(scaled_scores - np.max(scaled_scores))  # Subtract max for numerical stability
+            weights = exp_weights / np.sum(exp_weights)
+            
+            # Sample according to exponential weights
+            indices = np.random.choice(len(evaluated_candidates), size=num_to_sample, replace=True, p=weights)
+            sampled_candidates = [evaluated_candidates[i] for i in indices]
+            
         for candidate in sampled_candidates:
             try:
                 # Load candidate parameters
@@ -171,14 +193,8 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
                     continue
                 
                 # Forward pass
-                use_asyncio = self._use_asyncio(num_threads)
-                if use_asyncio:
-                    outputs = async_run([self.forward]*len(train_xs),
-                                      [(self.agent, x, guide, info) for x, info in zip(train_xs, train_infos)],
-                                      max_workers=num_threads,
-                                      description="Explore: Forward pass")
-                else:
-                    outputs = [self.forward(self.agent, x, guide, info) for x, info in zip(train_xs, train_infos)]
+                forward = batch_run(max_workers=num_threads, description=f"Explore: Forward pass (batch size: {len(train_xs)})")(self.forward)
+                outputs = forward(self.agent, train_xs, guide, train_infos)
                 
                 # Process outputs
                 scores, targets, feedbacks = [], [], []
@@ -223,7 +239,7 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
                       horizon: int, 
                       validation_dataset: Dict[str, List[Any]], 
                       guide, 
-                      evaluation_batch_size: int = 10,
+                      evaluation_batch_size: int = 20,
                       num_threads: Optional[int] = None) -> Dict[str, Any]:
         """Select the best candidate from the buffer using UCB for horizon iterations."""
         
@@ -284,7 +300,7 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
               validation_dataset: Optional[Dict[str, List[Any]]] = None,
               test_dataset: Optional[Dict[str, List[Any]]] = None,
               train_batch_size: int = 1,
-              evaluation_batch_size: int = 10,
+              evaluation_batch_size: int = 20,
               eval_frequency: int = 1,  
               log_frequency: Optional[int] = None,
               min_score_for_agent_update: Optional[float] = None,
@@ -374,6 +390,23 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
                     num_eval_times=self.num_eval_times
                 )
                 
+                # Calculate buffer statistics
+                buffer_mean_scores = []
+                for candidate in self.buffer:
+                    if candidate['eval_count'] > 0:
+                        mean_score = candidate['score_sum'] / candidate['eval_count']
+                        buffer_mean_scores.append(mean_score)
+                
+                # Log buffer statistics
+                if buffer_mean_scores:
+                    highest_score = max(buffer_mean_scores)
+                    lowest_score = min(buffer_mean_scores)
+                    buffer_mean_score = sum(buffer_mean_scores) / len(buffer_mean_scores)
+                    
+                    self.logger.log('Buffer highest score', highest_score, phase+1, color='magenta')
+                    self.logger.log('Buffer lowest score', lowest_score, phase+1, color='magenta')
+                    self.logger.log('Buffer mean score', buffer_mean_score, phase+1, color='magenta')
+                    
                 # Logging
                 self.logger.log('Buffer size', len(self.buffer), phase+1, color='yellow')
                 self.logger.log('Test score', test_score, phase+1, color='green')
@@ -417,7 +450,7 @@ class ExplorewithLLM(ExploreAlgorithm):
         Prompts an LLM with current buffer candidates to generate new string values for parameters.
         Returns a dictionary mapping ParameterNode objects to new string values, or None on failure.
         """
-        print_color("Attempting to generate candidate using LLM...", "blue")
+        # print_color("Attempting to generate candidate using LLM...", "blue")
         if not self.buffer:
             print_color("LLM generation: Buffer is empty, cannot provide context to LLM.", "yellow")
             return None
@@ -547,9 +580,16 @@ class ExplorewithLLM(ExploreAlgorithm):
             print_color("LLM generation: No candidates with valid UCB scores found.", "yellow")
             return None
         print_color(f"Adding {num_LLM_samples} LLM-generated candidates...", 'magenta')
+        
+        # Generate LLM candidates in parallel
+        new_candidates = async_run([self._llm_generate_candidate] * num_LLM_samples,
+                                  [() for _ in range(num_LLM_samples)],
+                                  max_workers=num_threads,
+                                  description=f"Generating {num_LLM_samples} LLM candidates")
+        
+        # Process the generated candidates
         llm_candidates_added = 0
-        for _ in range(num_LLM_samples):
-            new_candidate = self._llm_generate_candidate()
+        for new_candidate in new_candidates:
             if new_candidate is not None:  # Only add if candidate is valid
                 new_candidate_entry = {
                     'params': new_candidate,
@@ -558,10 +598,12 @@ class ExplorewithLLM(ExploreAlgorithm):
                     'ucb_score': None,
                 }
                 self.buffer.append(new_candidate_entry)
-                self.total_proposals += 1
                 llm_candidates_added += 1
             else:
                 print_color("LLM generated None candidate, skipping...", 'yellow')
+        
+        # Update total_proposals counter
+        self.total_proposals += llm_candidates_added
         
         print_color(f"Successfully added {llm_candidates_added} LLM-generated candidates", 'green')     
         return 
