@@ -13,6 +13,85 @@ import json
 import warnings
 from black import format_str, FileMode
 from opto.trainer.evaluators import evaluate
+import time
+
+def auto_retry_with_exponential_backoff(
+    func, 
+    max_retries=5, 
+    base_delay=1.0, 
+    operation_name="operation"
+):
+    """
+    Auto retry a function with exponential backoff for transient errors.
+    
+    Args:
+        func: Function to retry (should be a callable with no arguments)
+        max_retries: Maximum number of retry attempts
+        base_delay: Base delay for exponential backoff
+        operation_name: Name of the operation for logging
+    
+    Returns:
+        Result of the function call, or None if all retries failed
+    """
+    for retry_attempt in range(max_retries):
+        try:
+            return func()
+        except Exception as e:
+            error_str = str(e).lower()
+            error_type = type(e).__name__.lower()
+            
+            # Check if it's a retryable error
+            retryable_errors = [
+                'rate limit', 'timeout', 'temporary', 'service unavailable',
+                'internal server error', 'bad gateway', 'service temporarily unavailable',
+                'too many requests', 'quota', 'overloaded', 'resource has been exhausted',
+                'resource_exhausted', 'ratelimiterror', 'quotaexceedederror',
+                'connection error', 'network', 'json decode'
+            ]
+            
+            # Also check specific exception types that might be retryable
+            retryable_exception_types = [
+                'ratelimiterror', 'timeouterror', 'apiconnectionerror', 
+                'serviceunavailableerror', 'internalservererror', 'jsondecodeerror'
+            ]
+            
+            is_retryable = (
+                any(err in error_str for err in retryable_errors) or
+                any(exc_type in error_type for exc_type in retryable_exception_types) or
+                'code": 429' in error_str or  # HTTP 429 Too Many Requests
+                'code": 503' in error_str or  # HTTP 503 Service Unavailable
+                'code": 502' in error_str or  # HTTP 502 Bad Gateway
+                'code": 500' in error_str     # HTTP 500 Internal Server Error
+            )
+            
+            if retry_attempt == max_retries - 1:
+                # Last attempt failed
+                print(f"{operation_name}: Failed after {max_retries} attempts. Error: {e}")
+                return None
+            elif is_retryable:
+                # Special handling for rate limit errors - use longer delays
+                is_rate_limit = (
+                    'rate limit' in error_str or 'ratelimiterror' in error_type or
+                    'quota' in error_str or 'resource has been exhausted' in error_str or
+                    'code": 429' in error_str
+                )
+                
+                if is_rate_limit:
+                    # Longer delays for rate limits
+                    delay = 2 * (retry_attempt + 1) ** 2 + retry_attempt
+                else:
+                    # Standard exponential backoff for other errors
+                    delay = base_delay * (2 ** retry_attempt) + (0.1 * retry_attempt)
+                
+                error_type_desc = "Rate limit" if is_rate_limit else "Retryable error"
+                print(f"{operation_name}: {error_type_desc} - Retry {retry_attempt + 1}/{max_retries} after {delay:.1f}s. Error: {e}")
+                time.sleep(delay)
+            else:
+                # Non-retryable error
+                print(f"{operation_name}: Non-retryable error: {e}")
+                return None
+    
+    return None
 
 # def evaluate(agent, guide, inputs, infos, min_score=None, num_threads=None, description=None,num_samples=1):
 #     """ Evaluate the agent on the inputs and return the scores
@@ -213,8 +292,16 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
                 self.optimizer.zero_feedback()
                 self.optimizer.backward(target_batch, feedback_batch)
                 
-                # Generate new candidate
-                new_params_dict = self.optimizer.step(bypassing=True, verbose=False)
+                # Generate new candidate with retry logic
+                def optimizer_step_call():
+                    return self.optimizer.step(bypassing=True, verbose=False)
+                
+                new_params_dict = auto_retry_with_exponential_backoff(
+                    optimizer_step_call,
+                    max_retries=10,
+                    operation_name="Optimizer step"
+                )
+                
                 if not isinstance(new_params_dict, dict) or not new_params_dict:
                     new_params_dict = {p: copy.deepcopy(p.data) for p in self.optimizer.parameters}
                 self.total_samples += train_batch_size
