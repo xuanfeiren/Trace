@@ -155,9 +155,9 @@ class UCBSearchAlgorithm(MinibatchAlgorithm):
         """Recalculates and updates UCB scores for all candidates in the buffer."""
         if not self.buffer:
             return
-        
+        total_evaluations_tracker = np.sum([c['eval_count'] for c in self.buffer])
         for candidate_entry in self.buffer:
-            candidate_entry['ucb_score'] = self._calculate_ucb(candidate_entry, self._total_evaluations_tracker)
+            candidate_entry['ucb_score'] = self._calculate_ucb(candidate_entry, total_evaluations_tracker)
 
     def _get_best_candidate_from_buffer(self, buffer):
         """Get the best candidate from buffer, excluding those with eval_count = 0 when not using validation."""
