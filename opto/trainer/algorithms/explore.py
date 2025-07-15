@@ -84,7 +84,7 @@ def auto_retry_with_exponential_backoff(
                     delay = base_delay * (2 ** retry_attempt) + (0.1 * retry_attempt)
                 
                 error_type_desc = "Rate limit" if is_rate_limit else "Retryable error"
-                print(f"{operation_name}: {error_type_desc} - Retry {retry_attempt + 1}/{max_retries} after {delay:.1f}s. Error: {e}")
+                # print(f"{operation_name}: {error_type_desc} - Retry {retry_attempt + 1}/{max_retries} after {delay:.1f}s. Error: {e}")
                 time.sleep(delay)
             else:
                 # Non-retryable error
