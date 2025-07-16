@@ -294,7 +294,8 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
                 
                 # Generate new candidate with retry logic
                 def optimizer_step_call():
-                    return self.optimizer.step(bypassing=True, verbose=False)
+                    update_dict = self.optimizer.step(bypassing=True, verbose=False)
+                    return update_dict
                 
                 new_params_dict = auto_retry_with_exponential_backoff(
                     optimizer_step_call,
@@ -304,6 +305,10 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
                 
                 if not isinstance(new_params_dict, dict) or not new_params_dict:
                     new_params_dict = {p: copy.deepcopy(p.data) for p in self.optimizer.parameters}
+                    
+                for param_key, param_value in self.optimizer.parameters.items():
+                    if param_key in new_params_dict:
+                        new_params_dict[param_key] = param_value
                 self.total_samples += train_batch_size
                 self.total_proposals += 1
                 
