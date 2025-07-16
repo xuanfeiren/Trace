@@ -305,7 +305,7 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
                 
                 if not isinstance(new_params_dict, dict) or not new_params_dict:
                     new_params_dict = {p: copy.deepcopy(p.data) for p in self.optimizer.parameters}
-                    
+
                 for param_key, param_value in self.optimizer.parameters.items():
                     if param_key in new_params_dict:
                         new_params_dict[param_key] = param_value
@@ -366,7 +366,6 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
             if validation_score > -np.inf and validation_evals > 0:
                 selected_candidate['score_sum'] += validation_score * validation_evals
                 selected_candidate['eval_count'] += validation_evals
-                self._total_evaluations_tracker += validation_evals
                 self.total_samples += validation_evals
                 print_color(f"UCB iteration {iteration+1}/{horizon}: "
                           f"Selected candidate score {validation_score:.4f} "
@@ -417,7 +416,6 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
         # Initialize tracking
         self.total_samples = 0
         self.total_proposals = 0
-        self._total_evaluations_tracker = 0
 
         # Initialize buffer with initial candidate, do the initial test.
         initial_params_dict = {p: copy.deepcopy(p.data) for p in self.optimizer.parameters}

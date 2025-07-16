@@ -178,8 +178,9 @@ class UCBSearchAlgorithm(MinibatchAlgorithm):
     def print_intervals(self, buffer):
         """Print confidence intervals for debugging in the form of open intervals (LCB, UCB)"""
         print_color("Confidence intervals for all candidates:", 'cyan')
+        total_evaluations_tracker = np.sum([c['eval_count'] for c in buffer])
         for i, candidate_entry in enumerate(buffer):
-            lcb = self._calculate_lcb(candidate_entry, self._total_evaluations_tracker)
+            lcb = self._calculate_lcb(candidate_entry, total_evaluations_tracker)
             ucb = candidate_entry['ucb_score']
             mean_score = candidate_entry['score_sum'] / (candidate_entry['eval_count'] or 1)
             eval_count = candidate_entry['eval_count']
@@ -276,7 +277,6 @@ class UCBSearchAlgorithm(MinibatchAlgorithm):
         if score_for_a_on_train_batch > -np.inf:
             action_candidate_a['score_sum'] += score_for_a_on_train_batch * len(train_xs)
             action_candidate_a['eval_count'] += len(train_xs)
-            self._total_evaluations_tracker += len(train_xs)
 
         # If we use validation set for evaluation
         if self.use_validation: # If we use validation set for evaluation
@@ -306,14 +306,12 @@ class UCBSearchAlgorithm(MinibatchAlgorithm):
                 print_color(f"Iter {iteration}: New candidate a_prime had invalid score/evals, not added to buffer.", 'yellow')
 
             # Update tracking
-            self._total_evaluations_tracker += a_evals + a_prime_evals
             samples_used = 2 * evaluation_batch_size + train_batch_size
         else: # If we don't use validation set for evaluation, please evaluate a_prime on the training set
             a_prime_score, a_prime_evals = self._evaluate_candidate(
                 a_prime_params_dict, {'inputs': train_xs, 'infos': train_infos}, 
                 guide, len(train_xs), num_threads
             )
-            self._total_evaluations_tracker += a_prime_evals
             
             new_candidate_entry = {
                     'params': a_prime_params_dict,
@@ -378,7 +376,6 @@ class UCBSearchAlgorithm(MinibatchAlgorithm):
         self.logger.log('Total samples', total_samples, 0, color='cyan')
         print_color(f"Initial candidate: Score {initial_score:.4f}, Evals {initial_evals}", 'yellow')
         if self.use_validation:
-            self._total_evaluations_tracker += initial_evals 
             total_samples += initial_evals
             # Log initial evaluation
             initial_candidate_entry = {
@@ -457,7 +454,6 @@ class UCBSearchAlgorithm(MinibatchAlgorithm):
                         "buffer_size": len(self.buffer),
                         "buffer_avg_score": metrics['buffer_avg_score'][-1],
                         "buffer_avg_evals": metrics['buffer_avg_evals'][-1],
-                        "total_evaluations_tracker": self._total_evaluations_tracker, # used in calculating ucb scores
                         "total_samples": total_samples # Add new metric
                     }
                     
@@ -466,7 +462,6 @@ class UCBSearchAlgorithm(MinibatchAlgorithm):
                     self.logger.log('Buffer size', log_data['buffer_size'], iteration, color='blue')
                     self.logger.log('Buffer average score', log_data['buffer_avg_score'], iteration, color='cyan')
                     self.logger.log('Buffer average evaluations', log_data['buffer_avg_evals'], iteration, color='orange')
-                    # self.logger.log('Total evaluations tracker', log_data['total_evaluations_tracker'], iteration, color='magenta')
                     self.logger.log('Total samples', log_data['total_samples'], iteration, color='yellow')
                     self.logger.log('Total proposals', self.total_proposals, iteration, color='red')
                     print_color(f"Log @ Iter {iteration}: Best score in buffer: {log_data['best_score']:.4f}, Buffer size: {log_data['buffer_size']}, Total samples: {total_samples}", 'green')
@@ -633,7 +628,6 @@ class UCBSearchParallelAlgorithm(UCBSearchAlgorithm):
         initial_score, initial_evals = self._evaluate_candidate(
             initial_params_dict, validation_dataset, guide, evaluation_batch_size, num_threads
         )
-        self._total_evaluations_tracker += initial_evals 
         total_samples += initial_evals
 
         # Log initial evaluation
@@ -941,9 +935,9 @@ class HybridUCB_LLM(MinibatchAlgorithm):
         """Recalculates and updates UCB scores for all candidates in the buffer."""
         if not self.buffer:
             return
-        
+        total_evaluations_tracker = np.sum([c['eval_count'] for c in self.buffer])
         for candidate_entry in self.buffer:
-            candidate_entry['ucb_score'] = self._calculate_ucb(candidate_entry, self._total_evaluations_tracker)
+            candidate_entry['ucb_score'] = self._calculate_ucb(candidate_entry, total_evaluations_tracker)
 
     def _get_best_candidate_from_buffer(self, buffer):
         """Get the best candidate from buffer, excluding those with eval_count = 0."""
@@ -960,8 +954,10 @@ class HybridUCB_LLM(MinibatchAlgorithm):
     def print_intervals(self, buffer):
         """Print confidence intervals for debugging in the form of open intervals (LCB, UCB)"""
         print_color("Confidence intervals for all candidates:", 'cyan')
+        total_evaluations_tracker = np.sum([c['eval_count'] for c in self.buffer])
+
         for i, candidate_entry in enumerate(buffer):
-            lcb = self._calculate_lcb(candidate_entry, self._total_evaluations_tracker)
+            lcb = self._calculate_lcb(candidate_entry, total_evaluations_tracker)
             ucb = candidate_entry['ucb_score']
             mean_score = candidate_entry['score_sum'] / (candidate_entry['eval_count'] or 1)
             eval_count = candidate_entry['eval_count']
@@ -1109,7 +1105,6 @@ class HybridUCB_LLM(MinibatchAlgorithm):
         initial_score, initial_evals = self._evaluate_candidate(
             initial_params_dict, validation_dataset, guide, evaluation_batch_size, num_threads
         )
-        self._total_evaluations_tracker += initial_evals 
         total_samples += initial_evals
 
         initial_candidate_entry = {
@@ -1232,14 +1227,12 @@ class HybridUCB_LLM(MinibatchAlgorithm):
                             a_prime_params_dict, validation_dataset, guide, evaluation_batch_size, num_threads
                         )
                     
-                    self._total_evaluations_tracker += a_evals + a_prime_evals
                     total_samples += a_evals + a_prime_evals
 
                     # Update stats of action_candidate_a
                     if score_for_a_on_train_batch > -np.inf:
                         action_candidate_a['score_sum'] += score_for_a_on_train_batch * len(train_xs)
                         action_candidate_a['eval_count'] += len(train_xs)
-                        self._total_evaluations_tracker += len(train_xs)
                     
                     # Update stats with validation evaluation of 'a'
                     action_candidate_a['score_sum'] += a_score * a_evals
@@ -1259,7 +1252,6 @@ class HybridUCB_LLM(MinibatchAlgorithm):
                         a_prime_score, a_prime_evals = self._evaluate_candidate(
                             a_prime_params_dict, validation_dataset, guide, evaluation_batch_size, num_threads
                         )
-                        self._total_evaluations_tracker += a_prime_evals
                         total_samples += a_prime_evals
                         self.total_proposals += 1
                         print_color(f"Iter {iteration} (LLM Path): New candidate a_prime (from LLM) generated. Eval Score: {a_prime_score:.4f}, Evals: {a_prime_evals}", 'cyan')
@@ -1317,7 +1309,6 @@ class HybridUCB_LLM(MinibatchAlgorithm):
                         "buffer_size": len(self.buffer),
                         "buffer_avg_score": metrics['buffer_avg_score'][-1],
                         "buffer_avg_evals": metrics['buffer_avg_evals'][-1],
-                        "total_evaluations_ucb_T": self._total_evaluations_tracker,
                         "total_samples": total_samples,
                         "generation_method_this_iter": generation_method,
                         "llm_generation_total_failures": metrics['llm_generation_failures']
