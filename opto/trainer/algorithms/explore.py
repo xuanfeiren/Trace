@@ -371,7 +371,6 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
                           f"Selected candidate score {validation_score:.4f} "
                           f"(evaluated on {validation_evals} samples)", 'cyan')
 
-        self.print_intervals(self.buffer)
         # Return the candidate with highest mean score (pure exploitation)
         best_candidate = max(self.buffer, key=lambda c: c['score_sum'] / (c['eval_count'] or 1E-9))
 
@@ -468,6 +467,11 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
                 
             # Load best candidate parameters
             self.optimizer.update(best_params)
+            self.print_intervals(self.buffer)
+            total_evaluations_tracker = np.sum([c['eval_count'] for c in self.buffer])
+            best_mean_score = best_params['score_sum'] / (best_params['eval_count'] or 1E-9)
+            ucb = self._calculate_ucb(best_params, total_evaluations_tracker)
+            lcb = self._calculate_lcb(best_params, total_evaluations_tracker)
             
             # Test evaluation
             try:
@@ -500,6 +504,9 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
                 # Logging
                 self.logger.log('Buffer size', len(self.buffer), phase+1, color='yellow')
                 self.logger.log('Test score', test_score, phase+1, color='green')
+                self.logger.log('Best mean score', best_mean_score, phase+1, color='magenta')
+                self.logger.log('UCB', ucb, phase+1, color='magenta')
+                self.logger.log('LCB', lcb, phase+1, color='magenta')
                 self.logger.log('Total samples', self.total_samples, phase+1, color='cyan')
                 self.logger.log('Total proposals', self.total_proposals, phase+1, color='red')
                 
