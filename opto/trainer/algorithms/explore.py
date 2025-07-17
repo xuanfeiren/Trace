@@ -306,9 +306,10 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
                 if not isinstance(new_params_dict, dict) or not new_params_dict:
                     new_params_dict = {p: copy.deepcopy(p.data) for p in self.optimizer.parameters}
 
-                for param_key, param_value in self.optimizer.parameters.items():
-                    if param_key in new_params_dict:
-                        new_params_dict[param_key] = param_value
+                # Ensure new_params_dict contains all parameters from optimizer
+                for param in self.optimizer.parameters:
+                    if param not in new_params_dict:
+                        new_params_dict[param] = copy.deepcopy(param.data)
                 self.total_samples += train_batch_size
                 self.total_proposals += 1
                 
@@ -381,7 +382,7 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
             self.buffer = deque(sorted_buffer[:self.max_buffer_size])
             print_color(f"Buffer size reduced from {len(sorted_buffer)} to {len(self.buffer)} based on mean score", 'yellow')
 
-        return best_candidate['params']
+        return best_candidate
 
     def train(self,
               guide,
@@ -453,14 +454,14 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
             
             # Best candidate identification phase
             print_color("Starting best candidate identification phase...", 'cyan')
-            best_params = self.ucb_best_candidate(
+            best_candidate = self.ucb_best_candidate(
                 horizon=ucb_horizon,
                 validation_dataset=validation_dataset,
                 guide=guide,
                 evaluation_batch_size=evaluation_batch_size,  # Pass evaluation_batch_size
                 num_threads=num_threads
             )
-            
+            best_params = best_candidate['params']
             if best_params is None:
                 print_color(f"Phase {phase+1}: No best candidate found, skipping test.", 'red')
                 continue
@@ -469,9 +470,9 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
             self.optimizer.update(best_params)
             self.print_intervals(self.buffer)
             total_evaluations_tracker = np.sum([c['eval_count'] for c in self.buffer])
-            best_mean_score = best_params['score_sum'] / (best_params['eval_count'] or 1E-9)
-            ucb = self._calculate_ucb(best_params, total_evaluations_tracker)
-            lcb = self._calculate_lcb(best_params, total_evaluations_tracker)
+            best_mean_score = best_candidate['score_sum'] / (best_candidate['eval_count'] or 1E-9)
+            ucb = self._calculate_ucb(best_candidate, total_evaluations_tracker)
+            lcb = self._calculate_lcb(best_candidate, total_evaluations_tracker)
             
             # Test evaluation
             try:
