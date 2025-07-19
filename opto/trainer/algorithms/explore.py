@@ -610,7 +610,7 @@ class ExplorewithLLM(ExploreAlgorithm):
 
         try:
             llm_params_raw = json.loads(cleaned_llm_response_str)
-            self.total_proposals += 1
+            # self.total_proposals += 1
         except json.JSONDecodeError as e:
             print_color(f"JSON parsing attempts failed: {e}", "red")
             print_color("Returning None.", "red")
