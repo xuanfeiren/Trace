@@ -656,7 +656,7 @@ class ExplorewithLLM(ExploreAlgorithm):
                 *,
                 train_batch_size: int = 1,
                 num_to_sample: int = 5,
-                num_LLM_samples: int = 5,
+                num_LLM_samples: int = 2,
                 num_threads: Optional[int] = None,
                 **kwargs 
                 ) -> Tuple[Dict[str, Any], int]:
