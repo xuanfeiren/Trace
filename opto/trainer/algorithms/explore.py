@@ -552,7 +552,21 @@ class ExplorewithLLM(ExploreAlgorithm):
                 retry_count += 1
                 # print_color(f"LLM generation attempt {retry_count}/{max_total_retries}, successful candidates: {len(successful_candidates)}/{num_LLM_samples}", "blue")
                 
-                llm_response = self.llm(prompt_messages, response_format=response_format) 
+                # Use auto_retry_with_exponential_backoff for LLM calls
+                def llm_call():
+                    return self.llm(prompt_messages, response_format=response_format)
+                
+                llm_response = auto_retry_with_exponential_backoff(
+                    llm_call,
+                    max_retries=5,
+                    base_delay=1.0,
+                    operation_name=f"LLM generation (attempt {retry_count}/{max_total_retries})"
+                )
+                
+                if llm_response is None:
+                    print_color("LLM call failed after retries, continuing to next attempt...", "yellow")
+                    continue
+                
                 llm_response_str = llm_response.choices[0].message.content
 
                 if not llm_response_str:
@@ -564,11 +578,11 @@ class ExplorewithLLM(ExploreAlgorithm):
                 try:
                     llm_params_raw = json.loads(cleaned_llm_response_str)
                 except json.JSONDecodeError as e:
-                    print_color(f"JSON parsing failed: {e}, retrying...", "yellow")
+                    # print_color(f"JSON parsing failed: {e}, retrying...", "yellow")
                     continue
 
                 if not isinstance(llm_params_raw, dict):
-                    print_color(f"LLM output was not a JSON dictionary: {type(llm_params_raw)}, retrying...", "yellow")
+                    # print_color(f"LLM output was not a JSON dictionary: {type(llm_params_raw)}, retrying...", "yellow")
                     continue
                 
                 try:
