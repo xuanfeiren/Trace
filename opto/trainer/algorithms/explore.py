@@ -260,6 +260,15 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
                 print_color(f"Explore: Error processing candidate: {e}", 'red')
                 continue
         return 
+    
+    def _update_buffer_scores(self):
+        """Recalculates and updates UCB scores for all candidates in the buffer."""
+        if not self.buffer:
+            return
+        total_evaluations_tracker = np.sum([c['eval_count'] for c in self.buffer])
+        for candidate_entry in self.buffer:
+            candidate_entry['ucb_score'] = self._calculate_ucb(candidate_entry, total_evaluations_tracker)
+            candidate_entry['lcb_score'] = self._calculate_lcb(candidate_entry, total_evaluations_tracker)
 
     def ucb_best_candidate(self, 
                       horizon: int, 
@@ -279,7 +288,7 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
         for iteration in range(horizon):
                 
             # Update UCB scores
-            self._update_buffer_ucb_scores()
+            self._update_buffer_scores()
             
             # Select candidate with highest UCB score
             selected_candidate = max(self.buffer, key=lambda c: c['ucb_score'])
@@ -304,16 +313,17 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
                 print_color(f"UCB iteration {iteration+1}/{horizon}: "
                           f"Selected candidate score {validation_score:.4f} "
                           f"(evaluated on {validation_evals} samples)", 'cyan')
+                
+        self._update_buffer_scores()
+        # Return the candidate with highest lcb score (pure exploitation)
+        best_candidate = max(self.buffer, key=lambda c: c['lcb_score'])
 
-        # Return the candidate with highest mean score (pure exploitation)
-        best_candidate = max(self.buffer, key=lambda c: c['score_sum'] / (c['eval_count'] or 1E-9))
-
-        # Handle buffer overflow - keep only max_buffer_size best candidates based on mean score
+        # Handle buffer overflow - keep only max_buffer_size best candidates based on lcb score
         if len(self.buffer) > self.max_buffer_size:
-            # Sort by mean score and keep only the top max_buffer_size candidates
-            sorted_buffer = sorted(self.buffer, key=lambda c: c['score_sum'] / (c['eval_count'] or 1E-9), reverse=True)
+            # Sort by lcb score and keep only the top max_buffer_size candidates
+            sorted_buffer = sorted(self.buffer, key=lambda c: c['lcb_score'], reverse=True)
             self.buffer = deque(sorted_buffer[:self.max_buffer_size])
-            print_color(f"Buffer size reduced from {len(sorted_buffer)} to {len(self.buffer)} based on mean score", 'yellow')
+            print_color(f"Buffer size reduced from {len(sorted_buffer)} to {len(self.buffer)} based on lcb score", 'yellow')
 
         return best_candidate
 
@@ -387,6 +397,7 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
             
             # Best candidate identification phase
             print_color("Starting best candidate identification phase...", 'cyan')
+            # after ucb best candidate identification, return the best candidate based on lcb score
             best_candidate = self.ucb_best_candidate(
                 horizon=ucb_horizon,
                 validation_dataset=validation_dataset,
@@ -402,10 +413,10 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
             # Load best candidate parameters
             self.optimizer.update(best_params)
             self.print_intervals(self.buffer)
-            total_evaluations_tracker = np.sum([c['eval_count'] for c in self.buffer])
-            best_mean_score = best_candidate['score_sum'] / (best_candidate['eval_count'] or 1E-9)
-            ucb = self._calculate_ucb(best_candidate, total_evaluations_tracker)
-            lcb = self._calculate_lcb(best_candidate, total_evaluations_tracker)
+            # total_evaluations_tracker = np.sum([c['eval_count'] for c in self.buffer])
+            selected_mean_score = best_candidate['score_sum'] / (best_candidate['eval_count'] or 1E-9)
+            ucb = best_candidate['ucb_score']
+            lcb = best_candidate['lcb_score']
             
             # Test evaluation
             try:
@@ -438,7 +449,7 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
                 # Logging
                 self.logger.log('Buffer size', len(self.buffer), phase+1, color='yellow')
                 self.logger.log('Test score', test_score, phase+1, color='green')
-                self.logger.log('Best mean score', best_mean_score, phase+1, color='magenta')
+                self.logger.log('Selected mean score', selected_mean_score, phase+1, color='magenta')
                 self.logger.log('UCB', ucb, phase+1, color='magenta')
                 self.logger.log('LCB', lcb, phase+1, color='magenta')
                 self.logger.log('Total samples', self.total_samples, phase+1, color='cyan')
@@ -617,7 +628,7 @@ class ExplorewithLLM(ExploreAlgorithm):
                 )
         
         # Add LLM-based exploration
-        self._update_buffer_ucb_scores()
+        self._update_buffer_scores()
 
         valid_candidates = [c for c in self.buffer if c.get('ucb_score') is not None and c.get('ucb_score') != -float('inf') and c.get('ucb_score') != float('inf')]
         
