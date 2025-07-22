@@ -543,23 +543,23 @@ class ExplorewithLLM(ExploreAlgorithm):
         
         print_color(f"Initialized ExplorewithLLM with LLM model: {llm_model}", "cyan")
     
-    def _llm_generate_candidate(self) -> Optional[Dict[trace.nodes.ParameterNode, str]]:
+    def _llm_generate_candidate(self, num_LLM_samples: int = 1) -> List[Dict[trace.nodes.ParameterNode, str]]:
         """
         Prompts an LLM with current buffer candidates to generate new string values for parameters.
-        Returns a dictionary mapping ParameterNode objects to new string values, or None on failure.
+        Retries until num_LLM_samples successful candidates are generated.
+        Returns a list of dictionaries mapping ParameterNode objects to new string values.
         """
         # print_color("Attempting to generate candidate using LLM...", "blue")
         if not self.buffer:
             print_color("LLM generation: Buffer is empty, cannot provide context to LLM.", "yellow")
-            return None
-
+            return []
 
         # Filter buffer to only include candidates with valid UCB scores
         valid_candidates = [c for c in self.buffer if c.get('ucb_score') is not None and c.get('ucb_score') != -float('inf') and c.get('ucb_score') != float('inf')]
         
         if not valid_candidates:
             print_color("LLM generation: No candidates with valid UCB scores found.", "yellow")
-            return None
+            return []
         
         sorted_buffer = sorted(valid_candidates, key=lambda c: c.get('ucb_score', -float('inf')), reverse=True)
         # Include first, last, and evenly spaced middle candidates
@@ -597,38 +597,52 @@ class ExplorewithLLM(ExploreAlgorithm):
             {"role": "user", "content": f"Here are some current candidates from the search buffer and their statistics:\\n{serializable_candidate_summaries}\\n\\nHere is an example of the required JSON output structure (parameter names as keys, new string values as values):\\n{example_param_structure_json_str}\\n\\nPlease generate a new set of parameters in exactly the same JSON format. Make sure use double quotes for the keys and values."}
         ]
         
-        # print_color(f"LLM prompt (summary): {len(prompt_candidates)} candidates, structure example provided.", "magenta")
-        response_format =  {"type": "json_object"}
-        llm_response = self.llm(prompt_messages, response_format=response_format) 
-        llm_response_str = llm_response.choices[0].message.content
-
-        if not llm_response_str:
-            print_color("LLM returned an empty response.", "red")
-            return None
+        response_format = {"type": "json_object"}
         
-        cleaned_llm_response_str = llm_response_str.strip()
-
-        try:
-            llm_params_raw = json.loads(cleaned_llm_response_str)
-            # self.total_proposals += 1
-        except json.JSONDecodeError as e:
-            print_color(f"JSON parsing attempts failed: {e}", "red")
-            print_color("Returning None.", "red")
-            return None
-
-        if not isinstance(llm_params_raw, dict):
-            print_color(f"LLM output was not a JSON dictionary after parsing: {type(llm_params_raw)}", "red")
-            print_color("Returning None.", "red")
-            return None
+        successful_candidates = []
+        max_total_retries = num_LLM_samples * 5  # Allow up to 5 retries per desired sample
+        retry_count = 0
         
-        try:
-            candidate_params_dict = self.construct_update_dict(llm_params_raw)
-        except Exception as e:
-            print_color(f"Error constructing update dict: {e}", "red")
-            print_color("Returning None.", "red")
-            return None
+        while len(successful_candidates) < num_LLM_samples and retry_count < max_total_retries:
+            try:
+                retry_count += 1
+                # print_color(f"LLM generation attempt {retry_count}/{max_total_retries}, successful candidates: {len(successful_candidates)}/{num_LLM_samples}", "blue")
+                
+                llm_response = self.llm(prompt_messages, response_format=response_format) 
+                llm_response_str = llm_response.choices[0].message.content
 
-        return candidate_params_dict
+                if not llm_response_str:
+                    print_color("LLM returned an empty response, retrying...", "yellow")
+                    continue
+                
+                cleaned_llm_response_str = llm_response_str.strip()
+
+                try:
+                    llm_params_raw = json.loads(cleaned_llm_response_str)
+                except json.JSONDecodeError as e:
+                    print_color(f"JSON parsing failed: {e}, retrying...", "yellow")
+                    continue
+
+                if not isinstance(llm_params_raw, dict):
+                    print_color(f"LLM output was not a JSON dictionary: {type(llm_params_raw)}, retrying...", "yellow")
+                    continue
+                
+                try:
+                    candidate_params_dict = self.construct_update_dict(llm_params_raw)
+                    successful_candidates.append(candidate_params_dict)
+                    print_color(f"Successfully generated candidate {len(successful_candidates)}/{num_LLM_samples}", "green")
+                except Exception as e:
+                    print_color(f"Error constructing update dict: {e}, retrying...", "yellow")
+                    continue
+                    
+            except Exception as e:
+                print_color(f"LLM generation error: {e}, retrying...", "yellow")
+                continue
+        
+        if len(successful_candidates) < num_LLM_samples:
+            print_color(f"Warning: Only generated {len(successful_candidates)} candidates out of {num_LLM_samples} requested after {retry_count} attempts", "yellow")
+        
+        return successful_candidates
            
     
     def construct_update_dict(self, suggestion: Dict[str, Any]) -> Dict[ParameterNode, Any]:
@@ -679,16 +693,13 @@ class ExplorewithLLM(ExploreAlgorithm):
             return None
         print_color(f"Adding {num_LLM_samples} LLM-generated candidates...", 'magenta')
         
-        # Generate LLM candidates in parallel
-        new_candidates = async_run([self._llm_generate_candidate] * num_LLM_samples,
-                                  [() for _ in range(num_LLM_samples)],
-                                  max_workers=num_threads,
-                                  description=f"Generating {num_LLM_samples} LLM candidates")
+        # Generate LLM candidates - now returns a list directly
+        new_candidates = self._llm_generate_candidate(num_LLM_samples=num_LLM_samples)
         
         # Process the generated candidates
         llm_candidates_added = 0
         for new_candidate in new_candidates:
-            if new_candidate is not None:  # Only add if candidate is valid
+            if new_candidate is not None and isinstance(new_candidate, dict):  # Only add if candidate is valid
                 new_candidate_entry = {
                     'params': new_candidate,
                     'score_sum': 0,
@@ -698,7 +709,7 @@ class ExplorewithLLM(ExploreAlgorithm):
                 self.buffer.append(new_candidate_entry)
                 llm_candidates_added += 1
             else:
-                print_color("LLM generated None candidate, skipping...", 'yellow')
+                print_color("LLM generated invalid candidate, skipping...", 'yellow')
         
         # Update total_proposals counter
         self.total_proposals += llm_candidates_added
