@@ -339,6 +339,7 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
               log_frequency: Optional[int] = None,
               min_score_for_agent_update: Optional[float] = None,
               num_to_sample: int = 5,
+              num_LLM_samples: int = 2,
               num_threads: Optional[int] = None,
               num_phases: int = 5,
               ucb_horizon: int = 50,
@@ -392,6 +393,7 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
                 train_dataset, 
                 train_batch_size=train_batch_size,
                 num_to_sample=num_to_sample,
+                num_LLM_samples=num_LLM_samples,
                 num_threads=num_threads
             )
             
