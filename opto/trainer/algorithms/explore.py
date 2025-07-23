@@ -149,7 +149,8 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
 
         self.optimizer.update(original_params) 
 
-        avg_score = np.mean(eval_scores) if  all(s is not None for s in eval_scores) else 0
+        non_none_scores = [s for s in eval_scores if s is not None]
+        avg_score = np.mean(non_none_scores) if non_none_scores else 0
         eval_count = len(eval_xs) 
         
         return float(avg_score), eval_count
