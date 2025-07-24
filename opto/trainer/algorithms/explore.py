@@ -148,10 +148,13 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
                                description=f"Evaluating candidate")
 
         self.optimizer.update(original_params) 
+        # Extract all non-None values and compute overall average
+        all_valid_scores = [score for row in eval_scores for score in row if score is not None]
+        breakpoint()
 
-        non_none_scores = [s for s in eval_scores if s is not None]
-        avg_score = np.mean(non_none_scores) if non_none_scores else 0
-        eval_count = len(eval_xs) 
+        avg_score = np.mean(all_valid_scores) if all_valid_scores else 0
+        
+        eval_count = len(all_valid_scores) 
         
         return float(avg_score), eval_count
 
@@ -307,7 +310,7 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
                 continue
             
             # Update candidate statistics
-            if validation_score > -np.inf and validation_evals > 0:
+            if validation_score is not None and validation_score > -np.inf and validation_evals > 0:
                 selected_candidate['score_sum'] += validation_score * validation_evals
                 selected_candidate['eval_count'] += validation_evals
                 self.total_samples += validation_evals
@@ -435,9 +438,10 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
                 # Calculate buffer statistics
                 buffer_mean_scores = []
                 for candidate in self.buffer:
-                    if candidate['eval_count'] > 0:
+                    if candidate['eval_count'] > 0 and candidate['score_sum'] is not None:
                         mean_score = candidate['score_sum'] / candidate['eval_count']
-                        buffer_mean_scores.append(mean_score)
+                        if mean_score is not None:
+                            buffer_mean_scores.append(mean_score)
                 
                 # Log buffer statistics
                 if buffer_mean_scores:
