@@ -149,8 +149,11 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
 
         self.optimizer.update(original_params) 
         # Extract all non-None values and compute overall average
-        all_valid_scores = [score for row in eval_scores for score in row if score is not None]
-        breakpoint()
+        # Handle both 1D and 2D eval_scores
+        if eval_scores.ndim == 1:
+            all_valid_scores = [score for score in eval_scores if score is not None]
+        else:
+            all_valid_scores = [score for row in eval_scores for score in row if score is not None]
 
         avg_score = np.mean(all_valid_scores) if all_valid_scores else 0
         
@@ -341,7 +344,7 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
               evaluation_batch_size: int = 20,
               eval_frequency: int = 1,  
               log_frequency: Optional[int] = None,
-              min_score_for_agent_update: Optional[float] = None,
+              min_score_for_agent_update: Optional[float] = 0,
               num_to_sample: int = 5,
               num_LLM_samples: int = 2,
               num_threads: Optional[int] = None,
@@ -426,15 +429,32 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
             
             # Test evaluation
             try:
-                test_score, test_evals = self._evaluate_candidate(
-                    best_params,
-                    test_dataset,
-                    guide,
-                    len(test_dataset['inputs']),  # Use subset for test evaluation too
-                    num_threads,
-                    num_eval_times=self.num_eval_times
-                )
-                
+                # test_score, test_evals = self._evaluate_candidate(
+                #     best_params,
+                #     test_dataset,
+                #     guide,
+                #     len(test_dataset['inputs']),  # Use subset for test evaluation too
+                #     num_threads,
+                #     num_eval_times=self.num_eval_times
+                # )
+                # At the test step, we also want to log the raw test results
+                self.optimizer.update(best_params)                      
+                eval_scores = evaluate(self.agent,
+                                        guide, 
+                                        test_dataset['inputs'],
+                                        test_dataset['infos'],
+                                        min_score=self.min_score,
+                                        num_threads=num_threads,
+                                        num_samples=self.num_eval_times,
+                                        description=f"Evaluating candidate")
+                 # Create table with explicit column names
+                columns = [f'Eval_{i+1}' for i in range(eval_scores.shape[1])]
+                table = self.logger.wandb.Table(columns=columns, data=eval_scores.tolist())
+                self.logger.log(f'Raw_test_scores_at_step_{phase+1}', table, phase+1, color='green')
+                # Extract all non-None values and compute overall average
+                all_valid_scores = [score for row in eval_scores for score in row if score is not None]
+                test_score = np.mean(all_valid_scores) if all_valid_scores else 0
+                 # test_evals = len(all_valid_scores)
                 # Calculate buffer statistics
                 buffer_mean_scores = []
                 for candidate in self.buffer:
@@ -464,8 +484,10 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
                 
             except Exception as e:
                 print_color(f"Phase {phase+1}: Test evaluation failed: {e}", 'red')
+        params_values = list(best_params.values())
+        self.logger.log('Final parameter 1', params_values[0], phase+1, color='magenta')
+        self.logger.log('Final parameter 2', params_values[1], phase+1, color='magenta')
                
-        
         # Final results
         print_color("ExploreAlgorithm training completed.", 'blue')
         
