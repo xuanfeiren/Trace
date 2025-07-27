@@ -247,10 +247,18 @@ class Minibatch(AlgorithmBase):
     def evaluate(self, agent, guide, xs, infos, min_score=None, num_samples=1, num_threads=None, description=None):
         """ Evaluate the agent on the given dataset. """
         num_threads = num_threads or self.num_threads  # Use provided num_threads or fall back to self.num_threads
-        test_scores = evaluate(agent, guide, xs, infos, min_score=min_score, num_threads=num_threads,
+        eval_scores = evaluate(agent, guide, xs, infos, min_score=min_score, num_threads=num_threads,
                                num_samples=num_samples, description=description, )
-        if all([s is not None for s in test_scores]):
-            return np.mean(test_scores)
+        if eval_scores.ndim == 1:
+            all_valid_scores = [score for score in eval_scores if score is not None]
+        else:
+            all_valid_scores = [score for row in eval_scores for score in row if score is not None]
+
+        avg_score = np.mean(all_valid_scores) if all_valid_scores else 0
+        
+        # eval_count = len(all_valid_scores) 
+        
+        return float(avg_score)
         
     def has_improvement(self, xs, guide, infos, current_score, current_outputs, backup_dict, threshold=0, num_threads=None, *args, **kwargs):
         # This function can be overridden by subclasses to implement their own improvement check.
@@ -414,7 +422,7 @@ class BasicSearchAlgorithm(MinibatchAlgorithm):
 
         def validate():
             """ Validate the agent on the validation dataset. """
-            scores = evaluate(self.agent,
+            score = self.evaluate(self.agent,
                               self.validate_guide,
                               self.validate_dataset['inputs'],
                               self.validate_dataset['infos'],
@@ -422,7 +430,7 @@ class BasicSearchAlgorithm(MinibatchAlgorithm):
                               num_threads=num_threads,
                               description="Validating proposals")
             self.total_samples += len(self.validate_dataset['inputs']) # more samples have been used to validate
-            return np.mean(scores) if all([s is not None for s in scores]) else -np.inf
+            return score
 
         # TODO perhaps we can ask for multiple updates in one query or use different temperatures in different queries
         # Generate different proposals
@@ -481,62 +489,15 @@ class MinibatchwithValidation(MinibatchAlgorithm):
                 }
         self.buffer.append(candidate_entry)
 
-    def _evaluate_candidate(self, 
-                              params_to_eval_dict: Dict[str, Any], 
-                              dataset: Dict[str, List[Any]], 
-                              guide, 
-                              evaluation_batch_size: int = 10,
-                              num_threads: Optional[int] = None,
-                              num_eval_times: int = 1
-                              ) -> Tuple[float, int]:
-        """Evaluates a given set of parameters on samples from the provided dataset."""
-        if not dataset or not dataset.get('inputs') or not dataset.get('infos') or not dataset['inputs']:
-            print_color("Evaluation dataset is empty or invalid. Returning score -inf, count 0.", color='yellow')
-            return -np.inf, 0
-
-        original_params = {p: copy.deepcopy(p.data) for p in self.optimizer.parameters}
-        self.optimizer.update(params_to_eval_dict)      
-
-        # Sample a subset of the dataset instead of using the entire dataset
-        eval_xs, eval_infos = self._sample_minibatch(dataset, evaluation_batch_size)
-        
-        if not eval_xs:
-            print_color("Evaluation minibatch is empty. Returning score -inf, count 0.", color='yellow')
-            self.optimizer.update(original_params) 
-            return -np.inf, 0
-
-        eval_scores = evaluate(self.agent,
-                               guide, 
-                               eval_xs,
-                               eval_infos,
-                               min_score=self.min_score if hasattr(self, 'min_score') else None,
-                               num_threads=num_threads or self.num_threads,
-                               num_samples=num_eval_times,
-                               description=f"Evaluating candidate")
-
-        self.optimizer.update(original_params) 
-        # Extract all non-None values and compute overall average
-        # Handle both 1D and 2D eval_scores
-        if eval_scores.ndim == 1:
-            all_valid_scores = [score for score in eval_scores if score is not None]
-        else:
-            all_valid_scores = [score for row in eval_scores for score in row if score is not None]
-
-        avg_score = np.mean(all_valid_scores) if all_valid_scores else 0
-        
-        eval_count = len(all_valid_scores) 
-        
-        return float(avg_score), eval_count
-    
     def buffer_validation(self):
         for i,candidate in enumerate(self.buffer):
-            avg_score, eval_count = self._evaluate_candidate(candidate['params'], self.validate_dataset, self.validate_guide,
+            self.optimizer.update(candidate['params'])
+            avg_score = self.evaluate(self.agent, self.validate_guide, self.validate_dataset['inputs'], self.validate_dataset['infos'],
                                 min_score=self.min_score, num_threads=self.num_threads,num_samples=self.validate_times,
                                 description=f"Final validation of candidate {i} in {len(self.buffer)} candidates")  
-            candidate['mean_score'] = avg_score  
-            candidate['eval_count'] += eval_count       
-            self.total_samples += eval_count
-            print_color(f"Candidate {i} in {len(self.buffer)} candidates: Mean score {avg_score}, Eval count {eval_count}", 'green')
+            candidate['mean_score'] = avg_score
+            self.total_samples += len(self.validate_dataset['inputs'])*self.validate_times
+            print_color(f"Candidate {i} in {len(self.buffer)} candidates: Mean score {avg_score}", 'green')
         return self.buffer
     
     def train(self,
