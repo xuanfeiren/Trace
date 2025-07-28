@@ -12,7 +12,11 @@ from opto.optimizers.utils import print_color
 from opto.trainer.evaluators import evaluate
 from typing import Union, List, Tuple, Dict, Any, Optional
 from collections import deque
-
+from opto.utils.llm import LLM # For the selector LLM
+from opto.trace.nodes import ParameterNode
+import json
+import warnings
+from black import format_str, FileMode
 
 def retry_with_exponential_backoff(func, max_retries=10, base_delay=1.0, operation_name="operation"):
     """
@@ -361,14 +365,16 @@ class MinibatchAlgorithm(Minibatch):
     def optimizer_step(self, bypassing=False, verbose=False, num_threads=None, **kwargs):
         """ Subclasses can implement this method to update the agent. """
         # We separate this method from the update method to allow subclasses to implement their own optimization step.
-        self.total_proposals += 1
+        
         
         # Backup current parameters before attempting update
         current_params = {p: copy.deepcopy(p.data) for p in self.agent.parameters()}
         
         # Wrap optimizer.step with retry logic
         def optimizer_step_func():
-            return self.optimizer.step(bypassing=bypassing, verbose=verbose, **kwargs)
+            params = self.optimizer.step(bypassing=bypassing, verbose=verbose, **kwargs)
+            self.total_proposals += 1
+            return params
         
         try:
             return retry_with_exponential_backoff(
@@ -376,7 +382,7 @@ class MinibatchAlgorithm(Minibatch):
                 operation_name=f"Optimizer step (iteration {getattr(self, 'n_iters', 'unknown')})"
             )
         except Exception as e:
-            self.total_proposals -= 1
+            
             # If all retries failed, fall back to current parameters
             print(f"Optimizer step failed after all retries. Falling back to current parameters. Error: {e}")
             self.optimizer.update(current_params)
@@ -442,9 +448,7 @@ class BasicSearchAlgorithm(MinibatchAlgorithm):
         update_dicts = async_run([super().optimizer_step]*self.num_proposals,
                                 kwargs_list=[step_kwargs] * self.num_proposals,
                                 max_workers=num_threads,
-                                description=f"Generating {self.num_proposals} proposals")  # async step        
-        self.total_proposals += self.num_proposals
-        
+                                description=f"Generating {self.num_proposals} proposals")  # async step                
         # Validate the proposals
         candidates = []
         backup_dict = {p: copy.deepcopy(p.data) for p in self.agent.parameters()}  # backup the current value
@@ -599,3 +603,12 @@ class MinibatchwithValidation(MinibatchAlgorithm):
 
 
         return train_scores, test_score
+
+class IslandSearchAlgorithm(MinibatchAlgorithm):
+    """This Island Search Algorithm is a baseline which only uses scores.
+    The evolution process is:
+    1. Initial m islands with the initial candidate
+    2. At each step, for each island create a few-shot prompt from candidate-score pairs, to generate new candidates. Add the new candidate to the same island
+    3. Every once in a while, discard m/2 islands with low scores. Then initialize m/2 islands from candidates with high scores from existing islands.
+    """
+   
