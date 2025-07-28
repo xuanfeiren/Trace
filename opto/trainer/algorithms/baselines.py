@@ -1,5 +1,5 @@
 #TODO: Implement MinibatchwithValidation and IslandSearch Algorithms
-
+#TODO: log raw test scores and the final best candidate for each baseline algorithm
 import numpy as np
 import copy
 import time
@@ -17,6 +17,7 @@ from opto.trace.nodes import ParameterNode
 import json
 import warnings
 from black import format_str, FileMode
+import random
 
 def retry_with_exponential_backoff(func, max_retries=10, base_delay=1.0, operation_name="operation"):
     """
@@ -180,16 +181,30 @@ class Minibatch(AlgorithmBase):
         log_frequency = log_frequency or eval_frequency  # frequency of logging (default to eval_frequency)
         num_threads = num_threads or self.num_threads  # Use provided num_threads or fall back to self.num_threads
         test_dataset = test_dataset or train_dataset  # default to train_dataset if test_dataset is not provided
-        self.num_eval_samples = num_eval_samples  # number of samples to use to evaluate each input
+        # self.num_eval_samples = num_eval_samples  # number of samples to use to evaluate each input
         self.total_samples = 0 # log the total number of samples the algorithm has seen
         self.total_proposals = 0 # log the number of total proposals the algorithm has made
 
         # Evaluate the agent before learning
         if eval_frequency > 0:
-            test_score = self.evaluate(self.agent, guide, test_dataset['inputs'], test_dataset['infos'],
-                          min_score=min_score, num_threads=num_threads,num_samples=num_eval_samples,
-                          description=f"Evaluating agent (iteration {self.n_iters})")  # and log
+            eval_scores = evaluate(self.agent,
+                                        guide, 
+                                        test_dataset['inputs'],
+                                        test_dataset['infos'],
+                                        min_score=self.min_score,
+                                        num_threads=num_threads,
+                                        num_samples=self.num_eval_times,
+                                        description=f"Evaluating candidate")
+                 # Create table with explicit column names
+            columns = [f'Eval_{i+1}' for i in range(eval_scores.shape[1])]
+            table = self.logger.wandb.Table(columns=columns, data=eval_scores.tolist())
+            # self.logger.log(f'Raw_test_scores_at_step_{self.n_iters}', table,  self.n_iters, color='green')
+            # Extract all non-None values and compute overall average
+            all_valid_scores = [score for row in eval_scores for score in row if score is not None]
+            test_score = np.mean(all_valid_scores) if all_valid_scores else 0
             self.logger.log('Test score', test_score, self.n_iters, color='green')
+            self.logger.log('Total samples', self.total_samples, self.n_iters, color='cyan')
+            self.logger.log('Total proposals', self.total_proposals, self.n_iters, color='red')
 
         # Save the agent before learning if save_frequency > 0
         if save_frequency is not None and save_frequency > 0:
@@ -225,9 +240,21 @@ class Minibatch(AlgorithmBase):
 
             # Evaluate the agent after update
             if test_dataset is not None and self.n_iters % eval_frequency == 0:
-                test_score = self.evaluate(self.agent, guide, test_dataset['inputs'], test_dataset['infos'],
-                                min_score=min_score, num_threads=num_threads,num_samples=num_eval_samples,
-                                description=f"Evaluating agent (iteration {self.n_iters})")  # and log
+                eval_scores = evaluate(self.agent,
+                                        guide, 
+                                        test_dataset['inputs'],
+                                        test_dataset['infos'],
+                                        min_score=self.min_score,
+                                        num_threads=num_threads,
+                                        num_samples=self.num_eval_times,
+                                        description=f"Evaluating candidate")
+                 # Create table with explicit column names
+                columns = [f'Eval_{i+1}' for i in range(eval_scores.shape[1])]
+                table = self.logger.wandb.Table(columns=columns, data=eval_scores.tolist())
+                self.logger.log(f'Raw_test_scores_at_step_{self.n_iters}', table, self.n_iters, color='green')
+                # Extract all non-None values and compute overall average
+                all_valid_scores = [score for row in eval_scores for score in row if score is not None]
+                test_score = np.mean(all_valid_scores) if all_valid_scores else 0
                 self.logger.log('Test score', test_score, self.n_iters, color='green')
 
             # Save the agent
@@ -238,14 +265,17 @@ class Minibatch(AlgorithmBase):
             if score is not None:  # so that mean can be computed
                 train_scores.append(score)
             if self.n_iters % log_frequency == 0:
-                print(f"Epoch: {i}. Iteration: {self.n_iters}")
+                # print(f"Epoch: {i}. Iteration: {self.n_iters}")
                 self.logger.log("Instantaneous train score", score, self.n_iters)
                 self.logger.log("Average train score", np.mean(train_scores), self.n_iters)
                 self.logger.log("Total samples", self.total_samples, self.n_iters)
                 self.logger.log("Total proposals", self.total_proposals, self.n_iters)
                 # for p in self.agent.parameters():
                 #     self.logger.log(f"Parameter: {p.name}", p.data, self.n_iters, color='red')
-
+        best_params = {p: copy.deepcopy(p.data) for p in self.optimizer.parameters}
+        params_values = list(best_params.values())
+        self.logger.log('Final parameter 1', params_values[0], self.n_iters, color='magenta')
+        self.logger.log('Final parameter 2', params_values[1], self.n_iters, color='magenta')
         return train_scores, test_score
 
     def evaluate(self, agent, guide, xs, infos, min_score=None, num_samples=1, num_threads=None, description=None):
@@ -445,10 +475,19 @@ class BasicSearchAlgorithm(MinibatchAlgorithm):
                 
         # Use aysnc_run to run the optimizer_step in parallel
         # NOTE optimizer_step is coupled via async_run 
-        update_dicts = async_run([super().optimizer_step]*self.num_proposals,
-                                kwargs_list=[step_kwargs] * self.num_proposals,
-                                max_workers=num_threads,
-                                description=f"Generating {self.num_proposals} proposals")  # async step                
+        # update_dicts = async_run([super().optimizer_step]*self.num_proposals,
+        #                         kwargs_list=[step_kwargs] * self.num_proposals,
+        #                         max_workers=num_threads,
+        #                         description=f"Generating {self.num_proposals} proposals")  # async step
+        update_dicts = []
+        while len(update_dicts) < self.num_proposals:
+            try:
+                update_dict = super().optimizer_step(**step_kwargs)
+                update_dicts.append(update_dict)
+            except Exception as e:
+                print(f"Error in optimizer step: {e}")
+                continue
+        
         # Validate the proposals
         candidates = []
         backup_dict = {p: copy.deepcopy(p.data) for p in self.agent.parameters()}  # backup the current value
@@ -530,20 +569,34 @@ class MinibatchwithValidation(MinibatchAlgorithm):
         self.min_score = min_score
         self.current_score = None
         self.validate_times = 2 # To use the sample budget
-
+        self.num_eval_times = num_eval_samples # number of times to evaluate each candidate
         log_frequency = log_frequency or eval_frequency  # frequency of logging (default to eval_frequency)
         num_threads = num_threads or self.num_threads  # Use provided num_threads or fall back to self.num_threads
         test_dataset = test_dataset or train_dataset  # default to train_dataset if test_dataset is not provided
-        self.num_eval_samples = num_eval_samples  # number of samples to use to evaluate each input
+        # self.num_eval_samples = num_eval_samples  # number of samples to use to evaluate each input
         self.total_samples = 0 # log the total number of samples the algorithm has seen
         self.total_proposals = 0 # log the number of total proposals the algorithm has made
 
         # Evaluate the agent before learning
         if eval_frequency > 0:
-            test_score = self.evaluate(self.agent, guide, test_dataset['inputs'], test_dataset['infos'],
-                          min_score=min_score, num_threads=num_threads,num_samples=num_eval_samples,
-                          description=f"Evaluating agent (iteration {self.n_iters})")  # and log
+            eval_scores = evaluate(self.agent,
+                                        guide, 
+                                        test_dataset['inputs'],
+                                        test_dataset['infos'],
+                                        min_score=self.min_score,
+                                        num_threads=num_threads,
+                                        num_samples=self.num_eval_times,
+                                        description=f"Evaluating candidate")
+                 # Create table with explicit column names
+            columns = [f'Eval_{i+1}' for i in range(eval_scores.shape[1])]
+            table = self.logger.wandb.Table(columns=columns, data=eval_scores.tolist())
+            # self.logger.log(f'Raw_test_scores_at_step_{self.n_iters}', table, self.n_iters, color='green')
+            # Extract all non-None values and compute overall average
+            all_valid_scores = [score for row in eval_scores for score in row if score is not None]
+            test_score = np.mean(all_valid_scores) if all_valid_scores else 0
             self.logger.log('Test score', test_score, self.n_iters, color='green')
+            self.logger.log('Total samples', self.total_samples, self.n_iters, color='cyan')
+            self.logger.log('Total proposals', self.total_proposals, self.n_iters, color='red')
 
 
         # TODO random sampling with replacement
@@ -575,9 +628,21 @@ class MinibatchwithValidation(MinibatchAlgorithm):
 
             # Evaluate the agent after update
             if test_dataset is not None and self.n_iters % eval_frequency == 0:
-                test_score = self.evaluate(self.agent, guide, test_dataset['inputs'], test_dataset['infos'],
-                                min_score=min_score, num_threads=num_threads,num_samples=num_eval_samples,
-                                description=f"Evaluating agent (iteration {self.n_iters})")  # and log
+                eval_scores = evaluate(self.agent,
+                                        guide, 
+                                        test_dataset['inputs'],
+                                        test_dataset['infos'],
+                                        min_score=self.min_score,
+                                        num_threads=num_threads,
+                                        num_samples=self.num_eval_times,
+                                        description=f"Evaluating candidate")
+                 # Create table with explicit column names
+                columns = [f'Eval_{i+1}' for i in range(eval_scores.shape[1])]
+                table = self.logger.wandb.Table(columns=columns, data=eval_scores.tolist())
+                self.logger.log(f'Raw_test_scores_at_step_{self.n_iters}', table, self.n_iters, color='green')
+                # Extract all non-None values and compute overall average
+                all_valid_scores = [score for row in eval_scores for score in row if score is not None]
+                test_score = np.mean(all_valid_scores) if all_valid_scores else 0
                 self.logger.log('Test score', test_score, self.n_iters, color='green')
 
             
@@ -586,29 +651,413 @@ class MinibatchwithValidation(MinibatchAlgorithm):
             if score is not None:  # so that mean can be computed
                 train_scores.append(score)
             if self.n_iters % log_frequency == 0:
-                print(f"Epoch: {i}. Iteration: {self.n_iters}")
+                # print(f"Epoch: {i}. Iteration: {self.n_iters}")
                 self.logger.log("Instantaneous train score", score, self.n_iters)
                 self.logger.log("Average train score", np.mean(train_scores), self.n_iters)
                 self.logger.log("Total samples", self.total_samples, self.n_iters)
                 self.logger.log("Total proposals", self.total_proposals, self.n_iters)
                 # for p in self.agent.parameters():
                 #     self.logger.log(f"Parameter: {p.name}", p.data, self.n_iters, color='red')
+        print_color(f"Candidate generation finished. Start validation.", 'yellow')
         self.buffer_validation()
         candidate_to_test = max(self.buffer, key=lambda c: c['mean_score'])
         self.optimizer.update(candidate_to_test['params'])
-        self.test_score = self.evaluate(self.agent, guide, test_dataset['inputs'], test_dataset['infos'],
-                                min_score=min_score, num_threads=num_threads,num_samples=num_eval_samples,
-                                description=f"Final test of candidate") 
-        self.logger.log('Test score', self.test_score, self.n_iters, color='green')
+        eval_scores = evaluate(self.agent,
+                                        guide, 
+                                        test_dataset['inputs'],
+                                        test_dataset['infos'],
+                                        min_score=self.min_score,
+                                        num_threads=num_threads,
+                                        num_samples=self.num_eval_times,
+                                        description=f"Evaluating candidate")
+                 # Create table with explicit column names
+        columns = [f'Eval_{i+1}' for i in range(eval_scores.shape[1])]
+        table = self.logger.wandb.Table(columns=columns, data=eval_scores.tolist())
+        self.logger.log(f'Raw_test_scores_at_step_{self.n_iters}', table, self.n_iters+1, color='green')
+        # Extract all non-None values and compute overall average
+        all_valid_scores = [score for row in eval_scores for score in row if score is not None]
+        test_score = np.mean(all_valid_scores) if all_valid_scores else 0
+        self.logger.log('Test score', test_score, self.n_iters+1, color='green')
+        self.logger.log('Total samples', self.total_samples, self.n_iters+1, color='cyan')
+        self.logger.log('Total proposals', self.total_proposals, self.n_iters+1, color='red')
+        params_values = list(candidate_to_test['params'].values())
+        self.logger.log('Final parameter 1', params_values[0], self.n_iters+1, color='magenta')
+        self.logger.log('Final parameter 2', params_values[1], self.n_iters+1, color='magenta')
 
 
         return train_scores, test_score
 
+class Island:
+    """An Island has a buffer (deque object) of candidate entries. It also has attribute of best_candidate_dict and best_score."""
+    def __init__(self, buffer, best_candidate_dict, best_score):
+        self.buffer = buffer
+        self.best_candidate_dict = best_candidate_dict
+        self.best_score = best_score
+
 class IslandSearchAlgorithm(MinibatchAlgorithm):
     """This Island Search Algorithm is a baseline which only uses scores.
     The evolution process is:
-    1. Initial m islands with the initial candidate
+    1. Initialize m islands with the initial candidate
     2. At each step, for each island create a few-shot prompt from candidate-score pairs, to generate new candidates. Add the new candidate to the same island
     3. Every once in a while, discard m/2 islands with low scores. Then initialize m/2 islands from candidates with high scores from existing islands.
     """
-   
+    """About the num_samples and num_proposals budget. Plan to set num_islands to 4, num_LLM_samples to 2, then at each step we propose 8 proposals and evaluate 8*50=400 samples. 5 epochs will use 5*400=2000 samples."""
+    def __init__(self,
+                 agent: trace.Module,
+                 optimizer,
+                 logger=None,
+                 num_islands: int = 4,
+                 num_threads: int = 1,
+                 llm_model: str = "gemini/gemini-2.0-flash",
+                 num_samples_in_prompt: int = 5,
+                 num_LLM_samples: int = 2,
+                 *args,
+                 **kwargs):
+        super().__init__(agent, optimizer, logger=logger, num_threads=num_threads, *args, **kwargs)
+        self.num_islands = num_islands
+        self.num_samples_in_prompt = num_samples_in_prompt
+        self.llm = LLM(model=llm_model)
+        self.num_eval_times = 5 # number of times to evaluate each candidate
+        self.num_LLM_samples = num_LLM_samples
+        print_color(f"Initialized IslandSearchAlgorithm with num_islands: {num_islands}, llm_model: {llm_model}", "cyan")
+        
+    def _sample_minibatch(self, dataset: Dict[str, List[Any]], batch_size: int) -> Tuple[List[Any], List[Any]]:
+        """Sample a minibatch from the dataset."""
+        if not dataset or not dataset.get('inputs') or not dataset.get('infos'):
+            print_color("Warning: Attempted to sample from an empty or malformed dataset.", color='yellow')
+            return [], []
+        
+        dataset_size = len(dataset['inputs'])
+        if dataset_size == 0:
+            print_color("Warning: Dataset is empty, cannot sample minibatch.", color='yellow')
+            return [], []
+
+        actual_batch_size = min(batch_size, dataset_size)
+        indices = np.random.choice(dataset_size, actual_batch_size, replace=False)
+        xs = [dataset['inputs'][i] for i in indices]
+        infos = [dataset['infos'][i] for i in indices]
+        return xs, infos
+    
+    def _evaluate_candidate(self, 
+                            params_to_eval_dict: Dict[str, Any], 
+                            dataset: Dict[str, List[Any]], 
+                            guide, 
+                            num_threads: Optional[int] = None,
+                            num_eval_times: int = 1,
+                            evaluation_batch_size: int = None,
+                            ) -> Tuple[float, int]:
+        """One self-defined evaluation function, could evaluate the dataset on randomly sampled evaluation_batch_size inputs. By default, it will evaluate the entire dataset."""
+        if evaluation_batch_size is None: # By default, evaluate the entire dataset.
+            evaluation_batch_size = len(dataset['inputs'])
+
+        original_params = {p: copy.deepcopy(p.data) for p in self.optimizer.parameters}
+        self.optimizer.update(params_to_eval_dict)      
+
+        # Sample a subset of the dataset instead of using the entire dataset
+        eval_xs, eval_infos = self._sample_minibatch(dataset, evaluation_batch_size)
+        
+        if not eval_xs:
+            print_color("Evaluation minibatch is empty. Returning score -inf, count 0.", color='yellow')
+            self.optimizer.update(original_params) 
+            return -np.inf, 0
+
+        eval_scores = evaluate(self.agent,
+                               guide, 
+                               eval_xs,
+                               eval_infos,
+                               min_score=self.min_score if hasattr(self, 'min_score') else None,
+                               num_threads=num_threads or self.num_threads,
+                               num_samples=num_eval_times,
+                               description=f"Evaluating candidate")
+
+        self.optimizer.update(original_params) 
+        # Extract all non-None values and compute overall average
+        # Handle both 1D and 2D eval_scores
+        if eval_scores.ndim == 1:
+            all_valid_scores = [score for score in eval_scores if score is not None]
+        else:
+            all_valid_scores = [score for row in eval_scores for score in row if score is not None]
+
+        avg_score = np.mean(all_valid_scores) if all_valid_scores else 0
+        
+        eval_count = len(all_valid_scores) 
+        
+        return float(avg_score), eval_count
+
+    def _llm_generate_candidate(self, buffer, num_LLM_samples: int = 1) -> List[Dict[trace.nodes.ParameterNode, str]]:
+        """
+        Prompts an LLM with current buffer candidates to generate new string values for parameters.
+        Retries until num_LLM_samples successful candidates are generated.
+        Returns a list of dictionaries mapping ParameterNode objects to new string values.
+        """
+        # print_color("Attempting to generate candidate using LLM...", "blue")
+        if not buffer:
+            print_color("LLM generation: Buffer is empty, cannot provide context to LLM.", "yellow")
+            return []
+
+        # Filter buffer to only include candidates with valid mean scores
+        valid_candidates = [c for c in buffer if c.get('mean_score') is not None and c.get('mean_score') != -float('inf') and c.get('mean_score') != float('inf')]
+        
+        if not valid_candidates:
+            print_color("LLM generation: No candidates with valid mean scores found.", "yellow")
+            return []
+        
+        sorted_buffer = sorted(valid_candidates, key=lambda c: c.get('mean_score', -float('inf')), reverse=True)
+        # Include first, last, and evenly spaced middle candidates
+        if len(sorted_buffer) <= self.num_samples_in_prompt:
+            prompt_candidates = sorted_buffer
+        elif self.num_samples_in_prompt <= 2:
+            # If only 1-2 samples requested, take first and optionally last
+            prompt_candidates = sorted_buffer[:self.num_samples_in_prompt]
+        else:
+            # Take first, last, and evenly spaced middle candidates
+            prompt_candidates = [sorted_buffer[0]]  # First (highest mean score)
+            if self.num_samples_in_prompt > 2:
+                # Calculate indices for middle candidates
+                middle_count = self.num_samples_in_prompt - 2  # Exclude first and last
+                if middle_count > 0 and len(sorted_buffer) > 2:
+                    # Evenly space middle candidates between index 1 and len-2
+                    middle_indices = [int(1 + i * (len(sorted_buffer) - 2) / (middle_count + 1)) 
+                                    for i in range(1, middle_count + 1)]
+                    prompt_candidates.extend([sorted_buffer[i] for i in middle_indices])
+            prompt_candidates.append(sorted_buffer[-1])  # Last (lowest mean score)
+        
+        serializable_candidate_summaries = []
+        for cand_entry in prompt_candidates:
+            summary = {
+                # "parameters":  {getattr(p,'py_name'): copy.deepcopy(p.data) for p in cand_entry['params']},
+                "parameters":  {getattr(p,'py_name'): cand_entry['params'][p] for p in cand_entry['params'].keys()},
+                "mean_score": round(cand_entry.get('mean_score',0), 4),
+            }
+            serializable_candidate_summaries.append(summary)
+        
+        example_param_structure_json_str = {getattr(p,'py_name'): copy.deepcopy(p.data) for p in self.agent.parameters()}
+
+        prompt_messages = [
+            {"role": "system", "content": "You are an expert in model optimization. Your task is to propose new string values for model parameters with high mean scores. Please output ONLY a valid JSON dictionary where keys are parameter names and values are the new string values for those parameters, matching the example structure provided. Do not add any explanations or markdown formatting around the JSON."},
+            {"role": "user", "content": f"Here are some current candidates from the search buffer and their statistics:\\n{serializable_candidate_summaries}\\n\\nHere is an example of the required JSON output structure (parameter names as keys, new string values as values):\\n{example_param_structure_json_str}\\n\\nPlease generate a new set of parameters in exactly the same JSON format. Make sure use double quotes for the keys and values."}
+        ]
+        
+        response_format = {"type": "json_object"}
+        
+        successful_candidates = []
+        max_total_retries = num_LLM_samples * 5  # Allow up to 5 retries per desired sample
+        retry_count = 0
+        
+        while len(successful_candidates) < num_LLM_samples and retry_count < max_total_retries:
+            try:
+                retry_count += 1
+                # print_color(f"LLM generation attempt {retry_count}/{max_total_retries}, successful candidates: {len(successful_candidates)}/{num_LLM_samples}", "blue")
+                
+                # Use auto_retry_with_exponential_backoff for LLM calls
+                def llm_call():
+                    return self.llm(prompt_messages, response_format=response_format)
+                
+                llm_response = retry_with_exponential_backoff(
+                    llm_call,
+                    max_retries=5,
+                    base_delay=1.0,
+                    operation_name=f"LLM generation (attempt {retry_count}/{max_total_retries})"
+                )
+                
+                if llm_response is None:
+                    print_color("LLM call failed after retries, continuing to next attempt...", "yellow")
+                    continue
+                
+                llm_response_str = llm_response.choices[0].message.content
+
+                if not llm_response_str:
+                    print_color("LLM returned an empty response, retrying...", "yellow")
+                    continue
+                
+                cleaned_llm_response_str = llm_response_str.strip()
+
+                try:
+                    llm_params_raw = json.loads(cleaned_llm_response_str)
+                except json.JSONDecodeError as e:
+                    # print_color(f"JSON parsing failed: {e}, retrying...", "yellow")
+                    continue
+
+                if not isinstance(llm_params_raw, dict):
+                    # print_color(f"LLM output was not a JSON dictionary: {type(llm_params_raw)}, retrying...", "yellow")
+                    continue
+                
+                try:
+                    candidate_params_dict = self.construct_update_dict(llm_params_raw)
+                    successful_candidates.append(candidate_params_dict)
+                    print_color(f"Successfully generated candidate {len(successful_candidates)}/{num_LLM_samples}", "green")
+                except Exception as e:
+                    print_color(f"Error constructing update dict: {e}, retrying...", "yellow")
+                    continue
+                    
+            except Exception as e:
+                print_color(f"LLM generation error: {e}, retrying...", "yellow")
+                continue
+        
+        if len(successful_candidates) < num_LLM_samples:
+            print_color(f"Warning: Only generated {len(successful_candidates)} candidates out of {num_LLM_samples} requested after {retry_count} attempts", "yellow")
+        
+        return successful_candidates
+           
+    
+    def construct_update_dict(self, suggestion: Dict[str, Any]) -> Dict[ParameterNode, Any]:
+        """Convert the suggestion in text into the right data type."""
+        update_dict = {}
+        for node in self.agent.parameters():
+            if node.trainable and node.py_name in suggestion:
+                try:
+                    formatted_suggestion = suggestion[node.py_name]
+                    if type(formatted_suggestion) == str and 'def' in formatted_suggestion:
+                        formatted_suggestion = format_str(formatted_suggestion, mode=FileMode())
+                    update_dict[node] = type(node.data)(formatted_suggestion)
+                except (ValueError, KeyError) as e:
+                    if getattr(self, 'ignore_extraction_error', False):
+                        warnings.warn(
+                            f"Cannot convert the suggestion '{suggestion[node.py_name]}' for {node.py_name} to the right data type"
+                        )
+                    else:
+                        raise e
+        return update_dict
+
+
+    def train(self,
+              guide,        
+              train_dataset,
+              validate_dataset: Optional[Dict[str, List[Any]]] = None,  # Validation set for evaluation, defaults to train_dataset
+              test_dataset: Optional[Dict[str, List[Any]]] = None,
+              train_batch_size: int = 2, 
+              num_epochs: int = 5,
+              discard_frequency: int = 2, # Discard m/2 islands with low scores every discard_frequency epochs
+              evaluation_batch_size: int = 20, # Renamed from validation_batch_size, used for all explicit evaluations
+              verbose: Union[bool, str] = False,
+              num_threads: Optional[int] = None,
+              **kwargs
+              ) :
+        """ 1. Initialize m islands with the initial candidate
+            2. At each step, for each island create a few-shot prompt from candidate-score pairs, to generate new candidates. Add the new candidate to the same island
+            3. Every once in a while, discard m/2 islands with low scores. Then initialize m/2 islands from candidates with high scores from existing islands."""
+        self.total_samples = 0
+        self.total_proposals = 0
+        self.min_score = 0
+        # Initialize m islands with the initial parameter. Each island is a deque() with maxlen=50.
+        self.islands = [Island(deque(maxlen=50), None, -np.inf) for _ in range(self.num_islands)]
+        initial_params_dict = {p: copy.deepcopy(p.data) for p in self.optimizer.parameters}
+        eval_scores = evaluate(self.agent,
+                                        guide, 
+                                        test_dataset['inputs'],
+                                        test_dataset['infos'],
+                                        min_score=self.min_score,
+                                        num_threads=num_threads,
+                                        num_samples=self.num_eval_times,
+                                        description=f"Evaluating candidate")
+                 # Create table with explicit column names
+        # columns = [f'Eval_{i+1}' for i in range(eval_scores.shape[1])]
+        # table = self.logger.wandb.Table(columns=columns, data=eval_scores.tolist())
+        # self.logger.log(f'Raw_test_scores_at_step_{phase+1}', table, phase+1, color='green')
+        # Extract all non-None values and compute overall average
+        all_valid_scores = [score for row in eval_scores for score in row if score is not None]
+        test_score = np.mean(all_valid_scores) if all_valid_scores else 0
+        self.logger.log('Test score', test_score, 0, color='green')
+        self.logger.log('Total samples', self.total_samples, 0, color='cyan')
+        self.logger.log('Total proposals', self.total_proposals, 0, color='red')
+        
+        validate_score, validate_evals = self._evaluate_candidate(
+            initial_params_dict, validate_dataset, guide, 
+            num_threads=num_threads, num_eval_times=1, evaluation_batch_size=len(validate_dataset['inputs'])
+        )
+        self.total_samples += validate_evals
+        
+        
+        initial_candidate_entry = {
+            'params': initial_params_dict,
+            'score_sum': 0,
+            'eval_count': 0,
+            'mean_score': validate_score, # Add initial validate score to the initial candidate
+        }
+        for island in self.islands: # Initialize the islands with initial statistics
+            island.buffer.append(initial_candidate_entry)
+            island.best_candidate_dict = initial_params_dict
+            island.best_score = validate_score
+
+        # At each step, for each island create a few-shot prompt from candidate-score pairs, to generate new candidates. Add the new candidate to the same island
+        for epoch in range(num_epochs):
+            # For each island, generate new candidates, do validation on new candidates.
+            for island in self.islands:
+                new_candidates = self._llm_generate_candidate(island.buffer, num_LLM_samples=self.num_LLM_samples)
+                self.total_proposals += len(new_candidates)  # Track the number of proposals generated
+                for candidate in new_candidates:
+                    validate_score, validate_evals = self._evaluate_candidate(
+                        candidate, validate_dataset, guide, 
+                        num_threads=num_threads, num_eval_times=1, evaluation_batch_size=len(validate_dataset['inputs'])
+                    )
+                    self.total_samples += validate_evals
+                    new_candidate_entry = {
+                        'params': candidate,
+                        'score_sum': validate_score*validate_evals,
+                        'eval_count': validate_evals,
+                        'mean_score': validate_score,
+                    }
+                    island.buffer.append(new_candidate_entry)
+                    if validate_score > island.best_score:
+                        island.best_candidate_dict = new_candidate_entry['params']
+                        island.best_score = new_candidate_entry['mean_score']
+
+            # At the end of each epoch, output a candidate with the highest score to do the test.
+            
+            # Find the island with the highest best_score
+            best_island = max(self.islands, key=lambda island: island.best_score)
+            
+            best_overall_score = best_island.best_score
+            best_overall_candidate = best_island.best_candidate_dict
+            
+            # Set the agent parameters to the best candidate
+            self.optimizer.update(best_overall_candidate)
+            
+            # Perform test evaluation
+            eval_scores = evaluate(self.agent,
+                                        guide, 
+                                        test_dataset['inputs'],
+                                        test_dataset['infos'],
+                                        min_score=self.min_score,
+                                        num_threads=num_threads,
+                                        num_samples=self.num_eval_times,
+                                        description=f"Evaluating candidate")
+                 # Create table with explicit column names
+            columns = [f'Eval_{i+1}' for i in range(eval_scores.shape[1])]
+            table = self.logger.wandb.Table(columns=columns, data=eval_scores.tolist())
+            self.logger.log(f'Raw_test_scores_at_step_{epoch+1}', table, epoch+1, color='green')
+            # Extract all non-None values and compute overall average
+            all_valid_scores = [score for row in eval_scores for score in row if score is not None]
+            test_score = np.mean(all_valid_scores) if all_valid_scores else 0
+
+            # Logging at the current epoch
+            self.logger.log('Test score', test_score, epoch+1, color='green')
+            self.logger.log('Total samples', self.total_samples, epoch+1, color='cyan')
+            self.logger.log('Total proposals', self.total_proposals, epoch+1, color='red')
+            
+            if epoch % discard_frequency == 0:
+                # Discard the islands with the lowest best_score
+                self.islands.sort(key=lambda island: island.best_score, reverse=True)
+                self.islands = self.islands[:self.num_islands//2]
+                num_deleted = self.num_islands - len(self.islands)
+                print_color(f"Discarding {num_deleted} islands", 'yellow')
+                # Initialize the discarded islands with the candidate, by randomly sampling an island and selecting its best_candidate_dict
+                for _ in range(num_deleted):
+                    random_island = random.choice(self.islands)
+                    new_candidate_entry = {
+                        'params': random_island.best_candidate_dict,
+                        'mean_score': random_island.best_score,
+                    }
+                    new_island = Island(deque(maxlen=50), new_candidate_entry, new_candidate_entry['mean_score'])
+                    new_island.buffer.append(new_candidate_entry)
+                    self.islands.append(new_island)
+                print_color(f"Initialized {num_deleted} islands", 'green')
+        # Log the final best candidate.
+        params_values = list(best_overall_candidate.values())
+        self.logger.log('Final parameter 1', params_values[0], epoch+1, color='magenta')
+        self.logger.log('Final parameter 2', params_values[1], epoch+1, color='magenta')
+               
+        # Final results
+        print_color("IslandSearchAlgorithm training completed.", 'blue')
+        
+       
