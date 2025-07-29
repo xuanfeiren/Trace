@@ -1,5 +1,6 @@
-#TODO: Implement MinibatchwithValidation and IslandSearch Algorithms
-#TODO: log raw test scores and the final best candidate for each baseline algorithm
+#TODO: Implement MinibatchwithValidation and IslandSearch Algorithms (Done)
+#TODO: log raw test scores and the final best candidate for each baseline algorithm (Done)
+#TODO: debug for IslandSearchAlgorithm
 import numpy as np
 import copy
 import time
@@ -824,6 +825,12 @@ class IslandSearchAlgorithm(MinibatchAlgorithm):
         
         serializable_candidate_summaries = []
         for cand_entry in prompt_candidates:
+            parameter_node_1 = list(cand_entry['params'].keys())[0]
+            try:
+                name_1 = parameter_node_1.py_name
+            except:
+                breakpoint()
+                print_color(f"Parameter node error", "red")
             summary = {
                 # "parameters":  {getattr(p,'py_name'): copy.deepcopy(p.data) for p in cand_entry['params']},
                 "parameters":  {getattr(p,'py_name'): cand_entry['params'][p] for p in cand_entry['params'].keys()},
@@ -1048,7 +1055,7 @@ class IslandSearchAlgorithm(MinibatchAlgorithm):
                         'params': random_island.best_candidate_dict,
                         'mean_score': random_island.best_score,
                     }
-                    new_island = Island(deque(maxlen=50), new_candidate_entry, new_candidate_entry['mean_score'])
+                    new_island = Island(deque(maxlen=50), new_candidate_entry['params'], new_candidate_entry['mean_score'])
                     new_island.buffer.append(new_candidate_entry)
                     self.islands.append(new_island)
                 print_color(f"Initialized {num_deleted} islands", 'green')
