@@ -862,7 +862,7 @@ class IslandSearchAlgorithm(MinibatchAlgorithm):
                 
                 llm_response = retry_with_exponential_backoff(
                     llm_call,
-                    max_retries=5,
+                    max_retries=10,
                     base_delay=1.0,
                     operation_name=f"LLM generation (attempt {retry_count}/{max_total_retries})"
                 )
