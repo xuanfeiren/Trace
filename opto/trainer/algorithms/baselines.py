@@ -178,7 +178,7 @@ class Minibatch(AlgorithmBase):
             2. Update the agent using the feedback.
             3. Evaluate the agent on the test dataset and log the results.
         """
-
+        self.num_eval_times = num_eval_samples
         log_frequency = log_frequency or eval_frequency  # frequency of logging (default to eval_frequency)
         num_threads = num_threads or self.num_threads  # Use provided num_threads or fall back to self.num_threads
         test_dataset = test_dataset or train_dataset  # default to train_dataset if test_dataset is not provided
