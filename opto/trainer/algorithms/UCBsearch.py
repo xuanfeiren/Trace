@@ -181,8 +181,8 @@ class UCBSearchAlgorithm(MinibatchAlgorithm):
         total_evaluations_tracker = np.sum([c['eval_count'] for c in buffer])
         for i, candidate_entry in enumerate(buffer):
             lcb = self._calculate_lcb(candidate_entry, total_evaluations_tracker)
-            ucb = candidate_entry['ucb_score']
-            mean_score = candidate_entry['score_sum'] / (candidate_entry['eval_count'] or 1)
+            ucb = self._calculate_ucb(candidate_entry, total_evaluations_tracker)
+            mean_score = candidate_entry['score_sum'] / (candidate_entry['eval_count'] or 1E-9)
             eval_count = candidate_entry['eval_count']
             
             # Format as open interval (LCB, UCB) with mean score and evaluation count
