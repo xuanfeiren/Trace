@@ -1128,7 +1128,7 @@ class DetectCorrelation(MinibatchAlgorithm):
         }
         self.buffer.append(initial_candidate_entry)
         score_pairs = []
-        for _ in range(num_epochs):
+        for epoch in range(num_epochs):
             # randomly sample a candidate from the buffer
             random_candidate_entry = random.choice(self.buffer)
             self.optimizer.update(random_candidate_entry['params'])
@@ -1179,8 +1179,9 @@ class DetectCorrelation(MinibatchAlgorithm):
             }
             self.buffer.append(new_candidate_entry)
             # Log the new candidate
-            print_color(f"Score before and after OptoPrime: {random_candidate_entry['mean_score']}, {new_score}", 'green')
+            # print_color(f"Score before and after OptoPrime: {random_candidate_entry['mean_score']}, {new_score}", 'green')
             score_pairs.append((random_candidate_entry['mean_score'], new_score))
+            self.logger.log('Score before and after OptoPrime', (random_candidate_entry['mean_score'], new_score), epoch+1, color='green')
         # Save the score pairs to a csv file
         df = pd.DataFrame(score_pairs, columns=['score_before_opto', 'score_after_opto'])
         import os
