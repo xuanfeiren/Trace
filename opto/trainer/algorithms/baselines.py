@@ -163,9 +163,9 @@ class Minibatch(AlgorithmBase):
               batch_size: int = 1,  # batch size for updating the agent
               test_dataset = None,  # dataset of (x, info) pairs to evaluate the agent
               eval_frequency: int = 1,  # frequency of evaluation
-              num_eval_samples: int = 5,  # number of samples to use to evaluate each input
+              num_eval_samples: int = 1,  # number of samples to use to evaluate each input
               log_frequency: Union[int, None] = None,  # frequency of logging
-              save_frequency: Union[int, None] = None,  # frequency of saving the agent
+              save_frequency: Union[int, None] = 1,  # frequency of saving the agent
               save_path: str = "checkpoints/agent.pkl",  # path to save the agent
               min_score: Union[int, None] = None,  # minimum score to update the agent
               verbose: Union[bool, str] = False,  # whether to print the output of the agent
@@ -179,12 +179,17 @@ class Minibatch(AlgorithmBase):
             3. Evaluate the agent on the test dataset and log the results.
         """
         self.num_eval_times = num_eval_samples
+        self.min_score = min_score
         log_frequency = log_frequency or eval_frequency  # frequency of logging (default to eval_frequency)
         num_threads = num_threads or self.num_threads  # Use provided num_threads or fall back to self.num_threads
         test_dataset = test_dataset or train_dataset  # default to train_dataset if test_dataset is not provided
         # self.num_eval_samples = num_eval_samples  # number of samples to use to evaluate each input
         self.total_samples = 0 # log the total number of samples the algorithm has seen
         self.total_proposals = 0 # log the number of total proposals the algorithm has made
+
+        # For debugging, save the agent before learning
+        if save_frequency is not None and save_frequency > 0:
+            self.save_agent(save_path, self.n_iters)
 
         # Evaluate the agent before learning
         if eval_frequency > 0:
@@ -197,16 +202,20 @@ class Minibatch(AlgorithmBase):
                                         num_samples=self.num_eval_times,
                                         description=f"Evaluating candidate")
                  # Create table with explicit column names
-            columns = [f'Eval_{i+1}' for i in range(eval_scores.shape[1])]
-            table = self.logger.wandb.Table(columns=columns, data=eval_scores.tolist())
+            if eval_scores.ndim >1:
+                columns = [f'Eval_{i+1}' for i in range(eval_scores.shape[1])]
+                table = self.logger.wandb.Table(columns=columns, data=eval_scores.tolist())
             # self.logger.log(f'Raw_test_scores_at_step_{self.n_iters}', table,  self.n_iters, color='green')
             # Extract all non-None values and compute overall average
-            all_valid_scores = [score for row in eval_scores for score in row if score is not None]
+                all_valid_scores = [score for row in eval_scores for score in row if score is not None]
+            else:
+                all_valid_scores = [score for score in eval_scores if score is not None]
             test_score = np.mean(all_valid_scores) if all_valid_scores else 0
             self.logger.log('Test score', test_score, self.n_iters, color='green')
             self.logger.log('Total samples', self.total_samples, self.n_iters, color='cyan')
             self.logger.log('Total proposals', self.total_proposals, self.n_iters, color='red')
-
+        if eval_frequency ==1:
+            score_before_opto = test_score
         # Save the agent before learning if save_frequency > 0
         if save_frequency is not None and save_frequency > 0:
             self.save_agent(save_path, self.n_iters)
@@ -250,14 +259,21 @@ class Minibatch(AlgorithmBase):
                                         num_samples=self.num_eval_times,
                                         description=f"Evaluating candidate")
                  # Create table with explicit column names
-                columns = [f'Eval_{i+1}' for i in range(eval_scores.shape[1])]
-                table = self.logger.wandb.Table(columns=columns, data=eval_scores.tolist())
-                self.logger.log(f'Raw_test_scores_at_step_{self.n_iters}', table, self.n_iters, color='green')
+                if eval_scores.ndim>1:
+                    columns = [f'Eval_{i+1}' for i in range(eval_scores.shape[1])]
+                    table = self.logger.wandb.Table(columns=columns, data=eval_scores.tolist())
+                    self.logger.log(f'Raw_test_scores_at_step_{self.n_iters}', table,  self.n_iters, color='green')
                 # Extract all non-None values and compute overall average
-                all_valid_scores = [score for row in eval_scores for score in row if score is not None]
+                    all_valid_scores = [score for row in eval_scores for score in row if score is not None]
+                else:
+                    all_valid_scores = [score for score in eval_scores if score is not None]
                 test_score = np.mean(all_valid_scores) if all_valid_scores else 0
                 self.logger.log('Test score', test_score, self.n_iters, color='green')
-
+                if eval_frequency ==1:
+                    score_after_opto = test_score
+                    self.logger.log('score_before_opto', score_before_opto, self.n_iters, color='green')
+                    self.logger.log('score_after_opto', score_after_opto, self.n_iters, color='green')
+                    score_before_opto = score_after_opto
             # Save the agent
             if save_frequency is not None and save_frequency > 0 and self.n_iters % save_frequency == 0:
                 self.save_agent(save_path, self.n_iters)
@@ -559,7 +575,7 @@ class MinibatchwithValidation(MinibatchAlgorithm):
               min_score = None,  # minimum score to update the agent
               verbose = False,  # whether to print the output of the agent
               num_threads = 20,  # maximum number of threads to use
-              num_eval_samples = 5,  # number of samples to use to evaluate each input
+              num_eval_samples = 1,  # number of samples to use to evaluate each input
               **kwargs
               ):
         self.buffer = deque(maxlen=50) 
