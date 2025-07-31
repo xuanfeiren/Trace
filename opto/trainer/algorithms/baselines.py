@@ -19,7 +19,7 @@ import json
 import warnings
 from black import format_str, FileMode
 import random
-
+import math
 def retry_with_exponential_backoff(func, max_retries=10, base_delay=1.0, operation_name="operation"):
     """
     Retry a function with exponential backoff for rate limit and other transient errors.
@@ -541,6 +541,7 @@ class MinibatchwithValidation(MinibatchAlgorithm):
     So we got 21*100=2100 evaluations.
     Output the candidate with the highest validation score for the final test.
     """
+    ## TODO: Test the performance of UCB best arm identification. Maybe try multiple steps of validation. Compare with evenly split validation.
     def add_new_candidate(self, candidate_params_dict):
         candidate_entry = {
                     'params': candidate_params_dict,
@@ -549,7 +550,7 @@ class MinibatchwithValidation(MinibatchAlgorithm):
                 }
         self.buffer.append(candidate_entry)
 
-    def buffer_validation(self):
+    def evenly_split_buffer_validation(self):
         for i,candidate in enumerate(self.buffer):
             self.optimizer.update(candidate['params'])
             avg_score = self.evaluate(self.agent, self.validate_guide, self.validate_dataset['inputs'], self.validate_dataset['infos'],
@@ -557,9 +558,96 @@ class MinibatchwithValidation(MinibatchAlgorithm):
                                 description=f"Final validation of candidate {i} in {len(self.buffer)} candidates")  
             candidate['mean_score'] = avg_score
             self.total_samples += len(self.validate_dataset['inputs'])*self.validate_times
-            print_color(f"Candidate {i} in {len(self.buffer)} candidates: Mean score {avg_score}", 'green')
-        return self.buffer
+            # print_color(f"Candidate {i} in {len(self.buffer)} candidates: Mean score {avg_score}", 'green')
+            candidate_to_test = max(self.buffer, key=lambda c: c['mean_score'])
+        return candidate_to_test
+    # Start to implement UCB sample budget allocation
+    def _calculate_ucb(self, candidate_buffer_entry: Dict, total_tracked_evaluations: int) -> float:
+        """Calculates UCB score for a candidate in the buffer."""
+        if candidate_buffer_entry['eval_count'] == 0:
+            return float('inf')  # Explore unvisited states first
+        
+        mean_score = candidate_buffer_entry['score_sum'] / candidate_buffer_entry['eval_count']
+       
+        if total_tracked_evaluations == 0: # Should not happen if we init with one eval
+             total_tracked_evaluations = 1
+        exploration_term = self.ucb_exploration_factor * \
+                           math.sqrt(math.log(total_tracked_evaluations) / candidate_buffer_entry['eval_count'])
+        
+        return mean_score + exploration_term
     
+    def _calculate_lcb(self, candidate_buffer_entry: Dict, total_tracked_evaluations: int) -> float:
+        """Calculates Lower Confidence Bound for a candidate in the buffer."""
+        if candidate_buffer_entry['eval_count'] == 0:
+            return float('-inf')  # Unvisited states get lowest bound
+        
+        mean_score = candidate_buffer_entry['score_sum'] / candidate_buffer_entry['eval_count']
+        
+       
+        if total_tracked_evaluations == 0: # Should not happen if we init with one eval
+             total_tracked_evaluations = 1
+        
+        exploration_term = self.ucb_exploration_factor * \
+                           math.sqrt(math.log(total_tracked_evaluations) / candidate_buffer_entry['eval_count'])
+        
+        return mean_score - exploration_term
+    def _update_buffer_scores(self):
+        """Recalculates and updates UCB scores for all candidates in the buffer."""
+        if not self.buffer:
+            return
+        total_evaluations_tracker = np.sum([c['eval_count'] for c in self.buffer])
+        for candidate_entry in self.buffer:
+            candidate_entry['ucb_score'] = self._calculate_ucb(candidate_entry, total_evaluations_tracker)
+            candidate_entry['lcb_score'] = self._calculate_lcb(candidate_entry, total_evaluations_tracker)
+    def ucb_best_candidate(self, 
+                      horizon: int, 
+                      validation_dataset: Dict[str, List[Any]], 
+                      guide, 
+                      evaluation_batch_size: int = 20,
+                      num_threads: Optional[int] = None) -> Dict[str, Any]:
+        """Select the best candidate from the buffer using UCB for horizon iterations."""
+        
+        if not self.buffer:
+            print_color("Buffer is empty, cannot select best candidate.", 'red')
+            return None
+        
+        print_color(f"Best candidate identification: Starting {horizon} iterations", 'blue')
+        
+        # UCB-based best arm identification
+        for iteration in range(horizon):
+                
+            # Update UCB scores
+            self._update_buffer_scores()
+            
+            # Select candidate with highest UCB score
+            selected_candidate = max(self.buffer, key=lambda c: c['ucb_score'])
+            try:
+            # Evaluate on validation set subset
+                validation_score, validation_evals = self._evaluate_candidate(
+                    selected_candidate['params'], 
+                    validation_dataset, 
+                    guide, 
+                    evaluation_batch_size,  # Now using subset instead of entire dataset
+                    num_threads
+                )
+            except Exception as e:
+                print_color(f"Best candidate identification: Error evaluating candidate: {e}", 'red')
+                continue
+            
+            # Update candidate statistics
+            if validation_score is not None and validation_score > -np.inf and validation_evals > 0:
+                selected_candidate['score_sum'] += validation_score * validation_evals
+                selected_candidate['eval_count'] += validation_evals
+                self.total_samples += validation_evals
+                print_color(f"UCB iteration {iteration+1}/{horizon}: "
+                          f"Selected candidate score {validation_score:.4f} "
+                          f"(evaluated on {validation_evals} samples)", 'cyan')
+                
+        self._update_buffer_scores()
+        # Return the candidate with highest lcb score (pure exploitation)
+        best_candidate = max(self.buffer, key=lambda c: c['lcb_score'])
+
+        return best_candidate
     def train(self,
               guide, # guide to provide feedback
               train_dataset,  # dataset of (x, info) pairs to train the agent
@@ -676,8 +764,8 @@ class MinibatchwithValidation(MinibatchAlgorithm):
                 # for p in self.agent.parameters():
                 #     self.logger.log(f"Parameter: {p.name}", p.data, self.n_iters, color='red')
         print_color(f"Candidate generation finished. Start validation.", 'yellow')
-        self.buffer_validation()
-        candidate_to_test = max(self.buffer, key=lambda c: c['mean_score'])
+        # Validate the buffer evenly
+        candidate_to_test = self.evenly_split_buffer_validation()
         self.optimizer.update(candidate_to_test['params'])
         eval_scores = evaluate(self.agent,
                                         guide, 

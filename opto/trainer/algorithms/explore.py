@@ -190,7 +190,7 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
             mean_scores = np.array([c['score_sum'] / c['eval_count'] for c in evaluated_candidates])
             
             # Apply temperature scaling (lower temperature = more greedy towards higher scores)
-            temperature = 0.1  # Low temperature for more focused sampling on high-scoring candidates
+            temperature = 0.00001  # Low temperature for more focused sampling on high-scoring candidates
             scaled_scores = mean_scores / temperature
             
             # Calculate exponential weights (using softmax to avoid overflow)
@@ -252,12 +252,20 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
                         new_params_dict[param] = copy.deepcopy(param.data)
                 self.total_samples += train_batch_size
                 self.total_proposals += 1
-                
+                # Initial validation for the new proposal
+                validation_score, validation_evals = self._evaluate_candidate(
+                    new_params_dict, 
+                    self.validation_dataset, 
+                    guide, 
+                    len(self.validation_dataset['inputs']),  # Now using subset instead of entire dataset
+                    num_threads
+                )
+                self.total_samples += validation_evals
                 # Add new candidate to buffer
                 new_candidate_entry = {
                     'params': new_params_dict,
-                    'score_sum': 0,
-                    'eval_count': 0,
+                    'score_sum': validation_score*validation_evals,
+                    'eval_count': validation_evals,
                     'ucb_score': None
                 }
                 
@@ -363,7 +371,7 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
         num_threads = num_threads or self.num_threads
         log_frequency = log_frequency or eval_frequency
         self.min_score = min_score_for_agent_update
-        
+        self.validation_dataset = validation_dataset # For use in _evaluate_candidate
         # Initialize tracking
         self.total_samples = 0
         self.total_proposals = 0
@@ -373,11 +381,19 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
         test_score, test_evals = self._evaluate_candidate(
             initial_params_dict, test_dataset, guide, len(test_dataset['inputs']), num_threads,num_eval_times=self.num_eval_times
         )
-        
+        # Add initial validation for the initial candidate
+        validation_score, validation_evals = self._evaluate_candidate(
+                    initial_params_dict, 
+                    validation_dataset, 
+                    guide, 
+                    len(validation_dataset['inputs']),  # Now using subset instead of entire dataset
+                    num_threads
+                )
+        self.total_samples += validation_evals
         initial_candidate_entry = {
             'params': initial_params_dict,
-            'score_sum': 0,
-            'eval_count': 0,
+            'score_sum': validation_score*validation_evals,
+            'eval_count': validation_evals,
             'ucb_score': None,
         }
         self.buffer.append(initial_candidate_entry)
