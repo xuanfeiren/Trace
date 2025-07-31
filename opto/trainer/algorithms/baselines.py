@@ -1298,3 +1298,70 @@ class DetectCorrelation(MinibatchAlgorithm):
             df.to_csv('correlation_detection.csv', index=False)
             print_color(f"Created correlation_detection.csv and saved {len(score_pairs)} score pairs", 'green')
         return 
+    
+class EvaluateInitialCandidate(MinibatchAlgorithm):
+    """
+    This is not a real baseline algorithm, but a tool to evaluate the initial candidate.
+    """
+    def __init__(self, agent, optimizer,num_threads: int = None, logger=None,*args, **kwargs):
+        super().__init__(agent, optimizer, num_threads=num_threads, logger=logger, *args, **kwargs)
+    def train(self,
+              guide,
+              train_dataset,
+              validate_dataset,
+              test_dataset,
+              train_batch_size: int = 2,
+              num_epochs: int = 10,
+              verbose: Union[bool, str] = False,
+              num_threads: Optional[int] = None,
+              **kwargs
+              ):
+        """Evaluate the initial candidate."""
+        self.min_score = 0
+        self.guide = guide
+        num_eval_times = 50
+        
+        # Initialize results as numpy array: results[iteration, task_id] = reward (1, 0, or -1 for None)
+        num_tasks = len(test_dataset['inputs'])
+        results = np.full((num_eval_times, num_tasks), -1, dtype=int)  # -1 represents None/failure
+        
+        for num in range(num_eval_times):
+            eval_scores = evaluate(self.agent, guide, test_dataset['inputs'], test_dataset['infos'], 
+                                 min_score=self.min_score, num_threads=self.num_threads, 
+                                 num_samples=1, description=f"Evaluating candidate iteration {num+1}")
+            
+            # Extract rewards for this iteration (eval_scores is 1D array)
+            # Convert None values to -1, keep 1 and 0 as is
+            eval_scores_clean = np.where(eval_scores == None, -1, eval_scores).astype(int)
+            results[num, :len(eval_scores_clean)] = eval_scores_clean
+            # Remaining positions stay -1 (already initialized)
+            
+            # Calculate pass@K for K = num + 1 (current iteration number)
+            K = num + 1
+            
+            # For each task, check if any of the first K attempts succeeded (reward == 1)
+            pass_at_K_per_task = np.any(results[:K, :] == 1, axis=0).astype(int)
+            
+            # Calculate mean pass@K across all tasks
+            pass_at_K = np.mean(pass_at_K_per_task)
+            
+            # Print and log results
+            tasks_passed = np.sum(pass_at_K_per_task)
+            print_color(f"Iteration {num + 1}: Pass@{K} = {pass_at_K:.4f} "
+                       f"({tasks_passed}/{num_tasks} tasks passed)", 'green')
+            
+            # Log to logger if available
+            if hasattr(self, 'logger'):
+                self.logger.log(f'Pass@K', pass_at_K, num + 1, color='green')
+                self.logger.log(f'Tasks_passed_at_K', int(tasks_passed), num + 1, color='cyan')
+        
+        # Final summary
+        print_color(f"\nFinal Results after {num_eval_times} evaluations:", 'blue')
+        final_pass_per_task = np.any(results == 1, axis=0).astype(int)
+        final_pass_rate = np.mean(final_pass_per_task)
+        print_color(f"Pass@{num_eval_times} = {final_pass_rate:.4f}", 'blue')
+        
+        if hasattr(self, 'logger'):
+            self.logger.log(f'Final_Pass@{num_eval_times}', final_pass_rate, num_eval_times, color='blue')
+        
+        return results
