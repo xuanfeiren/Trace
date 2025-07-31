@@ -441,6 +441,7 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
                 
             # Load best candidate parameters
             self.optimizer.update(best_params)
+            print_color("Buffer after discarding", 'blue')
             self.print_intervals(self.buffer)
             # total_evaluations_tracker = np.sum([c['eval_count'] for c in self.buffer])
             selected_mean_score = best_candidate['score_sum'] / (best_candidate['eval_count'] or 1E-9)
