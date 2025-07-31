@@ -1067,4 +1067,129 @@ class IslandSearchAlgorithm(MinibatchAlgorithm):
         # Final results
         print_color("IslandSearchAlgorithm training completed.", 'blue')
         
-       
+import pandas as pd
+
+class DetectCorrelation(MinibatchAlgorithm):
+    """
+    This is not a real baseline algorithm, but a tool to detect correlation between candidates before and after OptoPrime.
+    In the training process, we keep a buffer with candidates and their scores. 
+    At each step we randomly sample a candidate from the buffer, do the forward process on a train mini-batch to get a new proposal. 
+    Evaluate this new proposal on the entire validation set. Then log scores of the original candidate and the new proposal.
+    Put the new proposal into the buffer.
+    Finally save the (score_before_opto, score_after_opto) pairs into a csv file, naming it as "correlation_detection.csv".
+    If the file already exists, append the new data to the end of the file.
+    """
+    def __init__(self, agent, optimizer,num_threads: int = None, logger=None,*args, **kwargs):
+        super().__init__(agent, optimizer, num_threads=num_threads, logger=logger, *args, **kwargs)
+
+    def _sample_minibatch(self, dataset: Dict[str, List[Any]], batch_size: int) -> Tuple[List[Any], List[Any]]:
+        """Sample a minibatch from the dataset."""
+        if not dataset or not dataset.get('inputs') or not dataset.get('infos'):
+            print_color("Warning: Attempted to sample from an empty or malformed dataset.", color='yellow')
+            return [], []
+        
+        dataset_size = len(dataset['inputs'])
+        if dataset_size == 0:
+            print_color("Warning: Dataset is empty, cannot sample minibatch.", color='yellow')
+            return [], []
+
+        actual_batch_size = min(batch_size, dataset_size)
+        indices = np.random.choice(dataset_size, actual_batch_size, replace=False)
+        xs = [dataset['inputs'][i] for i in indices]
+        infos = [dataset['infos'][i] for i in indices]
+        return xs, infos
+    
+    def evaluate_candidate(self) -> float:
+        """Evaluate the current agent on the validation set."""
+        eval_scores = evaluate(self.agent,self.guide,self.validate_dataset['inputs'],self.validate_dataset['infos'],min_score=self.min_score,num_threads=self.num_threads,num_samples=1,description=f"Evaluating candidate")
+        all_valid_scores = [score for score in eval_scores if score is not None]
+        return np.mean(all_valid_scores) if all_valid_scores else 0
+    
+    def train(self,
+              guide,
+              train_dataset,
+              validate_dataset,
+              train_batch_size: int = 2,
+              num_epochs: int = 10,
+              verbose: Union[bool, str] = False,
+              num_threads: Optional[int] = None,
+              **kwargs
+              ):
+        """Do the training according to the algorithm description above."""
+        self.buffer = deque(maxlen=2000)
+        self.min_score = 0
+        self.guide = guide
+        self.validate_dataset = validate_dataset
+        # evaluate the initial candidate
+        initial_score = self.evaluate_candidate()
+        initial_candidate_entry = {
+            'params': {p: copy.deepcopy(p.data) for p in self.optimizer.parameters},
+            'mean_score': initial_score, # Add initial validate score to the initial candidate
+        }
+        self.buffer.append(initial_candidate_entry)
+        score_pairs = []
+        for _ in range(num_epochs):
+            # randomly sample a candidate from the buffer
+            random_candidate_entry = random.choice(self.buffer)
+            self.optimizer.update(random_candidate_entry['params'])
+            train_xs, train_infos = self._sample_minibatch(train_dataset, train_batch_size)
+            forward = batch_run(max_workers = num_threads, description = f"Forward pass (batch size: {len(train_xs)})")(self.forward)
+            outputs = forward(self.agent,train_xs,guide, train_infos)
+            scores, targets, feedbacks = [], [], []
+            for target, score, feedback in outputs:
+                scores.append(score)
+                targets.append(target)
+                feedbacks.append(feedback)
+            
+            if not scores:
+                continue
+                
+            # Backward pass
+            target_batch = batchify(*targets)
+            feedback_batch = batchify(*feedbacks).data
+            
+            self.optimizer.zero_feedback()
+            self.optimizer.backward(target_batch, feedback_batch)
+            
+            # Generate new candidate with retry logic
+            def optimizer_step_call():
+                update_dict = self.optimizer.step(bypassing=True, verbose=False)
+                return update_dict
+            
+            new_params_dict = retry_with_exponential_backoff(
+                optimizer_step_call,
+                max_retries=10,
+                operation_name="Optimizer step"
+            )
+            
+            if not isinstance(new_params_dict, dict) or not new_params_dict:
+                continue
+
+            # Ensure new_params_dict contains all parameters from optimizer
+            for param in self.optimizer.parameters:
+                if param not in new_params_dict:
+                    new_params_dict[param] = copy.deepcopy(param.data)
+            
+            self.optimizer.update(new_params_dict)
+            new_score = self.evaluate_candidate()
+            # Add new candidate to buffer
+            new_candidate_entry = {
+                'params': new_params_dict,
+                'mean_score': new_score,
+            }
+            self.buffer.append(new_candidate_entry)
+            # Log the new candidate
+            print_color(f"Score before and after OptoPrime: {random_candidate_entry['mean_score']}, {new_score}", 'green')
+            score_pairs.append((random_candidate_entry['mean_score'], new_score))
+        # Save the score pairs to a csv file
+        df = pd.DataFrame(score_pairs, columns=['score_before_opto', 'score_after_opto'])
+        import os
+        if os.path.exists('correlation_detection.csv'):
+            # File exists, append without header
+            df.to_csv('correlation_detection.csv', mode='a', header=False, index=False)
+            print_color(f"Appended {len(score_pairs)} score pairs to existing correlation_detection.csv", 'green')
+        else:
+            # File doesn't exist, create new with header
+            df.to_csv('correlation_detection.csv', index=False)
+            print_color(f"Created correlation_detection.csv and saved {len(score_pairs)} score pairs", 'green')
+        return 
