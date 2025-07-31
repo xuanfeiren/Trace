@@ -331,8 +331,10 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
                           f"(evaluated on {validation_evals} samples)", 'cyan')
                 
         self._update_buffer_scores()
+        # Remove candidates with zero score
+        self.buffer = [c for c in self.buffer if c['score_sum'] > 0]
         # Return the candidate with highest lcb score (pure exploitation)
-        best_candidate = max(self.buffer, key=lambda c: c['lcb_score'])
+        best_candidate = max(self.buffer, key=lambda c: c['mean_score'])
         print_color("Original buffer after UCB best arm identification", 'blue')
         self.print_intervals(self.buffer)
         # Handle buffer overflow - keep only max_buffer_size best candidates based on lcb score
@@ -340,7 +342,7 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
             # Sort by lcb score and keep only the top max_buffer_size candidates
             sorted_buffer = sorted(self.buffer, key=lambda c: c['ucb_score'], reverse=True)
             self.buffer = deque(sorted_buffer[:self.max_buffer_size])
-            print_color(f"Buffer size reduced from {len(sorted_buffer)} to {len(self.buffer)} based on lcb score", 'yellow')
+            print_color(f"Buffer size reduced from {len(sorted_buffer)} to {len(self.buffer)} based on ucb score", 'yellow')
 
         return best_candidate
 
