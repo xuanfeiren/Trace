@@ -332,7 +332,7 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
                 
         self._update_buffer_scores()
         # Return the candidate with highest lcb score (pure exploitation)
-        best_candidate = max(self.buffer, key=lambda c: c['ucb_score'])
+        best_candidate = max(self.buffer, key=lambda c: c['lcb_score'])
         print_color("Original buffer after UCB best arm identification", 'blue')
         self.print_intervals(self.buffer)
         # Handle buffer overflow - keep only max_buffer_size best candidates based on lcb score
