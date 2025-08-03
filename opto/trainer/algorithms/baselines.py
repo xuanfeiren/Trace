@@ -165,7 +165,7 @@ class Minibatch(AlgorithmBase):
               eval_frequency: int = 1,  # frequency of evaluation
               num_eval_samples: int = 1,  # number of samples to use to evaluate each input
               log_frequency: Union[int, None] = None,  # frequency of logging
-              save_frequency: Union[int, None] = 1,  # frequency of saving the agent
+              save_frequency: Union[int, None] = None,  # frequency of saving the agent
               save_path: str = "checkpoints/agent.pkl",  # path to save the agent
               min_score: Union[int, None] = None,  # minimum score to update the agent
               verbose: Union[bool, str] = False,  # whether to print the output of the agent
@@ -599,10 +599,56 @@ class MinibatchwithValidation(MinibatchAlgorithm):
         for candidate_entry in self.buffer:
             candidate_entry['ucb_score'] = self._calculate_ucb(candidate_entry, total_evaluations_tracker)
             candidate_entry['lcb_score'] = self._calculate_lcb(candidate_entry, total_evaluations_tracker)
+            candidate_entry['mean_score'] = candidate_entry['score_sum'] / (candidate_entry['eval_count'] or 1E-9)
+
+    def _evaluate_candidate(self, 
+                            params_to_eval_dict: Dict[str, Any], 
+                            dataset: Dict[str, List[Any]], 
+                            guide, 
+                            evaluation_batch_size: int = 10,
+                            num_threads: Optional[int] = None,
+                            num_eval_times: int = 1
+                            ) -> Tuple[float, int]:
+        """Evaluates a given set of parameters on samples from the provided dataset."""
+        if not dataset or not dataset.get('inputs') or not dataset.get('infos') or not dataset['inputs']:
+            print_color("Evaluation dataset is empty or invalid. Returning score -inf, count 0.", color='yellow')
+            return -np.inf, 0
+
+        original_params = {p: copy.deepcopy(p.data) for p in self.optimizer.parameters}
+        self.optimizer.update(params_to_eval_dict)      
+
+        # Sample a subset of the dataset instead of using the entire dataset
+        eval_xs, eval_infos = self._sample_minibatch(dataset, evaluation_batch_size)
+        
+        if not eval_xs:
+            print_color("Evaluation minibatch is empty. Returning score -inf, count 0.", color='yellow')
+            self.optimizer.update(original_params) 
+            return -np.inf, 0
+
+        eval_scores = evaluate(self.agent,
+                               guide, 
+                               eval_xs,
+                               eval_infos,
+                               min_score=self.min_score if hasattr(self, 'min_score') else None,
+                               num_threads=num_threads or self.num_threads,
+                               num_samples=num_eval_times,
+                               description=f"Evaluating candidate")
+
+        self.optimizer.update(original_params) 
+        # Extract all non-None values and compute overall average
+        # Handle both 1D and 2D eval_scores
+        if eval_scores.ndim == 1:
+            all_valid_scores = [score for score in eval_scores if score is not None]
+        else:
+            all_valid_scores = [score for row in eval_scores for score in row if score is not None]
+
+        avg_score = np.mean(all_valid_scores) if all_valid_scores else 0
+        
+        eval_count = len(all_valid_scores) 
+        
+        return float(avg_score), eval_count
     def ucb_best_candidate(self, 
-                      horizon: int, 
-                      validation_dataset: Dict[str, List[Any]], 
-                      guide, 
+                      horizon: int=100, 
                       evaluation_batch_size: int = 20,
                       num_threads: Optional[int] = None) -> Dict[str, Any]:
         """Select the best candidate from the buffer using UCB for horizon iterations."""
@@ -625,8 +671,8 @@ class MinibatchwithValidation(MinibatchAlgorithm):
             # Evaluate on validation set subset
                 validation_score, validation_evals = self._evaluate_candidate(
                     selected_candidate['params'], 
-                    validation_dataset, 
-                    guide, 
+                    self.validate_dataset, 
+                    self.validate_guide, 
                     evaluation_batch_size,  # Now using subset instead of entire dataset
                     num_threads
                 )
@@ -645,7 +691,7 @@ class MinibatchwithValidation(MinibatchAlgorithm):
                 
         self._update_buffer_scores()
         # Return the candidate with highest lcb score (pure exploitation)
-        best_candidate = max(self.buffer, key=lambda c: c['lcb_score'])
+        best_candidate = max(self.buffer, key=lambda c: c['mean_score'])
 
         return best_candidate
     def train(self,
@@ -765,7 +811,8 @@ class MinibatchwithValidation(MinibatchAlgorithm):
                 #     self.logger.log(f"Parameter: {p.name}", p.data, self.n_iters, color='red')
         print_color(f"Candidate generation finished. Start validation.", 'yellow')
         # Validate the buffer evenly
-        candidate_to_test = self.evenly_split_buffer_validation()
+        # candidate_to_test = self.evenly_split_buffer_validation()
+        candidate_to_test = self.ucb_best_candidate()
         self.optimizer.update(candidate_to_test['params'])
         eval_scores = evaluate(self.agent,
                                         guide, 
@@ -1286,6 +1333,8 @@ class DetectCorrelation(MinibatchAlgorithm):
             # print_color(f"Score before and after OptoPrime: {random_candidate_entry['mean_score']}, {new_score}", 'green')
             score_pairs.append((random_candidate_entry['mean_score'], new_score))
             self.logger.log('Score before and after OptoPrime', (random_candidate_entry['mean_score'], new_score), epoch+1, color='green')
+            self.logger.log('Score before OptoPrime', random_candidate_entry['mean_score'], epoch+1, color='green')
+            self.logger.log('Score after OptoPrime', new_score, epoch+1, color='green')
         # Save the score pairs to a csv file
         df = pd.DataFrame(score_pairs, columns=['score_before_opto', 'score_after_opto'])
         import os
