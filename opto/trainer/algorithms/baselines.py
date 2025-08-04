@@ -542,6 +542,20 @@ class MinibatchwithValidation(MinibatchAlgorithm):
     Output the candidate with the highest validation score for the final test.
     """
     ## TODO: Test the performance of UCB best arm identification. Maybe try multiple steps of validation. Compare with evenly split validation.
+
+    def print_intervals(self, buffer):
+        """Print confidence intervals for debugging in the form of open intervals (LCB, UCB)"""
+        print_color("Confidence intervals for all candidates:", 'cyan')
+        total_evaluations_tracker = np.sum([c['eval_count'] for c in buffer])
+        for i, candidate_entry in enumerate(buffer):
+            lcb = self._calculate_lcb(candidate_entry, total_evaluations_tracker)
+            ucb = self._calculate_ucb(candidate_entry, total_evaluations_tracker)
+            mean_score = candidate_entry['score_sum'] / (candidate_entry['eval_count'] or 1E-9)
+            eval_count = candidate_entry['eval_count']
+            
+            # Format as open interval (LCB, UCB) with mean score and evaluation count
+            interval_str = f"Action {i+1}: ({lcb:.4f}, {ucb:.4f}) [mean: {mean_score:.4f}, n: {eval_count}]"
+            print_color(interval_str, 'cyan')
     def add_new_candidate(self, candidate_params_dict):
         candidate_entry = {
                     'params': candidate_params_dict,
@@ -611,6 +625,7 @@ class MinibatchwithValidation(MinibatchAlgorithm):
                 
                 if hasattr(self, 'logger'):
                     self.n_iters += 1
+                    self.print_intervals(self.buffer)
                     self.logger.log('Test Score in validation', test_score, self.n_iters, color='green')
                     self.logger.log('Validation_Samples', self.total_samples, self.n_iters, color='cyan')
                     self.logger.log('Evenly_Split_Best_Val_Score', current_best['mean_score'], self.n_iters, color='yellow')
@@ -708,7 +723,7 @@ class MinibatchwithValidation(MinibatchAlgorithm):
         
         return float(avg_score), eval_count
     def ucb_best_candidate(self, 
-                      horizon: int=100, 
+                      horizon: int=90, 
                       evaluation_batch_size: int = 20,
                       num_threads: Optional[int] = None,
                       test_dataset=None,
@@ -719,8 +734,22 @@ class MinibatchwithValidation(MinibatchAlgorithm):
             print_color("Buffer is empty, cannot select best candidate.", 'red')
             return None
         print_color(f"Best candidate identification: Starting {horizon} iterations", 'blue')
-        
+        # Do a initial evaluation of the buffer. For each candidate, evaluate on 10 samples from validation set
+        # Total samples in this step is 10 * len(self.buffer) = 200
+        for candidate in self.buffer:
+            validation_score, validation_evals = self._evaluate_candidate(
+                candidate['params'], 
+                self.validate_dataset, 
+                self.validate_guide, 
+                10,  # Now using subset instead of entire dataset
+                num_threads
+            )
+            candidate['score_sum'] += validation_score * validation_evals
+            candidate['eval_count'] += validation_evals
+            self.total_samples += validation_evals
+            print_color(f"Initial evaluation: Candidate {candidate['params']} score {validation_score:.4f} (evaluated on {validation_evals} samples)", 'cyan')
         # UCB-based best arm identification
+        self.print_intervals(self.buffer)
         for iteration in range(horizon):
                 
             # Update UCB scores
@@ -768,6 +797,7 @@ class MinibatchwithValidation(MinibatchAlgorithm):
                 
                 if hasattr(self, 'logger'):
                     self.n_iters += 1
+                    self.print_intervals(self.buffer)
                     self.logger.log('Test Score in validation', test_score, self.n_iters, color='green')
                     self.logger.log('Validation_Samples', self.total_samples, self.n_iters, color='cyan')
                     self.logger.log('UCB_Best_Mean_Score', current_best['mean_score'], self.n_iters, color='yellow')
