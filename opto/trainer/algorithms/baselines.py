@@ -550,16 +550,76 @@ class MinibatchwithValidation(MinibatchAlgorithm):
                 }
         self.buffer.append(candidate_entry)
 
-    def evenly_split_buffer_validation(self):
-        for i,candidate in enumerate(self.buffer):
-            self.optimizer.update(candidate['params'])
-            avg_score = self.evaluate(self.agent, self.validate_guide, self.validate_dataset['inputs'], self.validate_dataset['infos'],
-                                min_score=self.min_score, num_threads=self.num_threads,num_samples=self.validate_times,
-                                description=f"Final validation of candidate {i} in {len(self.buffer)} candidates")  
-            candidate['mean_score'] = avg_score
-            self.total_samples += len(self.validate_dataset['inputs'])*self.validate_times
-            # print_color(f"Candidate {i} in {len(self.buffer)} candidates: Mean score {avg_score}", 'green')
-            candidate_to_test = max(self.buffer, key=lambda c: c['mean_score'])
+    def evenly_split_buffer_validation(self, test_dataset=None, guide=None):
+        """
+        Evenly split buffer validation with 10 iterations.
+        In each iteration, evaluate all candidates in the buffer on validation tasks,
+        then test the best candidate and log results.
+        """
+        if not self.buffer:
+            print_color("Buffer is empty, cannot perform validation.", 'red')
+            return None
+            
+        print_color(f"Starting evenly split buffer validation: 10 iterations with {len(self.buffer)} candidates", 'blue')
+        
+        # Main loop: 10 iterations
+        for iteration in range(10):
+            print_color(f"Evenly split iteration {iteration+1}/10", 'cyan')
+            
+            # Randomly sample validation tasks for this iteration
+            validation_batch_size = min(10, len(self.validate_dataset['inputs']))
+            
+            # Evaluate ALL candidates in the buffer on the sampled validation tasks
+            for candidate_idx, candidate in enumerate(self.buffer):
+                self.optimizer.update(candidate['params'])
+                try:
+                    # Evaluate on validation set subset
+                    validation_score, validation_evals = self._evaluate_candidate(
+                        candidate['params'], 
+                        self.validate_dataset, 
+                        self.validate_guide, 
+                        validation_batch_size,  # Now using subset instead of entire dataset
+                        self.num_threads
+                    )
+                except Exception as e:
+                    print_color(f"Best candidate identification: Error evaluating candidate: {e}", 'red')
+                    continue
+                
+                # Update candidate statistics
+                if validation_score is not None and validation_score > -np.inf and validation_evals > 0:
+                    candidate['score_sum'] += validation_score * validation_evals
+                    candidate['eval_count'] += validation_evals
+                    self.total_samples += validation_evals
+            
+            # Find the best candidate after evaluating all candidates
+            self._update_buffer_scores()
+            current_best = max(self.buffer, key=lambda c: c.get('mean_score', -float('inf')))
+            
+            # Test the best candidate on the full test dataset if provided
+            if test_dataset is not None and guide is not None:
+                self.optimizer.update(current_best['params'])
+                
+                # Test on full test dataset
+                test_eval_scores = evaluate(self.agent, guide, test_dataset['inputs'], test_dataset['infos'],
+                                          min_score=self.min_score, num_threads=self.num_threads,
+                                          num_samples=self.num_eval_times,
+                                          description=f"Testing best candidate at iteration {iteration+1}")
+                
+                # Log test results
+                all_test_scores = [score for row in test_eval_scores for score in row if score is not None]
+                test_score = np.mean(all_test_scores) if all_test_scores else 0
+                
+                if hasattr(self, 'logger'):
+                    self.n_iters += 1
+                    self.logger.log('Test Score in validation', test_score, self.n_iters, color='green')
+                    self.logger.log('Validation_Samples', self.total_samples, self.n_iters, color='cyan')
+                    self.logger.log('Evenly_Split_Best_Val_Score', current_best['mean_score'], self.n_iters, color='yellow')
+                
+                print_color(f"Iteration {iteration+1}: Best val score: {current_best['mean_score']:.4f}, Test score: {test_score:.4f}", 'green')
+        
+        # Return the final best candidate
+        candidate_to_test = max(self.buffer, key=lambda c: c['mean_score'])
+        print_color(f"Evenly split validation completed. Selected candidate with val score: {candidate_to_test['mean_score']:.4f}", 'blue')
         return candidate_to_test
     # Start to implement UCB sample budget allocation
     def _calculate_ucb(self, candidate_buffer_entry: Dict, total_tracked_evaluations: int) -> float:
@@ -650,13 +710,14 @@ class MinibatchwithValidation(MinibatchAlgorithm):
     def ucb_best_candidate(self, 
                       horizon: int=100, 
                       evaluation_batch_size: int = 20,
-                      num_threads: Optional[int] = None) -> Dict[str, Any]:
+                      num_threads: Optional[int] = None,
+                      test_dataset=None,
+                      guide=None) -> Dict[str, Any]:
         """Select the best candidate from the buffer using UCB for horizon iterations."""
         
         if not self.buffer:
             print_color("Buffer is empty, cannot select best candidate.", 'red')
             return None
-        
         print_color(f"Best candidate identification: Starting {horizon} iterations", 'blue')
         
         # UCB-based best arm identification
@@ -668,7 +729,7 @@ class MinibatchwithValidation(MinibatchAlgorithm):
             # Select candidate with highest UCB score
             selected_candidate = max(self.buffer, key=lambda c: c['ucb_score'])
             try:
-            # Evaluate on validation set subset
+                # Evaluate on validation set subset
                 validation_score, validation_evals = self._evaluate_candidate(
                     selected_candidate['params'], 
                     self.validate_dataset, 
@@ -688,9 +749,33 @@ class MinibatchwithValidation(MinibatchAlgorithm):
                 print_color(f"UCB iteration {iteration+1}/{horizon}: "
                           f"Selected candidate score {validation_score:.4f} "
                           f"(evaluated on {validation_evals} samples)", 'cyan')
+            
+            # Test and log every 10 iterations
+            if (iteration + 1) % 10 == 0 and test_dataset is not None and guide is not None:
+                self._update_buffer_scores()
+                current_best = max(self.buffer, key=lambda c: c['mean_score'])
+                self.optimizer.update(current_best['params'])
+                
+                # Test on full test dataset
+                test_eval_scores = evaluate(self.agent, guide, test_dataset['inputs'], test_dataset['infos'],
+                                          min_score=self.min_score, num_threads=num_threads or self.num_threads,
+                                          num_samples=self.num_eval_times,
+                                          description=f"UCB testing at iteration {iteration+1}")
+                
+                # Log test results
+                all_test_scores = [score for row in test_eval_scores for score in row if score is not None]
+                test_score = np.mean(all_test_scores) if all_test_scores else 0
+                
+                if hasattr(self, 'logger'):
+                    self.n_iters += 1
+                    self.logger.log('Test Score in validation', test_score, self.n_iters, color='green')
+                    self.logger.log('Validation_Samples', self.total_samples, self.n_iters, color='cyan')
+                    self.logger.log('UCB_Best_Mean_Score', current_best['mean_score'], self.n_iters, color='yellow')
+                
+                print_color(f"UCB iteration {iteration+1}: Best mean score: {current_best['mean_score']:.4f}, Test score: {test_score:.4f}", 'green')
                 
         self._update_buffer_scores()
-        # Return the candidate with highest lcb score (pure exploitation)
+        # Return the candidate with highest mean score (pure exploitation)
         best_candidate = max(self.buffer, key=lambda c: c['mean_score'])
 
         return best_candidate
@@ -710,9 +795,11 @@ class MinibatchwithValidation(MinibatchAlgorithm):
               verbose = False,  # whether to print the output of the agent
               num_threads = 20,  # maximum number of threads to use
               num_eval_samples = 1,  # number of samples to use to evaluate each input
+              validation_method = "evenly_split",  # flag to choose validation method: "evenly_split" or "ucb"
               **kwargs
               ):
         self.buffer = deque(maxlen=50) 
+        self.ucb_exploration_factor = 0.3
 
         self.num_proposals = num_proposals
         self.validate_dataset = validate_dataset or train_dataset  # default to train_dataset
@@ -728,26 +815,14 @@ class MinibatchwithValidation(MinibatchAlgorithm):
         self.total_samples = 0 # log the total number of samples the algorithm has seen
         self.total_proposals = 0 # log the number of total proposals the algorithm has made
 
-        # Evaluate the agent before learning
+        # Initial evaluation (simplified)
         if eval_frequency > 0:
-            eval_scores = evaluate(self.agent,
-                                        guide, 
-                                        test_dataset['inputs'],
-                                        test_dataset['infos'],
-                                        min_score=self.min_score,
-                                        num_threads=num_threads,
-                                        num_samples=self.num_eval_times,
-                                        description=f"Evaluating candidate")
-                 # Create table with explicit column names
-            columns = [f'Eval_{i+1}' for i in range(eval_scores.shape[1])]
-            table = self.logger.wandb.Table(columns=columns, data=eval_scores.tolist())
-            # self.logger.log(f'Raw_test_scores_at_step_{self.n_iters}', table, self.n_iters, color='green')
-            # Extract all non-None values and compute overall average
+            eval_scores = evaluate(self.agent, guide, test_dataset['inputs'], test_dataset['infos'],
+                                 min_score=self.min_score, num_threads=num_threads,
+                                 num_samples=self.num_eval_times, description=f"Initial evaluation")
             all_valid_scores = [score for row in eval_scores for score in row if score is not None]
             test_score = np.mean(all_valid_scores) if all_valid_scores else 0
-            self.logger.log('Test score', test_score, self.n_iters, color='green')
-            self.logger.log('Total samples', self.total_samples, self.n_iters, color='cyan')
-            self.logger.log('Total proposals', self.total_proposals, self.n_iters, color='red')
+            self.logger.log('Initial_Test_Score', test_score, self.n_iters, color='blue')
 
 
         # TODO random sampling with replacement
@@ -773,31 +848,8 @@ class MinibatchwithValidation(MinibatchAlgorithm):
             candidate_params_dict = {p: copy.deepcopy(p.data) for p in self.agent.parameters()}  # backup the current value
             self.add_new_candidate(candidate_params_dict)
             # Reject the update if the score on the current batch is not improved
-            
 
             self.n_iters += 1
-
-            # Evaluate the agent after update
-            if test_dataset is not None and self.n_iters % eval_frequency == 0:
-                eval_scores = evaluate(self.agent,
-                                        guide, 
-                                        test_dataset['inputs'],
-                                        test_dataset['infos'],
-                                        min_score=self.min_score,
-                                        num_threads=num_threads,
-                                        num_samples=self.num_eval_times,
-                                        description=f"Evaluating candidate")
-                 # Create table with explicit column names
-                columns = [f'Eval_{i+1}' for i in range(eval_scores.shape[1])]
-                table = self.logger.wandb.Table(columns=columns, data=eval_scores.tolist())
-                self.logger.log(f'Raw_test_scores_at_step_{self.n_iters}', table, self.n_iters, color='green')
-                # Extract all non-None values and compute overall average
-                all_valid_scores = [score for row in eval_scores for score in row if score is not None]
-                test_score = np.mean(all_valid_scores) if all_valid_scores else 0
-                self.logger.log('Test score', test_score, self.n_iters, color='green')
-
-            
-
             # Logging
             if score is not None:  # so that mean can be computed
                 train_scores.append(score)
@@ -810,35 +862,38 @@ class MinibatchwithValidation(MinibatchAlgorithm):
                 # for p in self.agent.parameters():
                 #     self.logger.log(f"Parameter: {p.name}", p.data, self.n_iters, color='red')
         print_color(f"Candidate generation finished. Start validation.", 'yellow')
-        # Validate the buffer evenly
-        # candidate_to_test = self.evenly_split_buffer_validation()
-        candidate_to_test = self.ucb_best_candidate()
-        self.optimizer.update(candidate_to_test['params'])
-        eval_scores = evaluate(self.agent,
-                                        guide, 
-                                        test_dataset['inputs'],
-                                        test_dataset['infos'],
-                                        min_score=self.min_score,
-                                        num_threads=num_threads,
-                                        num_samples=self.num_eval_times,
-                                        description=f"Evaluating candidate")
-                 # Create table with explicit column names
-        columns = [f'Eval_{i+1}' for i in range(eval_scores.shape[1])]
-        table = self.logger.wandb.Table(columns=columns, data=eval_scores.tolist())
-        self.logger.log(f'Raw_test_scores_at_step_{self.n_iters}', table, self.n_iters+1, color='green')
-        # Extract all non-None values and compute overall average
-        all_valid_scores = [score for row in eval_scores for score in row if score is not None]
-        test_score = np.mean(all_valid_scores) if all_valid_scores else 0
-        self.logger.log('Test score', test_score, self.n_iters+1, color='green')
-        self.logger.log('Total samples', self.total_samples, self.n_iters+1, color='cyan')
-        self.logger.log('Total proposals', self.total_proposals, self.n_iters+1, color='red')
-        params_values = list(candidate_to_test['params'].values())
-        self.logger.log('Final parameter 1', params_values[0], self.n_iters+1, color='magenta')
-        self.logger.log('Final parameter 2', params_values[1], self.n_iters+1, color='magenta')
+        
+        # Choose validation method based on flag
+        
+        # elif validation_method == "evenly_split":
+        print_color("Using evenly split validation method", 'blue')
+        self.evenly_split_buffer_validation(test_dataset=test_dataset, guide=guide)
+        # set all the stats in the buffer to be initial ones
+        for candidate in self.buffer:
+            candidate['score_sum'] = 0
+            candidate['eval_count'] = 0
+            candidate['mean_score'] = None
+            candidate['ucb_score'] = None
+            candidate['lcb_score'] = None
+        # Final evaluation of the selected candidate
+        print_color("Using UCB-based validation method", 'blue')
+        self.ucb_best_candidate(test_dataset=test_dataset, guide=guide)
+
+        # self.optimizer.update(candidate_to_test['params'])
+        
+        
+        # # Log final results
+        # all_valid_scores = [score for row in eval_scores for score in row if score is not None]
+        # test_score = np.mean(all_valid_scores) if all_valid_scores else 0
+        # self.logger.log('Test score', test_score, self.n_iters+1, color='green')
+        # self.logger.log('Total samples', self.total_samples, self.n_iters+1, color='cyan')
+        # self.logger.log('Total proposals', self.total_proposals, self.n_iters+1, color='red')
+        # params_values = list(candidate_to_test['params'].values())
+        # self.logger.log('Final_Parameter_1', params_values[0], self.n_iters+1, color='magenta')
+        # self.logger.log('Final_Parameter_2', params_values[1], self.n_iters+1, color='magenta')
 
 
-        return train_scores, test_score
-
+        return 
 class Island:
     """An Island has a buffer (deque object) of candidate entries. It also has attribute of best_candidate_dict and best_score."""
     def __init__(self, buffer, best_candidate_dict, best_score):
