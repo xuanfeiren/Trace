@@ -795,7 +795,7 @@ class MinibatchwithValidation(MinibatchAlgorithm):
               verbose = False,  # whether to print the output of the agent
               num_threads = 20,  # maximum number of threads to use
               num_eval_samples = 1,  # number of samples to use to evaluate each input
-              validation_method = "evenly_split",  # flag to choose validation method: "evenly_split" or "ucb"
+              validation_method = "ucb",  # flag to choose validation method: "evenly_split" or "ucb"
               **kwargs
               ):
         self.buffer = deque(maxlen=50) 
@@ -866,18 +866,21 @@ class MinibatchwithValidation(MinibatchAlgorithm):
         # Choose validation method based on flag
         
         # elif validation_method == "evenly_split":
-        print_color("Using evenly split validation method", 'blue')
-        self.evenly_split_buffer_validation(test_dataset=test_dataset, guide=guide)
+       
         # set all the stats in the buffer to be initial ones
-        for candidate in self.buffer:
-            candidate['score_sum'] = 0
-            candidate['eval_count'] = 0
-            candidate['mean_score'] = None
-            candidate['ucb_score'] = None
-            candidate['lcb_score'] = None
+        # for candidate in self.buffer:
+        #     candidate['score_sum'] = 0
+        #     candidate['eval_count'] = 0
+        #     candidate['mean_score'] = None
+        #     candidate['ucb_score'] = None
+        #     candidate['lcb_score'] = None
         # Final evaluation of the selected candidate
-        print_color("Using UCB-based validation method", 'blue')
-        self.ucb_best_candidate(test_dataset=test_dataset, guide=guide)
+        if validation_method == "ucb":
+            print_color("Using UCB-based validation method", 'blue')
+            self.ucb_best_candidate(test_dataset=test_dataset, guide=guide)
+        elif validation_method == "evenly_split":
+            print_color("Using evenly split validation method", 'blue')
+            self.evenly_split_buffer_validation(test_dataset=test_dataset, guide=guide)
 
         # self.optimizer.update(candidate_to_test['params'])
         
