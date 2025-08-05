@@ -41,6 +41,7 @@ class ParameterContainer(NodeContainer):
         both trainable and non-trainable parameters. The dict contains
         ParameterNodes or ParameterContainers.
         """
+        from opto.trace.bundle import FunModule
         parameters = {}
         for name, attr in inspect.getmembers(self):
             if name.startswith('__TRACE_RESERVED_'):
@@ -50,6 +51,11 @@ class ParameterContainer(NodeContainer):
                 method = attr.func.__self__
                 if trainable_method(method):
                     parameters[name] = method.parameter
+            elif isinstance(attr, FunModule):
+                # when a bundle method is not trainable
+                # it shows up as a FunModule attribute
+                if trainable_method(attr):
+                    parameters[name] = attr.parameter
             elif trainable_method(attr):  # method attribute
                 parameters[name] = attr.parameter
             elif isinstance(attr, ParameterNode):
