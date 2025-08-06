@@ -724,7 +724,7 @@ class MinibatchwithValidation(MinibatchAlgorithm):
         
         return float(avg_score), eval_count
     def ucb_best_candidate(self, 
-                      horizon: int=20, 
+                      horizon: int=80, 
                       evaluation_batch_size: int = 20,
                       num_threads: Optional[int] = None,
                       test_dataset=None,
@@ -748,6 +748,7 @@ class MinibatchwithValidation(MinibatchAlgorithm):
             candidate['score_sum'] += validation_score * validation_evals
             candidate['eval_count'] += validation_evals
             self.ucb_total_samples += validation_evals
+            self.total_samples += validation_evals
         self._update_buffer_scores()
         current_best = max(self.buffer, key=lambda c: c['mean_score'])
         self.optimizer.update(current_best['params'])
@@ -765,14 +766,15 @@ class MinibatchwithValidation(MinibatchAlgorithm):
         if hasattr(self, 'logger'):
             self.n_iters += 1
             self.print_intervals(self.buffer)
-            self.logger.log('UCB Test Score in validation', test_score, self.n_iters, color='green')
+            self.logger.log('Test score', test_score, self.n_iters, color='green')
             self.logger.log('UCB Validation_Samples', self.ucb_total_samples, self.n_iters, color='cyan')
+            self.logger.log('Total samples', self.total_samples, self.n_iters, color='yellow')
             self.logger.log('UCB_Best_Mean_Score', current_best['mean_score'], self.n_iters, color='yellow')
         
         print_color(f"UCB iteration {0}: Best mean score: {current_best['mean_score']:.4f}, Test score: {test_score:.4f}", 'green')
         # UCB-based best arm identification
         for iteration in range(horizon):
-                
+            print_color(f"UCB iteration {iteration+1}/{horizon}: ", 'blue')
             # Update UCB scores
             self._update_buffer_scores()
             
@@ -796,12 +798,13 @@ class MinibatchwithValidation(MinibatchAlgorithm):
                 selected_candidate['score_sum'] += validation_score * validation_evals
                 selected_candidate['eval_count'] += validation_evals
                 self.ucb_total_samples += validation_evals
+                self.total_samples += validation_evals
                 print_color(f"UCB iteration {iteration+1}/{horizon}: "
                           f"Selected candidate score {validation_score:.4f} "
                           f"(evaluated on {validation_evals} samples)", 'cyan')
             
             # Test and log every 5 iterations
-            if (iteration + 1) % 5 == 0 and test_dataset is not None and guide is not None:
+            if (iteration + 1) % 8 == 0 and test_dataset is not None and guide is not None:
                 self._update_buffer_scores()
                 current_best = max(self.buffer, key=lambda c: c['mean_score'])
                 self.optimizer.update(current_best['params'])
@@ -819,8 +822,9 @@ class MinibatchwithValidation(MinibatchAlgorithm):
                 if hasattr(self, 'logger'):
                     self.n_iters += 1
                     self.print_intervals(self.buffer)
-                    self.logger.log('UCB Test Score in validation', test_score, self.n_iters, color='green')
+                    self.logger.log('Test score', test_score, self.n_iters, color='green')
                     self.logger.log('UCB Validation_Samples', self.ucb_total_samples, self.n_iters, color='cyan')
+                    self.logger.log('Total samples', self.total_samples, self.n_iters, color='cyan')
                     self.logger.log('UCB_Best_Mean_Score', current_best['mean_score'], self.n_iters, color='yellow')
                 
                 print_color(f"UCB iteration {iteration+1}: Best mean score: {current_best['mean_score']:.4f}, Test score: {test_score:.4f}", 'green')
@@ -917,16 +921,16 @@ class MinibatchwithValidation(MinibatchAlgorithm):
         print_color("Using UCB-based validation method", 'blue')
         self.ucb_best_candidate(test_dataset=test_dataset, guide=guide)
         # set all the stats in the buffer to be initial ones
-        for candidate in self.buffer:
-            candidate['score_sum'] = 0
-            candidate['eval_count'] = 0
-            candidate['mean_score'] = None
-            candidate['ucb_score'] = None
-            candidate['lcb_score'] = None
-        # Final evaluation of the selected candidate
+        # for candidate in self.buffer:
+        #     candidate['score_sum'] = 0
+        #     candidate['eval_count'] = 0
+        #     candidate['mean_score'] = None
+        #     candidate['ucb_score'] = None
+        #     candidate['lcb_score'] = None
+        # # Final evaluation of the selected candidate
         
-        print_color("Using evenly split validation method", 'blue')
-        self.evenly_split_buffer_validation(test_dataset=test_dataset, guide=guide)
+        # print_color("Using evenly split validation method", 'blue')
+        # self.evenly_split_buffer_validation(test_dataset=test_dataset, guide=guide)
 
         # self.optimizer.update(candidate_to_test['params'])
         
@@ -1460,61 +1464,77 @@ class EvaluateInitialCandidate(MinibatchAlgorithm):
         super().__init__(agent, optimizer, num_threads=num_threads, logger=logger, *args, **kwargs)
     def train(self,
               guide,
-              train_dataset,
-              validate_dataset,
               test_dataset,
-              train_batch_size: int = 2,
-              num_epochs: int = 10,
-              verbose: Union[bool, str] = False,
-              num_threads: Optional[int] = None,
               **kwargs
               ):
         """Evaluate the initial candidate."""
         self.min_score = 0
         self.guide = guide
-        num_eval_times = 50
+        max_eval_times = 5000
         
-        # Initialize results as numpy array: results[iteration, task_id] = reward (1, 0, or -1 for None)
-        num_tasks = len(test_dataset['inputs'])
-        results = np.full((num_eval_times, num_tasks), -1, dtype=int)  # -1 represents None/failure
+        current_dataset = test_dataset
+        num_eval_times = 0
+        total_tasks = len(test_dataset['inputs'])
+        solved_tasks = 0
         
-        for num in range(num_eval_times):
-            eval_scores = evaluate(self.agent, guide, test_dataset['inputs'], test_dataset['infos'], 
+        print_color(f"Starting evaluation with {total_tasks} tasks", 'blue')
+        
+        # One new version: attempt to evaluate the agent on the test set, after each evaluation remove all the successful tasks. Repeat this process until all the tasks are solved.
+
+        while (len(current_dataset['inputs']) > 0) and (num_eval_times < max_eval_times):
+            # Sample a minibatch from the current dataset
+            
+            eval_scores = evaluate(self.agent, guide, current_dataset['inputs'], current_dataset['infos'], 
                                  min_score=self.min_score, num_threads=self.num_threads, 
-                                 num_samples=1, description=f"Evaluating candidate iteration {num+1}")
+                                 num_samples=1, description=f"Evaluating candidate iteration {num_eval_times+1}")
+            num_eval_times += 1
             
-            # Extract rewards for this iteration (eval_scores is 1D array)
-            # Convert None values to -1, keep 1 and 0 as is
-            eval_scores_clean = np.where(eval_scores == None, -1, eval_scores).astype(int)
-            results[num, :len(eval_scores_clean)] = eval_scores_clean
-            # Remaining positions stay -1 (already initialized)
+            # Extract the labels of success tasks (score == 1) 
+            successful_indices = []
+            for i, score in enumerate(eval_scores):
+                if score == 1:  # Task was successful
+                    successful_indices.append(i)
             
-            # Calculate pass@K for K = num + 1 (current iteration number)
-            K = num + 1
+            # Count newly solved tasks
+            newly_solved = len(successful_indices)
+            solved_tasks += newly_solved
             
-            # For each task, check if any of the first K attempts succeeded (reward == 1)
-            pass_at_K_per_task = np.any(results[:K, :] == 1, axis=0).astype(int)
+            # Update the current dataset - remove successful tasks
+            if successful_indices:
+                remaining_inputs = [current_dataset['inputs'][i] for i in range(len(current_dataset['inputs'])) 
+                                  if i not in successful_indices]
+                remaining_infos = [current_dataset['infos'][i] for i in range(len(current_dataset['infos'])) 
+                                 if i not in successful_indices]
+                current_dataset = {'inputs': remaining_inputs, 'infos': remaining_infos}
             
-            # Calculate mean pass@K across all tasks
-            pass_at_K = np.mean(pass_at_K_per_task)
+            # Print the pass rate. passed tasks / total tasks
+            pass_rate = solved_tasks / total_tasks
+            remaining_tasks = len(current_dataset['inputs'])
             
-            # Print and log results
-            tasks_passed = np.sum(pass_at_K_per_task)
-            print_color(f"Iteration {num + 1}: Pass@{K} = {pass_at_K:.4f} "
-                       f"({tasks_passed}/{num_tasks} tasks passed)", 'green')
+            print_color(f"Iteration {num_eval_times}: Solved {newly_solved} new tasks. "
+                       f"Total solved: {solved_tasks}/{total_tasks} ({pass_rate:.2%}). "
+                       f"Remaining: {remaining_tasks}", 'green')
             
-            # Log to logger if available
+            # Log progress
             if hasattr(self, 'logger'):
-                self.logger.log(f'Pass@K', pass_at_K, num + 1, color='green')
-                self.logger.log(f'Tasks_passed_at_K', int(tasks_passed), num + 1, color='cyan')
+                self.logger.log('Pass Rate', pass_rate, num_eval_times, color='green')
+                self.logger.log('Solved Tasks', solved_tasks, num_eval_times, color='blue')
+                self.logger.log('Remaining Tasks', remaining_tasks, num_eval_times, color='yellow')
+                self.logger.log('Evaluation Iterations', num_eval_times, num_eval_times, color='cyan')
+            
+            # Break if all tasks are solved
+            if remaining_tasks == 0:
+                print_color(f"All tasks solved after {num_eval_times} evaluations!", 'green')
+                break
         
         # Final summary
-        print_color(f"\nFinal Results after {num_eval_times} evaluations:", 'blue')
-        final_pass_per_task = np.any(results == 1, axis=0).astype(int)
-        final_pass_rate = np.mean(final_pass_per_task)
-        print_color(f"Pass@{num_eval_times} = {final_pass_rate:.4f}", 'blue')
+        final_pass_rate = solved_tasks / total_tasks
+        print_color(f"Final Results: {solved_tasks}/{total_tasks} tasks solved ({final_pass_rate:.2%}) "
+                   f"in {num_eval_times} evaluations", 'blue')
         
         if hasattr(self, 'logger'):
-            self.logger.log(f'Final_Pass@{num_eval_times}', final_pass_rate, num_eval_times, color='blue')
+            self.logger.log('Final Pass Rate', final_pass_rate, num_eval_times, color='magenta')
+            self.logger.log('Final Solved Tasks', solved_tasks, num_eval_times, color='magenta')
+            self.logger.log('Total Evaluations', num_eval_times, num_eval_times, color='magenta')
         
-        return results
+        return num_eval_times
