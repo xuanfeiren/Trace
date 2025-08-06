@@ -878,7 +878,9 @@ class MinibatchwithValidation(MinibatchAlgorithm):
             all_valid_scores = [score for row in eval_scores for score in row if score is not None]
             test_score = np.mean(all_valid_scores) if all_valid_scores else 0
             self.logger.log('Initial_Test_Score', test_score, self.n_iters, color='blue')
-
+            self.logger.log('Total samples', self.total_samples, self.n_iters, color='cyan')
+            self.logger.log('Total proposals', self.total_proposals, self.n_iters, color='red')
+            self.logger.log('Test score', test_score, self.n_iters, color='green')
 
         # TODO random sampling with replacement
         train_scores = []
@@ -912,8 +914,8 @@ class MinibatchwithValidation(MinibatchAlgorithm):
                 # print(f"Epoch: {i}. Iteration: {self.n_iters}")
                 self.logger.log("Instantaneous train score", score, self.n_iters)
                 self.logger.log("Average train score", np.mean(train_scores), self.n_iters)
-                self.logger.log("Total samples", self.total_samples, self.n_iters)
-                self.logger.log("Total proposals", self.total_proposals, self.n_iters)
+                # self.logger.log("Total samples", self.total_samples, self.n_iters)
+                # self.logger.log("Total proposals", self.total_proposals, self.n_iters)
                 # for p in self.agent.parameters():
                 #     self.logger.log(f"Parameter: {p.name}", p.data, self.n_iters, color='red')
         print_color(f"Candidate generation finished. Start validation.", 'yellow')
