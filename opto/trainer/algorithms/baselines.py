@@ -1540,3 +1540,167 @@ class EvaluateInitialCandidate(MinibatchAlgorithm):
             self.logger.log('Total Evaluations', num_eval_times, num_eval_times, color='magenta')
         
         return num_eval_times
+    
+class LearnFromSuccessAlgorithm(MinibatchAlgorithm):
+    """
+    This is an algorithm that learns from the success of the agent. At each epoch, we run the agent on the current train dataset, if the agent solves the task (score == 1), we add the conversation history of success task to the agent's conversations dict. Then delete those success case from the train dataset.
+    """
+    def __init__(self, agent, optimizer, num_threads: int = None, logger=None, *args, **kwargs):
+        super().__init__(agent, optimizer, num_threads=num_threads, logger=logger, *args, **kwargs)
+        self.successful_conversations = []
+        
+    def _update_agent_conversations(self, task_indices, successful_conversations):
+        """Update agent's conversations dictionary with task-specific successful examples."""
+        if not successful_conversations or not task_indices:
+            return
+            
+        # Get current conversations dictionary
+        current_conversations = dict(self.agent.conversations.data) if self.agent.conversations.data else {}
+        
+        # Add new successful conversations for specific task indices
+        for task_idx, conversation in zip(task_indices, successful_conversations):
+            current_conversations[task_idx] = conversation
+            
+        # Update the agent's conversations dictionary using the optimizer
+        if hasattr(self.agent, 'conversations'):
+            update_dict = {self.agent.conversations: current_conversations}
+            self.optimizer.update(update_dict)
+            
+            print_color(f"Updated conversations dict with {len(successful_conversations)} task-specific successful examples", 'cyan')
+            print_color(f"Total conversations in dict: {len(current_conversations)}", 'blue')
+        else:
+            print_color("Warning: Agent does not have conversations attribute", 'yellow')
+
+    def train(self,
+              guide,
+              train_dataset,
+              test_dataset,
+              num_epochs: int = 50,
+              eval_frequency: int = 1,
+              **kwargs
+              ):
+        """Learn from the success of the agent."""
+        self.min_score = 0
+        self.guide = guide
+        self.train_dataset = train_dataset
+        self.test_dataset = test_dataset
+        self.num_eval_times = 5
+        self.n_iters = 0
+        
+        # Initialize tracking variables
+        self.total_samples = 0
+        self.total_proposals = 0
+        
+        # Initial evaluation
+        if eval_frequency > 0:
+            eval_scores = evaluate(self.agent,
+                                 guide, 
+                                 test_dataset['inputs'],
+                                 test_dataset['infos'],
+                                 min_score=self.min_score,
+                                 num_threads=self.num_threads,
+                                 num_samples=self.num_eval_times,
+                                 description=f"Initial evaluation")
+            
+            # Extract all non-None values and compute overall average
+            if eval_scores.ndim > 1:
+                all_valid_scores = [score for row in eval_scores for score in row if score is not None]
+            else:
+                all_valid_scores = [score for score in eval_scores if score is not None]
+            test_score = np.mean(all_valid_scores) if all_valid_scores else 0
+            self.logger.log('Test score', test_score, self.n_iters, color='green')
+            self.logger.log('Total samples', self.total_samples, self.n_iters, color='cyan')
+
+        # Create a working copy of the training dataset
+        current_train_inputs = train_dataset['inputs'].copy()
+        current_train_infos = train_dataset['infos'].copy()
+        
+        for epoch in range(num_epochs):
+            # Check if we have any training data left
+            if not current_train_inputs:
+                print_color("No more training data available. Stopping training.", 'yellow')
+                break
+                
+            # Run agent on ALL remaining training tasks
+            xs = current_train_inputs
+            infos = current_train_infos
+            
+            print_color(f"Epoch {epoch + 1}: Running agent on {len(xs)} remaining training tasks", 'blue')
+            
+            # Forward pass on all remaining training tasks
+            forward = batch_run(max_workers=self.num_threads, 
+                              description=f"Forward pass on all {len(xs)} remaining tasks")(self.forward)
+            outputs = forward(self.agent, xs, guide, infos)
+            
+            # Track samples used
+            self.total_samples += len(xs)
+            
+            # Identify successful tasks and collect their conversation histories
+            successful_indices = []
+            successful_task_indices = []
+            epoch_successful_conversations = []
+            
+            for i, (target, score, feedback) in enumerate(outputs):
+                if score == 1:  # Task was successful
+                    # Extract conversation history from the target or feedback
+                    # The feedback typically contains the full conversation
+                    conversation_history = str(feedback) 
+                    epoch_successful_conversations.append(conversation_history)
+                    successful_indices.append(i)
+                    successful_task_indices.append(xs[i])  # Store the actual task index for the conversation dict
+                    
+            # Add successful conversations to our collection
+            self.successful_conversations.extend(epoch_successful_conversations)
+            
+            # Log successful tasks found in this epoch
+            self.logger.log('Successful tasks this epoch', len(epoch_successful_conversations), epoch + 1, color='green')
+            self.logger.log('Total successful tasks', len(self.successful_conversations), epoch + 1, color='blue')
+            
+            # Remove successful tasks from the training dataset
+            if successful_indices:
+                # Sort indices in reverse order to avoid index shifting issues
+                successful_indices_sorted = sorted(set(successful_indices), reverse=True)
+                for idx in successful_indices_sorted:
+                    current_train_inputs.pop(idx)
+                    current_train_infos.pop(idx)
+                
+                print_color(f"Removed {len(successful_indices)} successful tasks. "
+                           f"Remaining training tasks: {len(current_train_inputs)}", 'cyan')
+            
+            # Update agent's conversations dictionary with successful conversations
+            if epoch_successful_conversations:
+                self._update_agent_conversations(successful_task_indices, epoch_successful_conversations)
+                # self.total_proposals += 1  # Count parameter updates as proposals
+            
+            self.n_iters += 1
+            
+            # Evaluate the updated agent on the test dataset
+            if epoch % eval_frequency == 0:
+                eval_scores = evaluate(self.agent,
+                                     guide, 
+                                     test_dataset['inputs'],
+                                     test_dataset['infos'],
+                                     min_score=self.min_score,
+                                     num_threads=self.num_threads,
+                                     num_samples=self.num_eval_times,
+                                     description=f"Evaluation after epoch {epoch + 1}")
+                
+                # Extract all non-None values and compute overall average
+                if eval_scores.ndim > 1:
+                    all_valid_scores = [score for row in eval_scores for score in row if score is not None]
+                else:
+                    all_valid_scores = [score for score in eval_scores if score is not None]
+                test_score = np.mean(all_valid_scores) if all_valid_scores else 0
+                
+                # Log results
+                self.logger.log('Test score', test_score, epoch + 1, color='green')
+                self.logger.log('Total samples', self.total_samples, epoch + 1, color='cyan')
+                self.logger.log('Remaining training tasks', len(current_train_inputs), epoch + 1, color='yellow')
+                
+                print_color(f"Epoch {epoch + 1}: Test score: {test_score:.4f}, "
+                           f"Successful conversations: {len(self.successful_conversations)}, "
+                           f"Remaining training tasks: {len(current_train_inputs)}", 'green')
+        
+        print_color(f"Training completed. Total successful conversations collected: {len(self.successful_conversations)}", 'blue')
+        
+        return self.successful_conversations
