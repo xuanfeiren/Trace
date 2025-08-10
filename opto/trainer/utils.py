@@ -6,6 +6,11 @@ from tqdm.asyncio import tqdm_asyncio
 from opto.trace.bundle import ALLOW_EXTERNAL_DEPENDENCIES
 from opto.trace.modules import Module
 from opto.trainer.guide import AutoGuide
+from typing import Union, List, Tuple, Dict, Any, Optional
+from opto.optimizers.utils import print_color
+from opto.trainer.evaluators import evaluate
+from opto.trace.nodes import ParameterNode
+from black import format_str, FileMode
 
 def async_run(runs, args_list = None, kwargs_list = None, max_workers = None, description = None, allow_sequential_run=True):
     """Run multiple functions in asynchronously.
@@ -168,3 +173,133 @@ if __name__ == "__main__":
     start = time.time()
     output = async_run(runs, args_list, kwargs_list)
     print(f"Time with default threads: {time.time()-start:.2f} seconds")
+import numpy as np
+def sample_minibatch( dataset: Dict[str, List[Any]], batch_size: int = None) -> Tuple[List[Any], List[Any]]:
+        """Sample a minibatch from the dataset."""
+        if not dataset or not dataset.get('inputs') or not dataset.get('infos'):
+            print_color("Warning: Attempted to sample from an empty or malformed dataset.", color='yellow')
+            return [], []
+        if batch_size is None: # return the whole dataset, if batch_size is not provided
+            return dataset['inputs'], dataset['infos']
+        dataset_size = len(dataset['inputs'])
+        if dataset_size == 0:
+            print_color("Warning: Dataset is empty, cannot sample minibatch.", color='yellow')
+            return [], []
+
+        actual_batch_size = min(batch_size, dataset_size)
+        indices = np.random.choice(dataset_size, actual_batch_size, replace=False)
+        xs = [dataset['inputs'][i] for i in indices]
+        infos = [dataset['infos'][i] for i in indices]
+        return xs, infos
+
+def retry_with_exponential_backoff(func, max_retries=10, base_delay=1.0, operation_name="operation"):
+    """
+    Retry a function with exponential backoff for rate limit and other transient errors.
+    
+    Args:
+        func: Function to retry (should be a callable with no arguments)
+        max_retries: Maximum number of retry attempts
+        base_delay: Base delay for exponential backoff
+        operation_name: Name of the operation for logging
+    
+    Returns:
+        Result of the function call
+        
+    Raises:
+        The last exception encountered if all retries fail
+    """
+    for retry_attempt in range(max_retries):
+        try:
+            return func()
+        except Exception as e:
+            error_str = str(e).lower()
+            error_type = type(e).__name__.lower()
+            
+            # Check if it's a retryable error
+            retryable_errors = [
+                'rate limit', 'timeout', 'temporary', 'service unavailable',
+                'internal server error', 'bad gateway', 'service temporarily unavailable',
+                'too many requests', 'quota', 'overloaded', 'resource has been exhausted',
+                'resource_exhausted', 'ratelimiterror', 'quotaexceedederror',
+                'connection error', 'network', 'json decode'
+            ]
+            
+            # Also check specific litellm exceptions
+            retryable_exception_types = [
+                'ratelimiterror', 'timeouterror', 'apiconnectionerror', 
+                'serviceunavailableerror', 'internalservererror', 'jsondecodeerror'
+            ]
+            
+            is_retryable = (
+                any(err in error_str for err in retryable_errors) or
+                any(exc_type in error_type for exc_type in retryable_exception_types) or
+                'code": 429' in error_str or  # HTTP 429 Too Many Requests
+                'code": 503' in error_str or  # HTTP 503 Service Unavailable
+                'code": 502' in error_str or  # HTTP 502 Bad Gateway
+                'code": 500' in error_str     # HTTP 500 Internal Server Error
+            )
+            
+            if retry_attempt == max_retries - 1:
+                # Last attempt failed
+                # print(f"{operation_name}: Failed after {max_retries} attempts. Error: {e}")
+                raise e
+            elif is_retryable:
+                # Special handling for rate limit errors - use longer delays
+                is_rate_limit = (
+                    'rate limit' in error_str or 'ratelimiterror' in error_type or
+                    'quota' in error_str or 'resource has been exhausted' in error_str or
+                    'code": 429' in error_str
+                )
+                
+                if is_rate_limit:
+                    # Longer delays for rate limits: 2, 8, 18, 32, 50 seconds
+                    delay = 2 * (retry_attempt + 1) ** 2 + retry_attempt
+                else:
+                    # Standard exponential backoff for other errors
+                    delay = base_delay * (2 ** retry_attempt) + (0.1 * retry_attempt)
+                
+                error_type_desc = "Rate limit" if is_rate_limit else "Retryable error"
+                # print(f"{operation_name}: {error_type_desc} - Retry {retry_attempt + 1}/{max_retries} after {delay:.1f}s. Error: {e}")
+                time.sleep(delay)
+            else:
+                # Non-retryable error
+                print(f"{operation_name}: Non-retryable error: {e}")
+                raise e
+    
+    # This should never be reached, but just in case
+    raise RuntimeError(f"{operation_name}: Unexpected error - reached end of retry loop")
+
+def evaluate_agent(agent, guide, dataset,min_score=0,num_threads=20,num_eval_times=5):
+    """Evaluate an agent."""
+    eval_scores = evaluate(agent,guide, dataset['inputs'],dataset['infos'],
+                                        min_score=min_score,
+                                        num_threads=num_threads,
+                                        num_samples=num_eval_times,
+                                        description=f"Evaluating agent")
+    # Create table with explicit column names
+    if eval_scores.ndim >1:
+        columns = [f'Eval_{i+1}' for i in range(eval_scores.shape[1])]
+        all_valid_scores = [score for row in eval_scores for score in row if score is not None]
+    else:
+        all_valid_scores = [score for score in eval_scores if score is not None]
+    test_score = np.mean(all_valid_scores) if all_valid_scores else 0
+    return test_score
+
+def construct_update_dict(suggestion: Dict[str, Any]) -> Dict[ParameterNode, Any]:
+        """Convert the suggestion in text into the right data type."""
+        update_dict = {}
+        for node in self.agent.parameters():
+            if node.trainable and node.py_name in suggestion:
+                try:
+                    formatted_suggestion = suggestion[node.py_name]
+                    if type(formatted_suggestion) == str and 'def' in formatted_suggestion:
+                        formatted_suggestion = format_str(formatted_suggestion, mode=FileMode())
+                    update_dict[node] = type(node.data)(formatted_suggestion)
+                except (ValueError, KeyError) as e:
+                    if getattr(self, 'ignore_extraction_error', False):
+                        warnings.warn(
+                            f"Cannot convert the suggestion '{suggestion[node.py_name]}' for {node.py_name} to the right data type"
+                        )
+                    else:
+                        raise e
+        return update_dict

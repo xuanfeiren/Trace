@@ -426,12 +426,13 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
             
             # Best candidate identification phase
             print_color("Starting best candidate identification phase...", 'cyan')
+
             # after ucb best candidate identification, return the best candidate based on lcb score
-            best_candidate = self.ucb_best_candidate(
+            best_candidate = self.find_best_candidate(
+                guide=guide,
                 horizon=ucb_horizon,
                 validation_dataset=validation_dataset,
-                guide=guide,
-                evaluation_batch_size=evaluation_batch_size,  # Pass evaluation_batch_size
+                evaluation_batch_size=evaluation_batch_size,
                 num_threads=num_threads
             )
             best_params = best_candidate['params']
@@ -513,6 +514,23 @@ class ExploreAlgorithm(UCBSearchAlgorithm):
         print_color("ExploreAlgorithm training completed.", 'blue')
         
         return 
+    
+    def find_best_candidate(self,
+                            guide,
+                            validation_dataset: Dict[str, List[Any]],
+                            horizon: int = 50,
+                            evaluation_batch_size: int = 20,
+                            num_threads: Optional[int] = None,
+                            **kwargs
+                            ) -> Dict[str, Any]:
+        """Find the best candidate. Could be overridden by subclasses."""
+        return self.ucb_best_candidate(
+            horizon=horizon,
+            validation_dataset=validation_dataset,
+            guide=guide,
+            evaluation_batch_size=evaluation_batch_size,  # Pass evaluation_batch_size
+            num_threads=num_threads
+        )
     
 class ExplorewithLLM(ExploreAlgorithm):
     """Explore with LLM, use the LLM to generate new candidates."""
@@ -725,3 +743,44 @@ class ExplorewithLLM(ExploreAlgorithm):
         print_color(f"Successfully added {llm_candidates_added} LLM-generated candidates", 'green')     
         return 
         
+class ExplorewithLLM_v2(ExploreAlgorithm):
+    """Explore with LLM, use the OptoPrime/LLM to generate new candidates."""
+    def find_best_candidate(self,
+                            guide,
+                            validation_dataset: Dict[str, List[Any]],
+                            horizon: int = 50,
+                            evaluation_batch_size: int = 20,
+                            num_threads: Optional[int] = None,
+                            **kwargs
+                            ) -> Dict[str, Any]:
+        if not self.buffer:
+            print_color("Buffer is empty, cannot select best candidate.", 'red')
+            return None
+        for iteration in range(horizon):
+            self._update_buffer_scores()
+            # Evaluate all candidates without statistics
+            num_newly_evaluated = 0
+            for candidate in self.buffer:
+                if candidate['eval_count'] == 0:
+                    try:
+                    # Evaluate on validation set
+                        validation_score, validation_evals = self._evaluate_candidate(
+                            candidate['params'], 
+                            validation_dataset, 
+                            guide, 
+                            evaluation_batch_size,
+                            num_threads
+                        )
+                        num_newly_evaluated += validation_evals
+                        print_color(f"Evaluated {num_newly_evaluated} new candidates in iteration {iteration}", 'green')
+                        if validation_score is not None and validation_score > -np.inf and validation_evals > 0:
+                            candidate['score_sum'] += validation_score * validation_evals
+                            candidate['eval_count'] += validation_evals
+                            self.total_samples += validation_evals
+                    except Exception as e:
+                        print_color(f"Best candidate identification: Error evaluating candidate: {e}", 'red')
+                        continue
+            
+            # Now we can assume all candidates in the buffer have been evaluated
+
+        return best_candidate
