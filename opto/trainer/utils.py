@@ -8,7 +8,7 @@ from opto.trace.modules import Module
 from opto.trainer.guide import AutoGuide
 from typing import Union, List, Tuple, Dict, Any, Optional
 from opto.optimizers.utils import print_color
-from opto.trainer.evaluators import evaluate
+
 from opto.trace.nodes import ParameterNode
 from black import format_str, FileMode
 
@@ -191,7 +191,6 @@ def sample_minibatch( dataset: Dict[str, List[Any]], batch_size: int = None) -> 
         xs = [dataset['inputs'][i] for i in indices]
         infos = [dataset['infos'][i] for i in indices]
         return xs, infos
-
 def retry_with_exponential_backoff(func, max_retries=10, base_delay=1.0, operation_name="operation"):
     """
     Retry a function with exponential backoff for rate limit and other transient errors.
@@ -208,6 +207,8 @@ def retry_with_exponential_backoff(func, max_retries=10, base_delay=1.0, operati
     Raises:
         The last exception encountered if all retries fail
     """
+    import time
+
     for retry_attempt in range(max_retries):
         try:
             return func()
@@ -271,6 +272,7 @@ def retry_with_exponential_backoff(func, max_retries=10, base_delay=1.0, operati
 
 def evaluate_agent(agent, guide, dataset,min_score=0,num_threads=20,num_eval_times=5):
     """Evaluate an agent."""
+    from opto.trainer.evaluators import evaluate
     eval_scores = evaluate(agent,guide, dataset['inputs'],dataset['infos'],
                                         min_score=min_score,
                                         num_threads=num_threads,
@@ -285,21 +287,3 @@ def evaluate_agent(agent, guide, dataset,min_score=0,num_threads=20,num_eval_tim
     test_score = np.mean(all_valid_scores) if all_valid_scores else 0
     return test_score
 
-def construct_update_dict(suggestion: Dict[str, Any]) -> Dict[ParameterNode, Any]:
-        """Convert the suggestion in text into the right data type."""
-        update_dict = {}
-        for node in self.agent.parameters():
-            if node.trainable and node.py_name in suggestion:
-                try:
-                    formatted_suggestion = suggestion[node.py_name]
-                    if type(formatted_suggestion) == str and 'def' in formatted_suggestion:
-                        formatted_suggestion = format_str(formatted_suggestion, mode=FileMode())
-                    update_dict[node] = type(node.data)(formatted_suggestion)
-                except (ValueError, KeyError) as e:
-                    if getattr(self, 'ignore_extraction_error', False):
-                        warnings.warn(
-                            f"Cannot convert the suggestion '{suggestion[node.py_name]}' for {node.py_name} to the right data type"
-                        )
-                    else:
-                        raise e
-        return update_dict
