@@ -4,7 +4,10 @@
 # Here are several algorithms. 
 # 1. Evenly split
 # 2. UCB best candidate identification
-# 3. LLM function approximation
+# 3. LLM tabular model
+# 4. LLM regression model (estimate the score of a candidate)+output the choice
+# 5. LLM generator model
+   
 import numpy as np
 import copy
 import time
@@ -110,7 +113,7 @@ class UCBAlgorithm(BAIAlgorithmBase):
 
     def __init__(self,agent,num_threads, logger,update_dicts, *args, **kwargs):
         super().__init__(agent,num_threads, logger,update_dicts, *args, **kwargs)
-        self.ucb_exploration_factor = 0.1 # Set the exploration factor for UCB
+        self.ucb_exploration_factor = 0.3 # Set the exploration factor for UCB
     def _calculate_ucb(self, candidate_buffer_entry: Dict, total_tracked_evaluations: int) -> float:
         """Calculates UCB score for a candidate in the buffer."""
         if candidate_buffer_entry['eval_count'] == 0:
@@ -126,6 +129,7 @@ class UCBAlgorithm(BAIAlgorithmBase):
         for candidate_entry in self.buffer:
             candidate_entry['ucb_score'] = self._calculate_ucb(candidate_entry, total_evaluations_tracker)
             candidate_entry['mean_score'] = candidate_entry['score_sum'] / (candidate_entry['eval_count'] or 1E-9)
+            candidate_entry['lcb_score'] = candidate_entry['mean_score'] - (candidate_entry['ucb_score']-candidate_entry['mean_score'])
         return 
     
     def step(self, guide, validate_dataset, num_threads, **kwargs):
@@ -146,8 +150,9 @@ class UCBAlgorithm(BAIAlgorithmBase):
         return max(buffer, key=lambda c: c['ucb_score'])
 
 
-class LLMSelectorAlgorithm(UCBAlgorithm):
+class LLMModel(UCBAlgorithm):
     """LLM selector best candidate identification."""
+    """Default to be a tabular model"""
     def __init__(self,agent,num_threads, logger,update_dicts, *args, **kwargs):
         super().__init__(agent,num_threads, logger,update_dicts, *args, **kwargs)
         self.llm_model = "gemini/gemini-2.0-flash"
@@ -158,12 +163,8 @@ class LLMSelectorAlgorithm(UCBAlgorithm):
     def select_candidate(self, buffer):
         """At each select step, we call LLM with the buffer statistics (candidate-score pairs). """
         self.update_buffer_scores()
-        self.selection_count += 1  # Track how many times this method is called
         selected_entry = self.llm_generate_candidate(buffer, verbose=True) # Modify the verbose value here
-        
-        # If a new candidate was proposed, add it to the buffer
-        
-        
+        self.selection_count += 1  # Track how many times this method is called.        
         # Return in the expected format with 'params' key
         return selected_entry
         
@@ -346,20 +347,20 @@ If proposing a new arm, set existing_arm_index to -1 and fill new_update_dict wi
         # Single LLM call with internal backoff handled by helper
         def llm_call():
             return self.llm(prompt_messages, response_format=response_format)
-        if verbose:
-            # Print full system prompt and truncated user messages
-            print_color("=== LLM Prompt ===", "cyan")
-            for i, msg in enumerate(prompt_messages):
-                role = msg["role"]
-                if role == "system":
-                    # Print full system prompt
-                    print_color(f"=== SYSTEM MESSAGE ===", "cyan")
-                    print_color(msg["content"], "cyan")
-                else:
-                    # Truncate user messages (they contain long parameter data)
-                    content_preview = msg["content"][:200] + "..." if len(msg["content"]) > 200 else msg["content"]
-                    print_color(f"=== USER MESSAGE (truncated) ===", "cyan")
-                    print_color(content_preview, "cyan")
+        # if verbose:
+        #     # Print full system prompt and truncated user messages
+        #     print_color("=== LLM Prompt ===", "cyan")
+        #     for i, msg in enumerate(prompt_messages):
+        #         role = msg["role"]
+        #         if role == "system":
+        #             # Print full system prompt
+        #             print_color(f"=== SYSTEM MESSAGE ===", "cyan")
+        #             print_color(msg["content"], "cyan")
+        #         else:
+        #             # Truncate user messages (they contain long parameter data)
+        #             content_preview = msg["content"][:200] + "..." if len(msg["content"]) > 200 else msg["content"]
+        #             print_color(f"=== USER MESSAGE (truncated) ===", "cyan")
+        #             print_color(content_preview, "cyan")
         llm_response = retry_with_exponential_backoff(
             llm_call,
             max_retries=10,
@@ -456,4 +457,437 @@ If proposing a new arm, set existing_arm_index to -1 and fill new_update_dict wi
                 else:
                     update_dict[node] = node.data
         return update_dict
+    
+class LLMRegressionModel(LLMModel):
+    """LLM regression model. Could estimate the score of candidates in the buffer or not. Output a choice from the current buffer"""
+    def __init__(self, agent, num_threads, logger, update_dicts, enable_estimate_scores=False, *args, **kwargs):
+        super().__init__(agent, num_threads, logger, update_dicts, *args, **kwargs)
+        self.enable_estimate_scores = enable_estimate_scores
+
+    def llm_generate_candidate(self, buffer, verbose: bool = False):
+        "Main function used by the BAI algorithm."
+        return self.llm_regressor(buffer, verbose)
+        
+    def llm_regressor(self, buffer, verbose: bool = False):
+        """
+        The LLM will be given the buffer statistics and the candidate parameters. In this model, LLM serves as a function approximator/regressor, which means it will take the buffer statistics and the candidate parameters as input, and acts as an estimated score/reward model.
+
+        Input:
+        - buffer: list of candidate entries
+        - verbose: whether to print verbose output
+
+        Output:
+        - one entry **in** the buffer
+        """
+        
+        # Calculate budget information
+        total_budget = self.num_epochs * self.horizon
+        used_budget = self.selection_count
+        remaining_budget = total_budget - used_budget
+        
+        # Prepare serializable candidate summaries with parameters
+        serializable_candidate_summaries = []
+        for idx, cand_entry in enumerate(buffer):
+            summary = {
+                "index": idx,
+                "parameters": {p.py_name: copy.deepcopy(p.data) for p in cand_entry['params']},
+                "eval_count": cand_entry['eval_count'],
+                "mean_score": cand_entry['mean_score'],
+                "ucb_score": cand_entry.get('ucb_score', None),
+                "lcb_score": cand_entry.get('lcb_score', None)
+            }
+            serializable_candidate_summaries.append(summary)
+        candidate_summaries_json = json.dumps(serializable_candidate_summaries, indent=2)
+        
+        example_param_schema_json = json.dumps({p.py_name: copy.deepcopy(p.data) for p in self.agent.parameters()}, indent=2)
+
+        # Create conditional example output format
+        if self.enable_estimate_scores:
+            example_format = '''{{
+  "buffer_analysis": "Buffer Statistics: 5 candidates total. Observed scores: [0.75, 0.65, 0.85, 0.45, 0.88], eval_counts: [25, 30, 3, 2, 4]. Confidence Analysis: UCB scores [0.78, 0.68, 1.02, 0.72, 0.98], LCB scores [0.72, 0.62, 0.68, 0.18, 0.78], confidence widths [0.06, 0.06, 0.34, 0.54, 0.20]. Narrow intervals for candidates 0,1 (reliable), wide intervals for candidates 2,3,4 (high uncertainty). Reliability: candidates 0,1 are reliable (high eval_count, narrow confidence intervals), candidates 2,3,4 are unreliable (low eval_count, wide confidence intervals). Parameter Patterns: Candidates with longer and more detailed additional_instructions (>800 chars) tend to score higher. Candidates 0,2 have detailed tool descriptions with specific examples, while candidates 1,3,4 have generic descriptions. Authentication-focused instructions appear in higher-scoring candidates. Content analysis shows candidates 0,2 emphasize user verification and error handling, while candidates 1,3,4 lack specific guidance.",
+  "score_estimates": {{
+    "0": {{"estimated_score": 0.74, "reasoning": "Observed 0.75 with eval_count=25 (reliable). Confidence interval: [0.72, 0.78], width=0.06 (narrow, high certainty). Parameter analysis: has detailed tool descriptions (1200+ chars) and comprehensive additional_instructions covering authentication, confirmation workflows. Content includes specific error handling guidance. Narrow confidence interval confirms reliability. True score likely within UCB/LCB range, estimating near observed value with slight adjustment based on parameter quality."}},
+    "1": {{"estimated_score": 0.66, "reasoning": "Observed 0.65 with eval_count=30 (highly reliable). Confidence interval: [0.62, 0.68], width=0.06 (narrow, high certainty). Parameter analysis: has moderate tool descriptions (800 chars) but lacks specific examples. Additional_instructions are generic without authentication emphasis. Very narrow confidence interval confirms high reliability. True score likely close to observed, slight upward adjustment within confidence bounds."}},
+    "2": {{"estimated_score": 0.82, "reasoning": "Observed 0.85 with eval_count=3 (unreliable). Confidence interval: [0.68, 1.02], width=0.34 (very wide, high uncertainty). Parameter analysis: excellent parameter quality - detailed tool descriptions (1400+ chars) with specific examples, comprehensive additional_instructions emphasizing authentication and user verification. Wide confidence interval indicates high uncertainty, but parameter patterns suggest strong potential. Estimate toward upper-middle of confidence range due to excellent parameter quality."}},
+    "3": {{"estimated_score": 0.48, "reasoning": "Observed 0.45 with eval_count=2 (unreliable). Confidence interval: [0.18, 0.72], width=0.54 (extremely wide, very high uncertainty). Parameter analysis: minimal tool descriptions (400 chars), generic additional_instructions without authentication focus. Extremely wide confidence interval shows very high uncertainty. Parameter quality is poor compared to successful candidates. Estimate in lower portion of confidence range due to weak parameter patterns."}},
+    "4": {{"estimated_score": 0.80, "reasoning": "Observed 0.88 with eval_count=4 (unreliable). Confidence interval: [0.78, 0.98], width=0.20 (wide, high uncertainty). Parameter analysis: very poor parameter quality - extremely brief tool descriptions (300 chars) with no examples, minimal additional_instructions (200 chars) lacking authentication guidance, error handling, or specific workflows. Despite poor parameters, confidence interval suggests score could genuinely be high. Estimate in middle-lower range of confidence bounds, acknowledging uncertainty while noting parameter-performance disconnect may indicate this candidate got lucky or has hidden strengths not captured in parameter analysis."}}
+  }},
+  "selection_reasoning": "Analysis of estimated true scores: candidate 2 (0.82) > candidate 4 (0.80) > candidate 0 (0.74) > candidate 1 (0.66) > candidate 3 (0.48). Confidence interval analysis: candidate 2 has wide uncertainty [0.68, 1.02] but excellent parameters, candidate 4 has moderate uncertainty [0.78, 0.98] but poor parameters, candidates 0,1 have narrow intervals indicating reliability. Decision factors: (1) Expected performance: candidate 2 has highest estimated true score (0.82) with excellent parameter patterns suggesting genuine high potential, (2) Information value: candidate 2 has very wide confidence interval (0.34 width) indicating high uncertainty - substantial information gain from additional evaluation, (3) Risk assessment: candidate 2's UCB (1.02) shows high upside potential while LCB (0.68) shows acceptable downside, parameter quality supports optimistic estimate, (4) Budget efficiency analysis: With {remaining_budget} evaluations remaining (ample budget), can afford to resolve high-uncertainty, high-potential candidate. If budget were low (<10 remaining), would choose candidate 0 (narrow confidence interval, reliable). Rejected candidate 4 despite high confidence bounds [0.78, 0.98] because parameter analysis suggests disconnect between observed performance and parameter quality - likely got lucky rather than having genuine strength. Candidate 2's combination of wide confidence interval (high information value) and excellent parameters (high expected performance) makes it optimal choice for verification investment.",
+  "selected_index": 2
+}}'''
+        else:
+            example_format = '''{{
+  "buffer_analysis": "Buffer Statistics: 5 candidates total. Observed scores: [0.75, 0.65, 0.85, 0.45, 0.88], eval_counts: [25, 30, 3, 2, 4]. Confidence Analysis: UCB scores [0.78, 0.68, 1.02, 0.72, 0.98], LCB scores [0.72, 0.62, 0.68, 0.18, 0.78], confidence widths [0.06, 0.06, 0.34, 0.54, 0.20]. Narrow intervals for candidates 0,1 (reliable), wide intervals for candidates 2,3,4 (high uncertainty). Reliability: candidates 0,1 are reliable (high eval_count, narrow confidence intervals), candidates 2,3,4 are unreliable (low eval_count, wide confidence intervals). Parameter Patterns: Candidates with longer and more detailed additional_instructions (>800 chars) tend to score higher. Candidates 0,2 have detailed tool descriptions with specific examples, while candidates 1,3,4 have generic descriptions. Authentication-focused instructions appear in higher-scoring candidates. Content analysis shows candidates 0,2 emphasize user verification and error handling, while candidates 1,3,4 lack specific guidance.",
+  "selection_reasoning": "Confidence interval analysis: candidate 2 has wide uncertainty [0.68, 1.02] but excellent parameters, candidate 4 has moderate uncertainty [0.78, 0.98] but poor parameters, candidates 0,1 have narrow intervals indicating reliability. Decision factors: (1) Parameter quality: candidate 2 has excellent parameter patterns with detailed tool descriptions and comprehensive instructions, suggesting high potential, (2) Information value: candidate 2 has very wide confidence interval (0.34 width) indicating high uncertainty - substantial information gain from additional evaluation, (3) Risk assessment: candidate 2's UCB (1.02) shows high upside potential while LCB (0.68) shows acceptable downside, parameter quality supports optimistic outlook, (4) Budget efficiency analysis: With {remaining_budget} evaluations remaining (ample budget), can afford to resolve high-uncertainty, high-potential candidate. If budget were low (<10 remaining), would choose candidate 0 (narrow confidence interval, reliable). Rejected candidate 4 despite high confidence bounds [0.78, 0.98] because parameter analysis suggests disconnect between observed performance and parameter quality. Candidate 2's combination of wide confidence interval (high information value) and excellent parameters (high expected performance) makes it optimal choice.",
+  "selected_index": 2
+}}'''
+
+        prompt_messages = [
+            {
+                "role": "system",
+                "content": f"""
+## Role
+You are a function approximator/regressor for predicting performance scores of retail customer service agent configurations. You analyze noisy performance data to estimate true underlying scores and select the most promising candidate.
+
+## Understanding Noise in Scores
+**CRITICAL**: The observed mean_scores contain noise that decreases as eval_count increases:
+- **Low eval_count**: High noise, scores may be very misleading 
+- **Medium eval_count**: Moderate noise, scores somewhat reliable 
+- **High eval_count**: Low noise, scores quite reliable
+
+## Confidence Intervals (UCB/LCB)
+Each candidate has confidence bounds that help assess uncertainty:
+- **ucb_score**: Upper Confidence Bound - optimistic estimate of true performance
+- **lcb_score**: Lower Confidence Bound - pessimistic estimate of true performance  
+- **Confidence Width**: (ucb_score - lcb_score) indicates uncertainty level
+- **Wide intervals**: High uncertainty, need more data
+- **Narrow intervals**: Low uncertainty, reliable estimates 
+
+## Required Reasoning Process
+You MUST follow this structured analysis:
+
+### Step 1: Buffer Analysis
+Analyze the current buffer systematically:
+- **Parameter Patterns**: Identify common patterns in parameters (length, content, structure)
+- **Score Distribution**: Look at the range and distribution of observed scores
+- **Confidence Analysis**: Examine UCB/LCB bounds and confidence widths for each candidate
+- **Evaluation Reliability**: Assess which candidates have reliable vs unreliable statistics
+- **Correlations**: Find relationships between parameter characteristics and performance
+
+### Step 2: Real Score Estimation  
+For each candidate, estimate the true underlying score:
+- **Account for Noise**: Adjust observed scores based on eval_count reliability
+- **Use Confidence Bounds**: Consider UCB/LCB range to assess uncertainty and likely true score
+- **Parameter-based Prediction**: Use parameter patterns to predict likely performance
+- **Uncertainty Assessment**: Use confidence interval width to gauge reliability
+- **Reasoning**: Explain why you think the true score differs from observed score
+
+### Step 3: Candidate Selection
+Choose the best candidate considering:
+- **Expected Performance**: Which candidate likely has the highest true score?
+- **Information Value**: Which candidate would provide most valuable information?
+- **Risk Assessment**: Balance potential reward vs risk of the selection
+- **Budget Efficiency**: Make the best use of remaining evaluation budget
+
+## Budget Information
+- Total evaluation budget: {total_budget}
+- Budget used so far: {used_budget}  
+- Remaining budget: {remaining_budget}
+- Selection number: {self.selection_count}/{total_budget}
+
+## Output Requirements
+Return ONLY a JSON object with these fields:
+- "buffer_analysis": string analyzing patterns, correlations, and reliability in the current buffer
+{'- "score_estimates": object mapping candidate indices to your estimated true scores with reasoning' if self.enable_estimate_scores else ''}
+- "selection_reasoning": string explaining why you chose this specific candidate
+- "selected_index": integer index of the candidate you select for next evaluation
+
+## Example Output Format (all specific numbers are just examples, you should analyze the buffer and the candidate parameters to make the best choice)
+{example_format}
+""",
+            },
+            {
+                "role": "user", 
+                "content": f"""
+## Candidate Data
+{candidate_summaries_json}
+
+## Parameter Schema
+{example_param_schema_json}
+
+## Task
+Analyze the parameter-performance patterns and select the most promising candidate for evaluation. Focus on data-driven patterns rather than domain assumptions.
+
+Return ONLY the JSON object with your analysis and selection.
+""",
+            },
+        ]
+        
+        response_format = {"type": "json_object"}
+        
+        # Single LLM call with internal backoff handled by helper
+        def llm_call():
+            return self.llm(prompt_messages, response_format=response_format)
+            
+        llm_response = retry_with_exponential_backoff(
+            llm_call,
+            max_retries=10,
+            base_delay=1.0,
+            operation_name="LLM regression"
+        )
+        # Default fallback: return the best existing candidate
+        # only consider candidates with scores
+        default_entry = max([c for c in buffer if c['eval_count'] > 0], key=lambda c: c['mean_score'])
+
+        if llm_response is None:
+            if verbose:
+                print_color("LLM regression call failed after retries. Returning highest scoring candidate.", "yellow")
+            return default_entry
+
+        llm_response_str = getattr(getattr(llm_response, 'choices', [{}])[0], 'message', None)
+        llm_response_str = getattr(llm_response_str, 'content', None)
+        if not llm_response_str:
+            if verbose:
+                print_color("LLM returned an empty response.", "yellow")
+            return default_entry
+
+        cleaned_llm_response_str = llm_response_str.strip()
+        
+        if verbose:
+            self.print_buffer_statistics()
+            print_color(f"LLM Regression response: {cleaned_llm_response_str}", "cyan")
+            
+        try:
+            llm_output = json.loads(cleaned_llm_response_str)
+        except json.JSONDecodeError:
+            if verbose:
+                print_color("Failed to parse LLM regression JSON output.", "yellow")
+            return default_entry
+
+        if not isinstance(llm_output, dict):
+            return default_entry
+
+        # Extract selection
+        selected_index = llm_output.get("selected_index", -1)
+        try:
+            selected_index = int(selected_index)
+        except Exception:
+            selected_index = -1
+
+        # Validate and return selection
+        if isinstance(selected_index, int) and 0 <= selected_index < len(buffer):
+            selected_entry = buffer[selected_index]
+            if verbose:
+                buffer_analysis = llm_output.get("buffer_analysis", "No analysis provided")
+                selection_reasoning = llm_output.get("selection_reasoning", "No reasoning provided")
+                
+                print_color(f"LLM regression selected candidate {selected_index}", "green")
+                # print_color(f"Buffer Analysis: {buffer_analysis}", "cyan")
+                # print_color(f"Selection Reasoning: {selection_reasoning}", "cyan")
+                
+                # if self.enable_estimate_scores:
+                #     score_estimates = llm_output.get("score_estimates", {})
+                #     print_color(f"Score Estimates: {score_estimates}", "blue")
+            return selected_entry
+        else:
+            if verbose:
+                print_color("LLM regression output invalid; falling back to best existing candidate", "yellow")
+            return default_entry
+        
+class LLMGenerator(LLMRegressionModel):
+    "Ask LLM to come up with more candidates."
+    def llm_generator(self, buffer, verbose: bool = False, num_to_generate: int = 3):
+        """
+        Ask LLM to come up with more candidates. Based on the current buffer with statistics.
+
+        Input:
+        - buffer: list of candidate entries
+        - verbose: whether to print verbose output
+        - num_to_generate: number of candidates to generate
+
+        Output:
+        - return a temporary buffer, containing current candidates and newly proposed candidates
+        """
+        # Delete candidates without scores
+        buffer = [c for c in buffer if c['eval_count'] > 0]
+        
+        temporary_buffer = copy.deepcopy(buffer)
+        
+        # Prepare serializable candidate summaries with parameters and statistics
+        serializable_candidate_summaries = []
+        for idx, cand_entry in enumerate(buffer):
+            summary = {
+                "index": idx,
+                "parameters": {p.py_name: copy.deepcopy(p.data) for p in cand_entry['params']},
+                "eval_count": cand_entry['eval_count'],
+                "mean_score": cand_entry['mean_score'],
+                "ucb_score": cand_entry.get('ucb_score', None),
+                "lcb_score": cand_entry.get('lcb_score', None)
+            }
+            serializable_candidate_summaries.append(summary)
+        candidate_summaries_json = json.dumps(serializable_candidate_summaries, indent=2)
+        
+        example_param_schema_json = json.dumps({p.py_name: copy.deepcopy(p.data) for p in self.agent.parameters()}, indent=2)
+
+        prompt_messages = [
+            {
+                "role": "system",
+                "content": f"""
+## Role
+You are an expert in generating diverse, high-performance retail customer service agent configurations. Based on current candidate performance data, you will generate {num_to_generate} new diverse candidates that could potentially outperform existing ones.
+
+## Task
+Analyze the current buffer of candidates and their performance statistics, then generate {num_to_generate} new diverse candidates with different approaches that could achieve better performance.
+
+## Current Buffer Analysis
+You have access to:
+1. **Candidate parameters**: Configuration settings (tools_info, additional_instructions)
+2. **Performance statistics**: mean_score, eval_count, UCB/LCB confidence bounds
+3. **Patterns**: What seems to work well vs poorly in current candidates
+
+## Diversity Requirements
+**CRITICAL**: Generated candidates MUST be diverse from each other and from existing candidates:
+- **Different approaches**: Vary the style, focus, and structure significantly
+- **Different strengths**: Target different aspects of customer service (authentication, error handling, workflow efficiency, etc.)
+- **Different philosophies**: Some detailed vs concise, some conservative vs aggressive, some structured vs flexible
+- **Avoid redundancy**: Don't generate similar candidates
+
+## Generation Strategy
+For each new candidate:
+1. **Identify gaps**: What weaknesses exist in current candidates?
+2. **Propose improvements**: How can this new candidate address those gaps?
+3. **Ensure diversity**: How is this candidate meaningfully different from others?
+4. **Justify potential**: Why might this candidate perform better?
+
+## Output Requirements
+Return ONLY a JSON object with these fields:
+- "buffer_analysis": string analyzing current candidates' strengths, weaknesses, and patterns
+- "generated_candidates": array of {num_to_generate} objects, each with:
+  - "reasoning": string explaining why this candidate might outperform existing ones and how it's diverse
+  - "diversity_focus": string describing what makes this candidate unique/different
+  - "parameters": object with parameter values (matching the schema)
+
+## Example Output Format
+{{
+  "buffer_analysis": "Current buffer shows candidates focusing heavily on authentication (scores 0.6-0.8) but lacking in error recovery and user guidance. Most candidates have verbose tool descriptions but inconsistent instruction styles. Gap: no candidates emphasize proactive user assistance or streamlined workflows.",
+  "generated_candidates": [
+    {{
+      "reasoning": "Current candidates are verbose and reactive. This candidate focuses on efficiency and proactive assistance, which could reduce interaction time and improve user satisfaction. Addresses the gap in workflow optimization.",
+      "diversity_focus": "Efficiency-first approach with proactive user guidance, contrasting with existing reactive verbose style",
+      "parameters": {{
+        "tools_info": "Concise, action-focused tool descriptions emphasizing speed and efficiency...",
+        "additional_instructions": "Prioritize quick resolution and minimal back-and-forth. Always suggest next steps proactively..."
+      }}
+    }},
+    {{
+      "reasoning": "Existing candidates lack robust error handling. This candidate specializes in error recovery and provides multiple fallback options, potentially improving success rates in complex scenarios.",
+      "diversity_focus": "Error-resilience specialist with comprehensive fallback strategies, unique focus on failure recovery",
+      "parameters": {{
+        "tools_info": "Detailed tool descriptions with extensive error handling examples and fallback procedures...",
+        "additional_instructions": "Comprehensive error recovery protocols. When any tool fails, immediately provide alternatives..."
+      }}
+    }},
+    {{
+      "reasoning": "Current candidates assume user expertise. This candidate prioritizes user education and confirmation, potentially improving user satisfaction and reducing misunderstandings in complex transactions.",
+      "diversity_focus": "Educational approach with emphasis on user understanding and confirmation, contrasts with assumption-heavy existing candidates",
+      "parameters": {{
+        "tools_info": "User-friendly tool descriptions with natural language explanations and examples...",
+        "additional_instructions": "Explain every action in simple terms. Always confirm understanding before proceeding..."
+      }}
+    }}
+  ]
+}}
+""",
+            },
+            {
+                "role": "user",
+                "content": f"""
+## Current Buffer Data
+{candidate_summaries_json}
+
+## Parameter Schema
+Use exactly these parameter keys; values must be strings:
+{example_param_schema_json}
+
+## Task
+Generate {num_to_generate} diverse new candidates that could outperform existing ones. Focus on different approaches and address different weaknesses you identify in the current buffer.
+
+Return ONLY the JSON object with your analysis and generated candidates.
+""",
+            },
+        ]
+
+        response_format = {"type": "json_object"}
+
+        # LLM call with retry logic
+        def llm_call():
+            return self.llm(prompt_messages, response_format=response_format)
+
+        llm_response = retry_with_exponential_backoff(
+            llm_call,
+            max_retries=10,
+            base_delay=1.0,
+            operation_name="LLM candidate generation"
+        )
+
+        if llm_response is None:
+            if verbose:
+                print_color("LLM candidate generation failed after retries. Returning original buffer.", "yellow")
+            return temporary_buffer
+
+        llm_response_str = getattr(getattr(llm_response, 'choices', [{}])[0], 'message', None)
+        llm_response_str = getattr(llm_response_str, 'content', None)
+        if not llm_response_str:
+            if verbose:
+                print_color("LLM returned empty response for candidate generation.", "yellow")
+            return temporary_buffer
+
+        cleaned_llm_response_str = llm_response_str.strip()
+
+        if verbose:
+            print_color(f"LLM Generator response: {cleaned_llm_response_str}", "cyan")
+
+        try:
+            llm_output = json.loads(cleaned_llm_response_str)
+        except json.JSONDecodeError:
+            if verbose:
+                print_color("Failed to parse LLM generator JSON output.", "yellow")
+            return temporary_buffer
+
+        if not isinstance(llm_output, dict):
+            return temporary_buffer
+
+        # Extract and process generated candidates
+        generated_candidates = llm_output.get("generated_candidates", [])
+        buffer_analysis = llm_output.get("buffer_analysis", "No analysis provided")
+
+        if verbose:
+            print_color(f"Buffer Analysis: {buffer_analysis}", "cyan")
+            print_color(f"Generated {len(generated_candidates)} new candidates", "green")
+
+        # Convert generated candidates to buffer entries
+        for i, candidate_data in enumerate(generated_candidates):
+            try:
+                parameters_raw = candidate_data.get("parameters", {})
+                reasoning = candidate_data.get("reasoning", "No reasoning provided")
+                diversity_focus = candidate_data.get("diversity_focus", "No diversity focus provided")
+
+                # Convert parameters to the correct format
+                candidate_params_dict = self.construct_update_dict(parameters_raw)
+
+                # Create new buffer entry
+                new_candidate_entry = {
+                    "params": candidate_params_dict,
+                    "score_sum": 0.0,
+                    "eval_count": 0,
+                    "mean_score": None,
+                    "ucb_score": None,
+                    "lcb_score": None
+                }
+
+                temporary_buffer.append(new_candidate_entry)
+
+                if verbose:
+                    print_color(f"Generated candidate {i+1}:", "blue")
+                    print_color(f"  Reasoning: {reasoning}", "blue")
+                    print_color(f"  Diversity Focus: {diversity_focus}", "blue")
+
+            except Exception as e:
+                if verbose:
+                    print_color(f"Error processing generated candidate {i+1}: {e}", "yellow")
+                continue
+
+        if verbose:
+            print_color(f"Temporary buffer size: {len(temporary_buffer)} (original: {len(buffer)}, added: {len(temporary_buffer) - len(buffer)})", "green")
+
+        return temporary_buffer
+        
+    def llm_generate_candidate(self, buffer, verbose: bool = False): 
+        # Add new candidates to the buffer
+        # Every time we call this function, it will delete candidates without scores first
+        self.buffer = self.llm_generator(buffer, verbose, num_to_generate=3)
+
+        # Use the LLM regression model to select the best candidate from the buffer
+        return self.llm_regressor(self.buffer, verbose)
+
     

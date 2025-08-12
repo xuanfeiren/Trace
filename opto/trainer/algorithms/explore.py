@@ -760,9 +760,9 @@ class ExploreAlgorithm_LLMFA(ExploreAlgorithm):
         self.selection_count = 0
     
     def select_candidate(self, buffer):
-        self.selection_count += 1
         selected_entry = self.llm_generate_candidate(buffer, verbose=False)
-        
+        self.selection_count += 1
+
         return selected_entry
         
     def llm_generate_candidate(self, buffer, verbose: bool = False): 
