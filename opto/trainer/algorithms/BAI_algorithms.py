@@ -463,12 +463,14 @@ class LLMRegressionModel(LLMModel):
     def __init__(self, agent, num_threads, logger, update_dicts, enable_estimate_scores=False, *args, **kwargs):
         super().__init__(agent, num_threads, logger, update_dicts, *args, **kwargs)
         self.enable_estimate_scores = enable_estimate_scores
-
+        self.num_tools = None
+        
     def llm_generate_candidate(self, buffer, verbose: bool = False):
         "Main function used by the BAI algorithm."
         return self.llm_regressor(buffer, verbose)
         
     def llm_regressor(self, buffer, verbose: bool = False):
+        ##TODO: ask LLM to do extrapolate for candidates without statistics
         """
         The LLM will be given the buffer statistics and the candidate parameters. In this model, LLM serves as a function approximator/regressor, which means it will take the buffer statistics and the candidate parameters as input, and acts as an estimated score/reward model.
 
@@ -676,7 +678,8 @@ Return ONLY the JSON object with your analysis and selection.
         
 class LLMGenerator(LLMRegressionModel):
     "Ask LLM to come up with more candidates."
-    def llm_generator(self, buffer, verbose: bool = False, num_to_generate: int = 3):
+        
+    def llm_generator(self, buffer, verbose: bool = False, num_to_generate: int = 1):
         """
         Ask LLM to come up with more candidates. Based on the current buffer with statistics.
 
@@ -747,6 +750,16 @@ Return ONLY a JSON object with these fields:
   - "diversity_focus": string describing what makes this candidate unique/different
   - "parameters": object with parameter values (matching the schema)
 
+**CRITICAL REQUIREMENT FOR tools_info**: The tools_info parameter MUST contain descriptions for ALL tools available in the system. You cannot provide partial tool sets or omit any tools. Every tool that exists in the current candidates must be included in your new proposals with updated descriptions. The tools_info should be a complete replacement, not a partial update.
+
+**IMPORTANT CONSTRAINTS**:
+- **ONLY modify tool descriptions**: You can only change the "description" field of existing tools
+- **CANNOT add new tools**: Do not create tools that don't exist in the current system
+- **CANNOT remove tools**: Every existing tool must be present in your proposals
+- **CANNOT change tool names**: Tool names (function.name) must remain exactly the same
+- **CANNOT change tool parameters**: The parameters schema for each tool must remain unchanged
+- **ONLY change descriptions**: Focus on improving how tools are described to the agent
+
 ## Example Output Format
 {{
   "buffer_analysis": "Current buffer shows candidates focusing heavily on authentication (scores 0.6-0.8) but lacking in error recovery and user guidance. Most candidates have verbose tool descriptions but inconsistent instruction styles. Gap: no candidates emphasize proactive user assistance or streamlined workflows.",
@@ -755,24 +768,24 @@ Return ONLY a JSON object with these fields:
       "reasoning": "Current candidates are verbose and reactive. This candidate focuses on efficiency and proactive assistance, which could reduce interaction time and improve user satisfaction. Addresses the gap in workflow optimization.",
       "diversity_focus": "Efficiency-first approach with proactive user guidance, contrasting with existing reactive verbose style",
       "parameters": {{
-        "tools_info": "Concise, action-focused tool descriptions emphasizing speed and efficiency...",
-        "additional_instructions": "Prioritize quick resolution and minimal back-and-forth. Always suggest next steps proactively..."
+        "list0": "Concise, action-focused tool descriptions emphasizing speed and efficiency...",
+        "str0": "Prioritize quick resolution and minimal back-and-forth. Always suggest next steps proactively..."
       }}
     }},
     {{
       "reasoning": "Existing candidates lack robust error handling. This candidate specializes in error recovery and provides multiple fallback options, potentially improving success rates in complex scenarios.",
       "diversity_focus": "Error-resilience specialist with comprehensive fallback strategies, unique focus on failure recovery",
       "parameters": {{
-        "tools_info": "Detailed tool descriptions with extensive error handling examples and fallback procedures...",
-        "additional_instructions": "Comprehensive error recovery protocols. When any tool fails, immediately provide alternatives..."
+        "list0": "Detailed tool descriptions with extensive error handling examples and fallback procedures...",
+        "str0": "Comprehensive error recovery protocols. When any tool fails, immediately provide alternatives..."
       }}
     }},
     {{
       "reasoning": "Current candidates assume user expertise. This candidate prioritizes user education and confirmation, potentially improving user satisfaction and reducing misunderstandings in complex transactions.",
       "diversity_focus": "Educational approach with emphasis on user understanding and confirmation, contrasts with assumption-heavy existing candidates",
       "parameters": {{
-        "tools_info": "User-friendly tool descriptions with natural language explanations and examples...",
-        "additional_instructions": "Explain every action in simple terms. Always confirm understanding before proceeding..."
+        "list0": "User-friendly tool descriptions with natural language explanations and examples...",
+        "str0": "Explain every action in simple terms. Always confirm understanding before proceeding..."
       }}
     }}
   ]
@@ -809,7 +822,9 @@ Return ONLY the JSON object with your analysis and generated candidates.
             base_delay=1.0,
             operation_name="LLM candidate generation"
         )
-
+        #print the number of tokens in response
+        # print(f"Number of tokens in output: {llm_response}")
+        
         if llm_response is None:
             if verbose:
                 print_color("LLM candidate generation failed after retries. Returning original buffer.", "yellow")
@@ -835,6 +850,7 @@ Return ONLY the JSON object with your analysis and generated candidates.
             return temporary_buffer
 
         if not isinstance(llm_output, dict):
+
             return temporary_buffer
 
         # Extract and process generated candidates
@@ -851,7 +867,27 @@ Return ONLY the JSON object with your analysis and generated candidates.
                 parameters_raw = candidate_data.get("parameters", {})
                 reasoning = candidate_data.get("reasoning", "No reasoning provided")
                 diversity_focus = candidate_data.get("diversity_focus", "No diversity focus provided")
-
+                # Validate tools_info
+                tools_info_data = None
+                # Find any list parameter in parameters_raw
+                for key, value in parameters_raw.items():
+                    if isinstance(value, list):
+                        tools_info_data = value
+                        break
+                
+                if self.num_tools is None:
+                    params_dict = buffer[0]['params']
+                    for param_node, param_value in params_dict.items():
+                        if isinstance(param_value, list):
+                            self.num_tools = len(param_value)
+                            break
+                    
+                # check whether tools_info contains the same number of tools as the first candidate in the buffer
+                if tools_info_data:
+                    if len(tools_info_data) != self.num_tools:
+                        if verbose:
+                            print_color(f"Skipping candidate {i+1}: tools_info contains {len(tools_info_data)} tools, expected {self.num_tools}", "yellow")
+                        continue
                 # Convert parameters to the correct format
                 candidate_params_dict = self.construct_update_dict(parameters_raw)
 
@@ -885,7 +921,7 @@ Return ONLY the JSON object with your analysis and generated candidates.
     def llm_generate_candidate(self, buffer, verbose: bool = False): 
         # Add new candidates to the buffer
         # Every time we call this function, it will delete candidates without scores first
-        self.buffer = self.llm_generator(buffer, verbose, num_to_generate=3)
+        self.buffer = self.llm_generator(buffer, verbose, num_to_generate=1)
 
         # Use the LLM regression model to select the best candidate from the buffer
         return self.llm_regressor(self.buffer, verbose)
