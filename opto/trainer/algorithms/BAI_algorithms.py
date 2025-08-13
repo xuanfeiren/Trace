@@ -50,6 +50,9 @@ class BAIAlgorithmBase(AlgorithmBase):
         self.update_buffer_scores()
         for i,candidate_entry in enumerate(self.buffer):
             print_color(f"Candidate {i}. Mean score {candidate_entry['mean_score']}, eval_count {candidate_entry['eval_count']}", "blue")
+            # for k, v in candidate_entry['params'].items():
+            #     # breakpoint()
+            #     print_color(f"{k.py_name}", "blue")
         return 
     
     def update_buffer_scores(self):
@@ -114,6 +117,7 @@ class UCBAlgorithm(BAIAlgorithmBase):
     def __init__(self,agent,num_threads, logger,update_dicts, *args, **kwargs):
         super().__init__(agent,num_threads, logger,update_dicts, *args, **kwargs)
         self.ucb_exploration_factor = 0.3 # Set the exploration factor for UCB
+        self.horizon = None
     def _calculate_ucb(self, candidate_buffer_entry: Dict, total_tracked_evaluations: int) -> float:
         """Calculates UCB score for a candidate in the buffer."""
         if candidate_buffer_entry['eval_count'] == 0:
@@ -134,7 +138,8 @@ class UCBAlgorithm(BAIAlgorithmBase):
     
     def step(self, guide, validate_dataset, num_threads, **kwargs):
         """To make the number of evauation the same for different BAI algorithms, we set ucb horiso to be number of candidates"""
-        self.horizon = len(self.buffer)
+        if self.horizon is None:
+            self.horizon = len(self.buffer)
         for iteration in range(self.horizon):
             print_color(f"Iteration {iteration+1}/{self.horizon}: ", 'blue')
             self.update_buffer_scores()
@@ -470,7 +475,6 @@ class LLMRegressionModel(LLMModel):
         return self.llm_regressor(buffer, verbose)
         
     def llm_regressor(self, buffer, verbose: bool = False):
-        ##TODO: ask LLM to do extrapolate for candidates without statistics
         """
         The LLM will be given the buffer statistics and the candidate parameters. In this model, LLM serves as a function approximator/regressor, which means it will take the buffer statistics and the candidate parameters as input, and acts as an estimated score/reward model.
 
@@ -506,15 +510,15 @@ class LLMRegressionModel(LLMModel):
         # Create conditional example output format
         if self.enable_estimate_scores:
             example_format = '''{{
-  "buffer_analysis": "Buffer Statistics: 5 candidates total. Observed scores: [0.75, 0.65, 0.85, 0.45, 0.88], eval_counts: [25, 30, 3, 2, 4]. Confidence Analysis: UCB scores [0.78, 0.68, 1.02, 0.72, 0.98], LCB scores [0.72, 0.62, 0.68, 0.18, 0.78], confidence widths [0.06, 0.06, 0.34, 0.54, 0.20]. Narrow intervals for candidates 0,1 (reliable), wide intervals for candidates 2,3,4 (high uncertainty). Reliability: candidates 0,1 are reliable (high eval_count, narrow confidence intervals), candidates 2,3,4 are unreliable (low eval_count, wide confidence intervals). Parameter Patterns: Candidates with longer and more detailed additional_instructions (>800 chars) tend to score higher. Candidates 0,2 have detailed tool descriptions with specific examples, while candidates 1,3,4 have generic descriptions. Authentication-focused instructions appear in higher-scoring candidates. Content analysis shows candidates 0,2 emphasize user verification and error handling, while candidates 1,3,4 lack specific guidance.",
+  "buffer_analysis": "Parameter-Performance Learning: Analyzed 5 candidates (3 evaluated, 2 unevaluated). Pattern Analysis: Candidates with detailed authentication instructions (>500 chars) score 0.15 higher on average. Tool descriptions with specific examples correlate with +0.12 score boost. Error handling emphasis adds +0.08. Statistical Reliability: Candidates 0,1 have reliable data (eval_count 25,30), candidate 2 has moderate data (eval_count 8), candidates 3,4 have no evaluation data. Learned Patterns: Authentication focus + detailed examples + error handling = high performance formula.",
   "score_estimates": {{
-    "0": {{"estimated_score": 0.74, "reasoning": "Observed 0.75 with eval_count=25 (reliable). Confidence interval: [0.72, 0.78], width=0.06 (narrow, high certainty). Parameter analysis: has detailed tool descriptions (1200+ chars) and comprehensive additional_instructions covering authentication, confirmation workflows. Content includes specific error handling guidance. Narrow confidence interval confirms reliability. True score likely within UCB/LCB range, estimating near observed value with slight adjustment based on parameter quality."}},
-    "1": {{"estimated_score": 0.66, "reasoning": "Observed 0.65 with eval_count=30 (highly reliable). Confidence interval: [0.62, 0.68], width=0.06 (narrow, high certainty). Parameter analysis: has moderate tool descriptions (800 chars) but lacks specific examples. Additional_instructions are generic without authentication emphasis. Very narrow confidence interval confirms high reliability. True score likely close to observed, slight upward adjustment within confidence bounds."}},
-    "2": {{"estimated_score": 0.82, "reasoning": "Observed 0.85 with eval_count=3 (unreliable). Confidence interval: [0.68, 1.02], width=0.34 (very wide, high uncertainty). Parameter analysis: excellent parameter quality - detailed tool descriptions (1400+ chars) with specific examples, comprehensive additional_instructions emphasizing authentication and user verification. Wide confidence interval indicates high uncertainty, but parameter patterns suggest strong potential. Estimate toward upper-middle of confidence range due to excellent parameter quality."}},
-    "3": {{"estimated_score": 0.48, "reasoning": "Observed 0.45 with eval_count=2 (unreliable). Confidence interval: [0.18, 0.72], width=0.54 (extremely wide, very high uncertainty). Parameter analysis: minimal tool descriptions (400 chars), generic additional_instructions without authentication focus. Extremely wide confidence interval shows very high uncertainty. Parameter quality is poor compared to successful candidates. Estimate in lower portion of confidence range due to weak parameter patterns."}},
-    "4": {{"estimated_score": 0.80, "reasoning": "Observed 0.88 with eval_count=4 (unreliable). Confidence interval: [0.78, 0.98], width=0.20 (wide, high uncertainty). Parameter analysis: very poor parameter quality - extremely brief tool descriptions (300 chars) with no examples, minimal additional_instructions (200 chars) lacking authentication guidance, error handling, or specific workflows. Despite poor parameters, confidence interval suggests score could genuinely be high. Estimate in middle-lower range of confidence bounds, acknowledging uncertainty while noting parameter-performance disconnect may indicate this candidate got lucky or has hidden strengths not captured in parameter analysis."}}
+    "0": {{"predicted_score": 0.74, "reasoning": "Evaluated candidate with mean_score=0.75, eval_count=25 (reliable). Parameter analysis: comprehensive authentication instructions (650 chars), detailed tool examples, strong error handling. Matches high-performance pattern perfectly. Prediction close to observed due to reliability and excellent parameter quality."}},
+    "1": {{"predicted_score": 0.68, "reasoning": "Evaluated candidate with mean_score=0.65, eval_count=30 (very reliable). Parameter analysis: moderate instructions (400 chars), basic tool descriptions, minimal error handling. Missing key high-performance patterns. Reliable statistics support this mid-range performance level."}},
+    "2": {{"predicted_score": 0.79, "reasoning": "Evaluated candidate with mean_score=0.82, eval_count=8 (moderate reliability). Parameter analysis: excellent authentication focus (700+ chars), comprehensive examples, strong error handling protocols. Parameters match high-performance pattern strongly. Slight downward adjustment for moderate eval_count but parameters suggest genuine high performance."}},
+    "3": {{"predicted_score": 0.71, "reasoning": "UNEVALUATED candidate (eval_count=0). Parameter analysis: good authentication instructions (580 chars), decent examples, some error handling. Similar to candidate 0 but slightly less comprehensive. Predicted score based on similarity to candidate 0 (0.74) with small penalty for less detailed examples. Confident prediction due to clear pattern match."}},
+    "4": {{"predicted_score": 0.63, "reasoning": "UNEVALUATED candidate (eval_count=0). Parameter analysis: basic instructions (350 chars), minimal examples, no error handling focus. Similar parameter profile to candidate 1 (scored 0.68) but even less detailed. Predicted slightly lower than candidate 1 due to weaker parameter quality. Pattern suggests below-average performance."}}
   }},
-  "selection_reasoning": "Analysis of estimated true scores: candidate 2 (0.82) > candidate 4 (0.80) > candidate 0 (0.74) > candidate 1 (0.66) > candidate 3 (0.48). Confidence interval analysis: candidate 2 has wide uncertainty [0.68, 1.02] but excellent parameters, candidate 4 has moderate uncertainty [0.78, 0.98] but poor parameters, candidates 0,1 have narrow intervals indicating reliability. Decision factors: (1) Expected performance: candidate 2 has highest estimated true score (0.82) with excellent parameter patterns suggesting genuine high potential, (2) Information value: candidate 2 has very wide confidence interval (0.34 width) indicating high uncertainty - substantial information gain from additional evaluation, (3) Risk assessment: candidate 2's UCB (1.02) shows high upside potential while LCB (0.68) shows acceptable downside, parameter quality supports optimistic estimate, (4) Budget efficiency analysis: With {remaining_budget} evaluations remaining (ample budget), can afford to resolve high-uncertainty, high-potential candidate. If budget were low (<10 remaining), would choose candidate 0 (narrow confidence interval, reliable). Rejected candidate 4 despite high confidence bounds [0.78, 0.98] because parameter analysis suggests disconnect between observed performance and parameter quality - likely got lucky rather than having genuine strength. Candidate 2's combination of wide confidence interval (high information value) and excellent parameters (high expected performance) makes it optimal choice for verification investment.",
+  "selection_reasoning": "Predicted performance ranking: candidate 2 (0.79) > candidate 0 (0.74) > candidate 3 (0.71) > candidate 1 (0.68) > candidate 4 (0.63). Selection: candidate 2. Rationale: (1) Highest predicted score based on excellent parameter-performance match, (2) Moderate evaluation data (eval_count=8) provides some confidence but needs verification, (3) Strong parameter quality suggests genuine high performance rather than noise, (4) High information value - confirming this candidate would validate our parameter-performance learning model.",
   "selected_index": 2
 }}'''
         else:
@@ -529,62 +533,70 @@ class LLMRegressionModel(LLMModel):
                 "role": "system",
                 "content": f"""
 ## Role
-You are a function approximator/regressor for predicting performance scores of retail customer service agent configurations. You analyze noisy performance data to estimate true underlying scores and select the most promising candidate.
+You are a score prediction model for retail customer service agent configurations. Your primary task is to learn parameter-performance relationships from the buffer statistics and predict scores for all candidates, including those without evaluation data.
 
-## Understanding Noise in Scores
-**CRITICAL**: The observed mean_scores contain noise that decreases as eval_count increases:
-- **Low eval_count**: High noise, scores may be very misleading 
-- **Medium eval_count**: Moderate noise, scores somewhat reliable 
-- **High eval_count**: Low noise, scores quite reliable
+## Core Capabilities
+1. **Pattern Learning**: Identify which parameter characteristics correlate with high/low performance
+2. **Score Prediction**: Predict scores for candidates based on their parameters
+3. **Statistical Analysis**: Account for noise and confidence intervals in existing data
+4. **Extrapolation**: Predict scores for new candidates by comparing their parameters to evaluated ones
 
-## Confidence Intervals (UCB/LCB)
-Each candidate has confidence bounds that help assess uncertainty:
-- **ucb_score**: Upper Confidence Bound - optimistic estimate of true performance
-- **lcb_score**: Lower Confidence Bound - pessimistic estimate of true performance  
-- **Confidence Width**: (ucb_score - lcb_score) indicates uncertainty level
-- **Wide intervals**: High uncertainty, need more data
-- **Narrow intervals**: Low uncertainty, reliable estimates 
+## Input Data Analysis
+You receive candidates with:
+- **Parameters**: Configuration settings (tools descriptions, instructions)
+- **Statistics**: Some candidates have mean_score, eval_count, UCB/LCB bounds
+- **Missing Data**: Some candidates have no evaluation statistics (eval_count=0, mean_score=None)
 
-## Required Reasoning Process
-You MUST follow this structured analysis:
+## Learning Objectives
+**Learn from evaluated candidates**:
+- Which parameter patterns lead to higher scores?
+- What content/style/structure works best?
+- How do parameter characteristics correlate with performance?
 
-### Step 1: Buffer Analysis
-Analyze the current buffer systematically:
-- **Parameter Patterns**: Identify common patterns in parameters (length, content, structure)
-- **Score Distribution**: Look at the range and distribution of observed scores
-- **Confidence Analysis**: Examine UCB/LCB bounds and confidence widths for each candidate
-- **Evaluation Reliability**: Assess which candidates have reliable vs unreliable statistics
-- **Correlations**: Find relationships between parameter characteristics and performance
+**Apply to unevaluated candidates**:
+- Compare their parameters to successful evaluated candidates
+- Predict likely performance based on parameter similarity
+- Estimate scores even without evaluation data
 
-### Step 2: Real Score Estimation  
-For each candidate, estimate the true underlying score:
-- **Account for Noise**: Adjust observed scores based on eval_count reliability
-- **Use Confidence Bounds**: Consider UCB/LCB range to assess uncertainty and likely true score
-- **Parameter-based Prediction**: Use parameter patterns to predict likely performance
-- **Uncertainty Assessment**: Use confidence interval width to gauge reliability
-- **Reasoning**: Explain why you think the true score differs from observed score
+## Required Analysis Process
+
+### Step 1: Parameter-Performance Pattern Learning
+Analyze evaluated candidates to identify:
+- **High-performing patterns**: What makes successful candidates work?
+- **Low-performing patterns**: What characteristics lead to poor performance?
+- **Content analysis**: Specific words, phrases, structures that correlate with scores
+- **Length patterns**: How parameter length affects performance
+- **Style patterns**: Detailed vs concise, formal vs conversational, etc.
+
+### Step 2: Score Prediction for All Candidates
+For each candidate (both evaluated and unevaluated):
+- **Evaluated candidates**: Use statistics + parameter analysis to refine score estimates
+- **Unevaluated candidates**: Predict scores based on parameter similarity to evaluated ones
+- **Confidence assessment**: How confident are you in each prediction?
+- **Reasoning**: Explain your prediction based on learned patterns
 
 ### Step 3: Candidate Selection
-Choose the best candidate considering:
-- **Expected Performance**: Which candidate likely has the highest true score?
-- **Information Value**: Which candidate would provide most valuable information?
-- **Risk Assessment**: Balance potential reward vs risk of the selection
-- **Budget Efficiency**: Make the best use of remaining evaluation budget
+Choose the candidate most likely to have the highest true performance:
+- **Predicted performance**: Which candidate has the highest predicted score?
+- **Confidence level**: How reliable is your prediction?
+- **Information value**: Which candidate would provide most learning value?
 
-## Budget Information
-- Total evaluation budget: {total_budget}
-- Budget used so far: {used_budget}  
-- Remaining budget: {remaining_budget}
-- Selection number: {self.selection_count}/{total_budget}
+## Prediction Strategy for Unevaluated Candidates
+When predicting scores for candidates with no statistics:
+1. **Find similar evaluated candidates**: Which evaluated candidates have similar parameters?
+2. **Identify key differences**: How do the parameters differ from similar evaluated ones?
+3. **Apply learned patterns**: Based on your pattern analysis, would these differences improve or hurt performance?
+4. **Predict score**: Estimate a score based on similarity and pattern analysis
+5. **Justify prediction**: Explain your reasoning clearly
 
-## Output Requirements
+{'## Output Requirements (With Score Estimation)' if self.enable_estimate_scores else '## Output Requirements (Selection Only)'}
 Return ONLY a JSON object with these fields:
-- "buffer_analysis": string analyzing patterns, correlations, and reliability in the current buffer
-{'- "score_estimates": object mapping candidate indices to your estimated true scores with reasoning' if self.enable_estimate_scores else ''}
-- "selection_reasoning": string explaining why you chose this specific candidate
+- "buffer_analysis": string analyzing parameter-performance patterns and statistical reliability. Candidates with eval_count > {2*len(self.validate_dataset['inputs'])} are considered well-evaluated with reliable statistics.
+{'- "score_estimates": object mapping candidate indices to predicted scores with detailed reasoning' if self.enable_estimate_scores else ''}
+- "selection_reasoning": string explaining your candidate choice based on predicted performance
 - "selected_index": integer index of the candidate you select for next evaluation
 
-## Example Output Format (all specific numbers are just examples, you should analyze the buffer and the candidate parameters to make the best choice)
+## Example Output Format
 {example_format}
 """,
             },
@@ -694,10 +706,11 @@ class LLMGenerator(LLMRegressionModel):
         # Delete candidates without scores
         buffer = [c for c in buffer if c['eval_count'] > 0]
         
-        temporary_buffer = copy.deepcopy(buffer)
+        temporary_buffer = buffer
         
         # Prepare serializable candidate summaries with parameters and statistics
         serializable_candidate_summaries = []
+        self.update_buffer_scores()
         for idx, cand_entry in enumerate(buffer):
             summary = {
                 "index": idx,
@@ -921,7 +934,7 @@ Return ONLY the JSON object with your analysis and generated candidates.
     def llm_generate_candidate(self, buffer, verbose: bool = False): 
         # Add new candidates to the buffer
         # Every time we call this function, it will delete candidates without scores first
-        self.buffer = self.llm_generator(buffer, verbose, num_to_generate=1)
+        self.buffer = self.llm_generator(buffer, verbose = False, num_to_generate=1)
 
         # Use the LLM regression model to select the best candidate from the buffer
         return self.llm_regressor(self.buffer, verbose)
