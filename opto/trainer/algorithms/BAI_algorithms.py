@@ -91,6 +91,7 @@ class BAIAlgorithmBase(AlgorithmBase):
                 set_parameters_for_agent(self.agent, best_candidate_at_this_epoch['params'])
                 test_score = evaluate_agent(self.agent, guide, test_dataset, num_threads=num_threads, num_eval_times=5)
                 self.logger.log("Test score", test_score,epoch+1,color='green')
+                self.logger.log("Vaidate score", best_candidate_at_this_epoch['mean_score'],epoch+1,color='green')
         
     def step(self, guide, validate_dataset, num_threads, **kwargs):
         """The best candidate identification step. At each epoch, we will do some evaluation using sample budget, update the buffer statistics, and output the best candidate for test. The output should be the entry of the best candidate in the buffer and the used sample budget."""
@@ -148,7 +149,10 @@ class UCBAlgorithm(BAIAlgorithmBase):
             score = evaluate_agent(self.agent, guide, validate_dataset, num_threads=num_threads, num_eval_times=1)
             selected_candidate['score_sum'] += score*len(validate_dataset['inputs'])
             selected_candidate['eval_count'] += len(validate_dataset['inputs'])
-        return selected_candidate, len(self.buffer)*len(validate_dataset['inputs'])
+        # Select the best candidate according to the buffer statistics.
+        self.update_buffer_scores()
+        candidate_to_test = max(self.buffer, key=lambda x: x['mean_score'])
+        return candidate_to_test, len(self.buffer)*len(validate_dataset['inputs'])
     
     def select_candidate(self, buffer):
         """Select the candidate with the highest UCB score."""
@@ -193,7 +197,7 @@ class LLMModel(UCBAlgorithm):
         for idx, cand_entry in enumerate(buffer):
             summary = {
                 "index": idx,
-                "parameters":  {p.py_name: copy.deepcopy(p.data) for p in cand_entry['params']},
+                "parameters":  {k.py_name: v for k,v in cand_entry['params'].items()},
                 "eval_count": cand_entry['eval_count'],
                 "mean_score": cand_entry['mean_score']
             }
@@ -219,21 +223,24 @@ You have {remaining_budget} evaluation choices remaining out of {total_budget} t
                 "role": "system",
                 "content": f"""
 ## Role
-You are assisting with best-arm identification for optimizing a retail customer service agent in the tau-bench framework. You will see candidate arms (agent configurations) and their performance statistics. Your task is to choose either **selecting an existing arm** or **proposing a new arm** to be evaluated on the validation dataset next.
+You are assisting with best-arm identification for optimizing tau-bench agents. You will see candidate arms (agent configurations) and their performance statistics. Your task is to choose either **selecting an existing arm** or **proposing a new arm** to be evaluated on the validation dataset next.
 
 ## Problem Context
-You are optimizing a retail customer service agent by modifying two key parameters:
-1. **tools_info**: Descriptions of tools the agent can use (e.g., cancel_pending_order, get_user_details, modify_pending_order_items). Better descriptions help the agent use tools correctly and avoid errors.
-2. **additional_instructions**: Strategic guidance and best practices for retail customer service (e.g., authentication procedures, confirmation workflows, error handling).
+You are optimizing tool-calling agents for tau-bench environments (airline and retail). These agents help users complete complex multi-step tasks like flight bookings, order management, returns, and exchanges. Agent performance is measured by task success rate in realistic user interaction scenarios.
 
-The agent handles tasks like order cancellations, modifications, returns, exchanges, and user inquiries. Performance is measured by task success rate on retail scenarios.
+## Key Optimization Areas
+- **Tool Usage**: Agents must select appropriate tools and use them with correct parameters
+- **User Communication**: Clear, helpful interactions that confirm actions and handle edge cases
+- **Domain Compliance**: Following business rules (authentication, verification, policy adherence)
+- **Error Recovery**: Graceful handling of failures with alternative solutions
+- **Task Completion**: Successfully finishing user requests without unintended actions
 
-## Key Retail Domain Guidelines
-- Users must be authenticated via email or name+zip before any actions
-- Pending orders can be cancelled/modified; delivered orders can be returned/exchanged  
-- Consequential actions require explicit user confirmation
-- Payment methods include gift cards, PayPal, and credit cards
-- Each product has multiple item variants (color, size, etc.)
+## Agent Parameters
+Agents have configurable parameters like:
+- **tools_info**: Descriptions that help agents understand when and how to use each tool
+- **additional_instructions**: Strategic guidance for handling different scenarios and edge cases
+
+Better parameter configurations lead to higher task success rates across diverse user scenarios.
 
 {budget_guidance}
 
@@ -316,9 +323,9 @@ Here are two examples of choices you can make. Note that the specific numbers an
 
 **To propose a new arm:**
 {{
-  "reasoning": "Step 1: Buffer has 3 arms with scores 0.3, 0.35, 0.32, all with eval_count > 50 - reliable but poor performance. Step 2: With 20 budget remaining (ample), choose new arm because all current arms have sufficient evaluation but consistently poor results - worth exploring new approaches. Step 3B: Current arms seem to fail at user authentication - tool descriptions are vague about verification steps, and instructions don't emphasize the authentication requirement from the wiki. Proposing new arm with: clearer tool descriptions specifying authentication requirements, and explicit instructions about user verification being mandatory before any actions. Step 4: This is good use of evaluation budget since current arms are clearly insufficient and new approach targets identified weakness.",
+  "reasoning": "Step 1: Buffer has 3 arms with scores 0.3, 0.35, 0.32, all with eval_count > 50 - reliable but poor performance. Step 2: With 20 budget remaining (ample), choose new arm because all current arms have sufficient evaluation but consistently poor results - worth exploring new approaches. Step 3B: Current arms seem to fail at key requirements - parameter descriptions are vague about important steps, and instructions don't emphasize critical requirements. Proposing new arm with: clearer parameter descriptions specifying key requirements, and explicit instructions about important procedures. Step 4: This is good use of evaluation budget since current arms are clearly insufficient and new approach targets identified weakness.",
   "existing_arm_index": -1,
-  "new_update_dict": {{ "tools_info": "[detailed tool descriptions with explicit authentication requirements and verification steps]", "additional_instructions": "CRITICAL: Always authenticate users via email or name+zip before any actions. This is mandatory per retail policy." }}
+  "new_update_dict": {{ "param1": "[detailed parameter descriptions with explicit requirements and verification steps]", "param2": "CRITICAL: Always follow key procedures and requirements. This is mandatory per domain policy." }}
 }}
 """,
             },
@@ -465,10 +472,40 @@ If proposing a new arm, set existing_arm_index to -1 and fill new_update_dict wi
     
 class LLMRegressionModel(LLMModel):
     """LLM regression model. Could estimate the score of candidates in the buffer or not. Output a choice from the current buffer"""
-    def __init__(self, agent, num_threads, logger, update_dicts, enable_estimate_scores=False, *args, **kwargs):
+    def __init__(self, agent, num_threads, logger, update_dicts, enable_estimate_scores=False, domain_context=None, *args, **kwargs):
         super().__init__(agent, num_threads, logger, update_dicts, *args, **kwargs)
         self.enable_estimate_scores = enable_estimate_scores
         self.num_tools = None
+        
+        # Set domain context - can be overridden for specific applications
+        if domain_context is None:
+            self.domain_context = """## Problem Context and Domain Knowledge
+You are a score prediction model for tau-bench agent configurations. You are optimizing agents for tool-agent-user interaction in real-world domains (airline and retail environments).
+
+**Core Optimization Task:**
+- **Agent Type**: Tool-calling agents that help users complete complex multi-step tasks
+- **Parameters**: Agents have configurable parameters like tools_info (tool descriptions) and additional_instructions (strategic guidance)
+- **Performance Metric**: Success rate on completing user tasks correctly within the domain constraints
+- **Environments**: Airline (flight bookings, cancellations, changes) and Retail (orders, returns, exchanges)
+
+**Key Success Factors:**
+- **Tool Usage**: Agents must use the right tools at the right time with correct parameters
+- **User Interaction**: Effective communication and confirmation of actions with users
+- **Domain Constraints**: Following business rules (authentication requirements, policy compliance)
+- **Error Handling**: Graceful recovery from failures and providing alternative solutions
+- **Workflow Efficiency**: Completing tasks with minimal back-and-forth while being thorough
+
+**Common Failure Modes:**
+- Using wrong tools or incorrect tool parameters
+- Missing critical authentication or verification steps
+- Poor user communication leading to misunderstandings
+- Incomplete task completion or taking unintended actions
+- Not following domain-specific business rules and constraints
+
+**Optimization Strategy:**
+Better parameter configurations lead to higher task success rates. The goal is to find parameter settings that maximize agent performance across diverse scenarios in the target domain."""
+        else:
+            self.domain_context = domain_context
         
     def llm_generate_candidate(self, buffer, verbose: bool = False):
         "Main function used by the BAI algorithm."
@@ -496,7 +533,7 @@ class LLMRegressionModel(LLMModel):
         for idx, cand_entry in enumerate(buffer):
             summary = {
                 "index": idx,
-                "parameters": {p.py_name: copy.deepcopy(p.data) for p in cand_entry['params']},
+                "parameters": {k.py_name: v for k,v in cand_entry['params'].items()},
                 "eval_count": cand_entry['eval_count'],
                 "mean_score": cand_entry['mean_score'],
                 "ucb_score": cand_entry.get('ucb_score', None),
@@ -510,21 +547,21 @@ class LLMRegressionModel(LLMModel):
         # Create conditional example output format
         if self.enable_estimate_scores:
             example_format = '''{{
-  "buffer_analysis": "Parameter-Performance Learning: Analyzed 5 candidates (3 evaluated, 2 unevaluated). Pattern Analysis: Candidates with detailed authentication instructions (>500 chars) score 0.15 higher on average. Tool descriptions with specific examples correlate with +0.12 score boost. Error handling emphasis adds +0.08. Statistical Reliability: Candidates 0,1 have reliable data (eval_count 25,30), candidate 2 has moderate data (eval_count 8), candidates 3,4 have no evaluation data. Learned Patterns: Authentication focus + detailed examples + error handling = high performance formula.",
+  "buffer_analysis": "Parameter-Performance Learning: Analyzed 5 candidates with varying evaluation data. Pattern Analysis: Candidates with detailed parameter content (>500 chars) show higher performance trends. Parameter descriptions with specific examples correlate with better outcomes (+0.12 average boost). Comprehensive structure emphasis adds performance value (+0.08). Statistical Patterns: Higher eval_count candidates show more reliable score patterns, but parameter quality remains primary predictor across all candidates.",
   "score_estimates": {{
-    "0": {{"predicted_score": 0.74, "reasoning": "Evaluated candidate with mean_score=0.75, eval_count=25 (reliable). Parameter analysis: comprehensive authentication instructions (650 chars), detailed tool examples, strong error handling. Matches high-performance pattern perfectly. Prediction close to observed due to reliability and excellent parameter quality."}},
-    "1": {{"predicted_score": 0.68, "reasoning": "Evaluated candidate with mean_score=0.65, eval_count=30 (very reliable). Parameter analysis: moderate instructions (400 chars), basic tool descriptions, minimal error handling. Missing key high-performance patterns. Reliable statistics support this mid-range performance level."}},
-    "2": {{"predicted_score": 0.79, "reasoning": "Evaluated candidate with mean_score=0.82, eval_count=8 (moderate reliability). Parameter analysis: excellent authentication focus (700+ chars), comprehensive examples, strong error handling protocols. Parameters match high-performance pattern strongly. Slight downward adjustment for moderate eval_count but parameters suggest genuine high performance."}},
-    "3": {{"predicted_score": 0.71, "reasoning": "UNEVALUATED candidate (eval_count=0). Parameter analysis: good authentication instructions (580 chars), decent examples, some error handling. Similar to candidate 0 but slightly less comprehensive. Predicted score based on similarity to candidate 0 (0.74) with small penalty for less detailed examples. Confident prediction due to clear pattern match."}},
-    "4": {{"predicted_score": 0.63, "reasoning": "UNEVALUATED candidate (eval_count=0). Parameter analysis: basic instructions (350 chars), minimal examples, no error handling focus. Similar parameter profile to candidate 1 (scored 0.68) but even less detailed. Predicted slightly lower than candidate 1 due to weaker parameter quality. Pattern suggests below-average performance."}}
+    "0": {{"reasoning": "Parameter analysis: comprehensive parameter content (650 chars), detailed descriptions, strong structure. Current data shows mean_score=0.75 with eval_count=25. Parameter quality strongly matches high-performance patterns. Predicted score reflects excellent parameter characteristics with confidence from existing data.", "predicted_score": 0.74}},
+    "1": {{"reasoning": "Parameter analysis: moderate parameter content (400 chars), basic descriptions, minimal detail. Current data shows mean_score=0.65 with eval_count=30. Parameter patterns suggest mid-range performance, consistent with observed data. Missing key high-performance characteristics.", "predicted_score": 0.68}},
+    "2": {{"reasoning": "Parameter analysis: excellent parameter focus (700+ chars), comprehensive examples, strong structure. Current data shows mean_score=0.82 with eval_count=8. Parameter quality strongly indicates high performance potential. Prediction based on strong parameter-performance correlation patterns.", "predicted_score": 0.79}},
+    "3": {{"reasoning": "Parameter analysis: good parameter content (580 chars), decent examples, some structure. Limited evaluation data (eval_count=0) but parameter patterns similar to high-performing candidates. Predicted score based on parameter similarity analysis and learned performance patterns.", "predicted_score": 0.71}},
+    "4": {{"reasoning": "Parameter analysis: basic parameter content (350 chars), minimal examples, limited structure. No evaluation data yet (eval_count=0) but parameter patterns match lower-performing profiles. Predicted score reflects weaker parameter characteristics based on learned patterns.", "predicted_score": 0.63}}
   }},
-  "selection_reasoning": "Predicted performance ranking: candidate 2 (0.79) > candidate 0 (0.74) > candidate 3 (0.71) > candidate 1 (0.68) > candidate 4 (0.63). Selection: candidate 2. Rationale: (1) Highest predicted score based on excellent parameter-performance match, (2) Moderate evaluation data (eval_count=8) provides some confidence but needs verification, (3) Strong parameter quality suggests genuine high performance rather than noise, (4) High information value - confirming this candidate would validate our parameter-performance learning model.",
+  "selection_reasoning": "Predicted performance ranking based on parameter-performance patterns: candidate 2 (0.79) > candidate 0 (0.74) > candidate 3 (0.71) > candidate 1 (0.68) > candidate 4 (0.63). Selection: candidate 2. Rationale: (1) Highest predicted score based on strong parameter-performance correlation, (2) Excellent parameter quality indicators suggest genuine high performance, (3) Additional evaluation would confirm pattern-based prediction, (4) High information value for validating parameter-performance model.",
   "selected_index": 2
 }}'''
         else:
             example_format = '''{{
-  "buffer_analysis": "Buffer Statistics: 5 candidates total. Observed scores: [0.75, 0.65, 0.85, 0.45, 0.88], eval_counts: [25, 30, 3, 2, 4]. Confidence Analysis: UCB scores [0.78, 0.68, 1.02, 0.72, 0.98], LCB scores [0.72, 0.62, 0.68, 0.18, 0.78], confidence widths [0.06, 0.06, 0.34, 0.54, 0.20]. Narrow intervals for candidates 0,1 (reliable), wide intervals for candidates 2,3,4 (high uncertainty). Reliability: candidates 0,1 are reliable (high eval_count, narrow confidence intervals), candidates 2,3,4 are unreliable (low eval_count, wide confidence intervals). Parameter Patterns: Candidates with longer and more detailed additional_instructions (>800 chars) tend to score higher. Candidates 0,2 have detailed tool descriptions with specific examples, while candidates 1,3,4 have generic descriptions. Authentication-focused instructions appear in higher-scoring candidates. Content analysis shows candidates 0,2 emphasize user verification and error handling, while candidates 1,3,4 lack specific guidance.",
-  "selection_reasoning": "Confidence interval analysis: candidate 2 has wide uncertainty [0.68, 1.02] but excellent parameters, candidate 4 has moderate uncertainty [0.78, 0.98] but poor parameters, candidates 0,1 have narrow intervals indicating reliability. Decision factors: (1) Parameter quality: candidate 2 has excellent parameter patterns with detailed tool descriptions and comprehensive instructions, suggesting high potential, (2) Information value: candidate 2 has very wide confidence interval (0.34 width) indicating high uncertainty - substantial information gain from additional evaluation, (3) Risk assessment: candidate 2's UCB (1.02) shows high upside potential while LCB (0.68) shows acceptable downside, parameter quality supports optimistic outlook, (4) Budget efficiency analysis: With {remaining_budget} evaluations remaining (ample budget), can afford to resolve high-uncertainty, high-potential candidate. If budget were low (<10 remaining), would choose candidate 0 (narrow confidence interval, reliable). Rejected candidate 4 despite high confidence bounds [0.78, 0.98] because parameter analysis suggests disconnect between observed performance and parameter quality. Candidate 2's combination of wide confidence interval (high information value) and excellent parameters (high expected performance) makes it optimal choice.",
+  "buffer_analysis": "Buffer Statistics: 5 candidates total. Observed scores: [0.75, 0.65, 0.85, 0.45, 0.88], eval_counts: [25, 30, 3, 2, 4]. Confidence Analysis: UCB scores [0.78, 0.68, 1.02, 0.72, 0.98], LCB scores [0.72, 0.62, 0.68, 0.18, 0.78], confidence widths [0.06, 0.06, 0.34, 0.54, 0.20]. Narrow intervals for candidates 0,1 (reliable), wide intervals for candidates 2,3,4 (high uncertainty). Reliability: candidates 0,1 are reliable (high eval_count, narrow confidence intervals), candidates 2,3,4 are unreliable (low eval_count, wide confidence intervals). Parameter Patterns: Candidates with longer and more detailed parameter content (>800 chars) tend to score higher. Candidates 0,2 have detailed parameter descriptions with specific examples, while candidates 1,3,4 have generic descriptions. Well-structured parameter content appears in higher-scoring candidates. Content analysis shows candidates 0,2 emphasize comprehensive details and clear structure, while candidates 1,3,4 lack specific guidance.",
+  "selection_reasoning": "Confidence interval analysis: candidate 2 has wide uncertainty [0.68, 1.02] but excellent parameters, candidate 4 has moderate uncertainty [0.78, 0.98] but poor parameters, candidates 0,1 have narrow intervals indicating reliability. Decision factors: (1) Parameter quality: candidate 2 has excellent parameter patterns with detailed descriptions and comprehensive content, suggesting high potential, (2) Information value: candidate 2 has very wide confidence interval (0.34 width) indicating high uncertainty - substantial information gain from additional evaluation, (3) Risk assessment: candidate 2's UCB (1.02) shows high upside potential while LCB (0.68) shows acceptable downside, parameter quality supports optimistic outlook, (4) Budget efficiency analysis: With {remaining_budget} evaluations remaining (ample budget), can afford to resolve high-uncertainty, high-potential candidate. If budget were low (<10 remaining), would choose candidate 0 (narrow confidence interval, reliable). Rejected candidate 4 despite high confidence bounds [0.78, 0.98] because parameter analysis suggests disconnect between observed performance and parameter quality. Candidate 2's combination of wide confidence interval (high information value) and excellent parameters (high expected performance) makes it optimal choice.",
   "selected_index": 2
 }}'''
 
@@ -532,8 +569,7 @@ class LLMRegressionModel(LLMModel):
             {
                 "role": "system",
                 "content": f"""
-## Role
-You are a score prediction model for retail customer service agent configurations. Your primary task is to learn parameter-performance relationships from the buffer statistics and predict scores for all candidates, including those without evaluation data.
+{self.domain_context}
 
 ## Core Capabilities
 1. **Pattern Learning**: Identify which parameter characteristics correlate with high/low performance
@@ -543,55 +579,56 @@ You are a score prediction model for retail customer service agent configuration
 
 ## Input Data Analysis
 You receive candidates with:
-- **Parameters**: Configuration settings (tools descriptions, instructions)
-- **Statistics**: Some candidates have mean_score, eval_count, UCB/LCB bounds
-- **Missing Data**: Some candidates have no evaluation statistics (eval_count=0, mean_score=None)
+- **Parameters**: Configuration settings and instructions for each candidate
+- **Statistics**: Candidates may have varying amounts of evaluation data (eval_count, mean_score, UCB/LCB bounds)
+- **Data Variance**: Some candidates have extensive evaluation history, others have limited or no evaluation data
 
 ## Learning Objectives
-**Learn from evaluated candidates**:
-- Which parameter patterns lead to higher scores?
-- What content/style/structure works best?
-- How do parameter characteristics correlate with performance?
+**Learn parameter-performance patterns**:
+- Which parameter characteristics correlate with higher performance?
+- What content patterns, style, and structure work best?
+- How do different parameter approaches affect outcomes?
 
-**Apply to unevaluated candidates**:
-- Compare their parameters to successful evaluated candidates
-- Predict likely performance based on parameter similarity
-- Estimate scores even without evaluation data
+**Apply patterns to predict scores**:
+- Use learned patterns to predict performance for all candidates
+- Consider both parameter quality and existing evaluation data
+- Make predictions based on parameter-performance correlations
 
 ## Required Analysis Process
 
 ### Step 1: Parameter-Performance Pattern Learning
-Analyze evaluated candidates to identify:
-- **High-performing patterns**: What makes successful candidates work?
-- **Low-performing patterns**: What characteristics lead to poor performance?
+Analyze all candidates to identify performance patterns:
+- **High-performing patterns**: What parameter characteristics correlate with better performance?
+- **Low-performing patterns**: What characteristics correlate with weaker performance?
 - **Content analysis**: Specific words, phrases, structures that correlate with scores
-- **Length patterns**: How parameter length affects performance
-- **Style patterns**: Detailed vs concise, formal vs conversational, etc.
+- **Length patterns**: How parameter length and detail level affect performance
+- **Style patterns**: Detailed vs concise, formal vs conversational, structured vs flexible
 
 ### Step 2: Score Prediction for All Candidates
-For each candidate (both evaluated and unevaluated):
-- **Evaluated candidates**: Use statistics + parameter analysis to refine score estimates
-- **Unevaluated candidates**: Predict scores based on parameter similarity to evaluated ones
-- **Confidence assessment**: How confident are you in each prediction?
-- **Reasoning**: Explain your prediction based on learned patterns
+For each candidate, predict performance based on:
+- **Parameter analysis**: Evaluate parameter quality using learned patterns
+- **Existing data integration**: Incorporate available evaluation statistics when present
+- **Pattern matching**: Compare parameters to successful patterns identified
+- **Confidence assessment**: How confident are you in each prediction based on pattern strength?
+- **Reasoning**: Explain your prediction based on parameter-performance correlations
 
 ### Step 3: Candidate Selection
 Choose the candidate most likely to have the highest true performance:
-- **Predicted performance**: Which candidate has the highest predicted score?
-- **Confidence level**: How reliable is your prediction?
-- **Information value**: Which candidate would provide most learning value?
+- **Predicted performance**: Which candidate has the highest predicted score based on patterns?
+- **Prediction confidence**: How reliable is your prediction based on pattern matching?
+- **Information value**: Which candidate would provide most learning value for pattern validation?
 
-## Prediction Strategy for Unevaluated Candidates
-When predicting scores for candidates with no statistics:
-1. **Find similar evaluated candidates**: Which evaluated candidates have similar parameters?
-2. **Identify key differences**: How do the parameters differ from similar evaluated ones?
-3. **Apply learned patterns**: Based on your pattern analysis, would these differences improve or hurt performance?
-4. **Predict score**: Estimate a score based on similarity and pattern analysis
-5. **Justify prediction**: Explain your reasoning clearly
+## Prediction Strategy
+When predicting scores for all candidates:
+1. **Identify parameter patterns**: What patterns do you see across all candidates?
+2. **Correlate with performance**: How do parameter characteristics relate to observed performance?
+3. **Apply patterns consistently**: Use learned patterns to predict scores for all candidates
+4. **Weight evidence appropriately**: Balance parameter analysis with existing evaluation data
+5. **Justify predictions**: Explain reasoning based on parameter-performance patterns
 
 {'## Output Requirements (With Score Estimation)' if self.enable_estimate_scores else '## Output Requirements (Selection Only)'}
 Return ONLY a JSON object with these fields:
-- "buffer_analysis": string analyzing parameter-performance patterns and statistical reliability. Candidates with eval_count > {2*len(self.validate_dataset['inputs'])} are considered well-evaluated with reliable statistics.
+- "buffer_analysis": string analyzing parameter-performance patterns across all candidates. Focus on identifying what parameter characteristics correlate with performance, considering both parameter quality and available evaluation data.
 {'- "score_estimates": object mapping candidate indices to predicted scores with detailed reasoning' if self.enable_estimate_scores else ''}
 - "selection_reasoning": string explaining your candidate choice based on predicted performance
 - "selected_index": integer index of the candidate you select for next evaluation
@@ -610,7 +647,7 @@ Return ONLY a JSON object with these fields:
 {example_param_schema_json}
 
 ## Task
-Analyze the parameter-performance patterns and select the most promising candidate for evaluation. Focus on data-driven patterns rather than domain assumptions.
+Analyze parameter-performance patterns across all candidates and select the most promising candidate for evaluation. Use pattern-based predictions to estimate scores for all candidates, focusing on parameter characteristics that correlate with performance.
 
 Return ONLY the JSON object with your analysis and selection.
 """,
@@ -714,7 +751,7 @@ class LLMGenerator(LLMRegressionModel):
         for idx, cand_entry in enumerate(buffer):
             summary = {
                 "index": idx,
-                "parameters": {p.py_name: copy.deepcopy(p.data) for p in cand_entry['params']},
+                "parameters": {k.py_name: v for k,v in cand_entry['params'].items()},
                 "eval_count": cand_entry['eval_count'],
                 "mean_score": cand_entry['mean_score'],
                 "ucb_score": cand_entry.get('ucb_score', None),
@@ -729,76 +766,100 @@ class LLMGenerator(LLMRegressionModel):
             {
                 "role": "system",
                 "content": f"""
-## Role
-You are an expert in generating diverse, high-performance retail customer service agent configurations. Based on current candidate performance data, you will generate {num_to_generate} new diverse candidates that could potentially outperform existing ones.
+{self.domain_context}
 
 ## Task
-Analyze the current buffer of candidates and their performance statistics, then generate {num_to_generate} new diverse candidates with different approaches that could achieve better performance.
+You are an expert agent optimizer generating high-performance configurations. Your goal is to create {num_to_generate} new candidates that will achieve higher task success rates than existing ones by addressing specific performance gaps.
 
-## Current Buffer Analysis
-You have access to:
-1. **Candidate parameters**: Configuration settings (tools_info, additional_instructions)
-2. **Performance statistics**: mean_score, eval_count, UCB/LCB confidence bounds
-3. **Patterns**: What seems to work well vs poorly in current candidates
+## Success Criteria
+Generate candidates that will improve performance by:
+- **Higher success rates**: Better task completion and goal achievement
+- **Error reduction**: Fewer failures and operational mistakes  
+- **Improved reliability**: More consistent and predictable behavior
+- **Enhanced effectiveness**: Better alignment with intended objectives
 
-## Diversity Requirements
-**CRITICAL**: Generated candidates MUST be diverse from each other and from existing candidates:
-- **Different approaches**: Vary the style, focus, and structure significantly
-- **Different strengths**: Target different aspects of customer service (authentication, error handling, workflow efficiency, etc.)
-- **Different philosophies**: Some detailed vs concise, some conservative vs aggressive, some structured vs flexible
-- **Avoid redundancy**: Don't generate similar candidates
+## Critical Analysis Framework
+Before generating candidates, you MUST:
 
-## Generation Strategy
-For each new candidate:
-1. **Identify gaps**: What weaknesses exist in current candidates?
-2. **Propose improvements**: How can this new candidate address those gaps?
-3. **Ensure diversity**: How is this candidate meaningfully different from others?
-4. **Justify potential**: Why might this candidate perform better?
+### Step 1: Failure Pattern Analysis
+- **Identify specific failure modes**: What exactly causes current candidates to fail?
+- **Quantify performance gaps**: Which candidates perform worst and why?
+- **Analyze parameter weaknesses**: What specific parameter content leads to poor performance?
+
+### Step 2: Success Pattern Extraction  
+- **Identify what works**: What specific elements in higher-performing candidates drive success?
+- **Extract transferable patterns**: Which successful approaches can be adapted/enhanced?
+- **Understand performance drivers**: What parameter characteristics correlate with better scores?
+
+### Step 3: Strategic Diversification
+Each new candidate must target a DIFFERENT performance bottleneck:
+- **Candidate 1**: Address the #1 failure pattern you identified
+- **Candidate 2**: Enhance the #1 success pattern you found
+- **Candidate 3**: Target a completely unexplored approach based on domain knowledge
+
+## Mandatory Diversity Requirements
+**CRITICAL - EACH CANDIDATE MUST BE FUNDAMENTALLY DIFFERENT**:
+- **Different core strategies**: Tool usage philosophy, communication style, error handling approach
+- **Different parameter structures**: Vary length, detail level, organization, and emphasis
+- **Different performance targets**: Some optimize for accuracy, others for efficiency, others for robustness
+- **Different risk profiles**: Conservative vs aggressive, detailed vs streamlined, comprehensive vs focused
+
+**VALIDATION CHECK**: If any two candidates could be described with similar adjectives, they are TOO SIMILAR.
 
 ## Output Requirements
 Return ONLY a JSON object with these fields:
-- "buffer_analysis": string analyzing current candidates' strengths, weaknesses, and patterns
+- "buffer_analysis": string with your Step 1-2 analysis (failure patterns, success patterns, performance gaps)
 - "generated_candidates": array of {num_to_generate} objects, each with:
-  - "reasoning": string explaining why this candidate might outperform existing ones and how it's diverse
-  - "diversity_focus": string describing what makes this candidate unique/different
-  - "parameters": object with parameter values (matching the schema)
+  - "reasoning": string explaining the SPECIFIC performance problem this candidate solves and WHY it will outperform existing ones
+  - "diversity_focus": string describing the UNIQUE strategy/approach that makes this candidate different from all others
+  - "parameters": object with parameter values (matching the schema exactly)
 
-**CRITICAL REQUIREMENT FOR tools_info**: The tools_info parameter MUST contain descriptions for ALL tools available in the system. You cannot provide partial tool sets or omit any tools. Every tool that exists in the current candidates must be included in your new proposals with updated descriptions. The tools_info should be a complete replacement, not a partial update.
+## NON-NEGOTIABLE CONSTRAINTS
+**CRITICAL - VIOLATIONS WILL CAUSE REJECTION**:
 
-**IMPORTANT CONSTRAINTS**:
-- **ONLY modify tool descriptions**: You can only change the "description" field of existing tools
-- **CANNOT add new tools**: Do not create tools that don't exist in the current system
-- **CANNOT remove tools**: Every existing tool must be present in your proposals
-- **CANNOT change tool names**: Tool names (function.name) must remain exactly the same
-- **CANNOT change tool parameters**: The parameters schema for each tool must remain unchanged
-- **ONLY change descriptions**: Focus on improving how tools are described to the agent
+### Parameter Structure Requirements
+- **Exact schema match**: Use ONLY the parameter keys provided in the schema
+- **Correct data types**: All parameter values must be strings (even if they contain structured content)
+- **Complete coverage**: Include ALL required parameters, no omissions allowed
+- **Consistent formatting**: Follow the same naming and structure conventions as existing candidates
+
+### Content Quality Requirements  
+- **Concrete specificity**: Avoid vague phrases like "better handling" or "improved approach"
+- **Actionable instructions**: Parameter content must provide clear, executable guidance
+- **Practical relevance**: All content must be directly applicable to the optimization domain
+- **Length appropriateness**: Match the expected parameter length patterns from existing candidates
+
+### Diversity Enforcement
+- **Unique approaches**: Each candidate must solve a DIFFERENT core problem
+- **Distinct strategies**: No two candidates should have similar methodologies
+- **Varied structures**: Significantly different parameter organization and emphasis
 
 ## Example Output Format
 {{
-  "buffer_analysis": "Current buffer shows candidates focusing heavily on authentication (scores 0.6-0.8) but lacking in error recovery and user guidance. Most candidates have verbose tool descriptions but inconsistent instruction styles. Gap: no candidates emphasize proactive user assistance or streamlined workflows.",
+  "buffer_analysis": "FAILURE ANALYSIS: Candidate 0 (score 0.45) fails due to vague parameter descriptions lacking concrete examples - causes 40% implementation errors. Candidate 1 (score 0.52) has verbose but unstructured content - leads to execution confusion. SUCCESS ANALYSIS: Candidate 2 (score 0.78) succeeds with structured examples and clear validation steps - drives 25% better performance. PERFORMANCE GAPS: No candidates address edge case handling (major failure mode), none optimize for multi-step processes, missing systematic error recovery patterns.",
   "generated_candidates": [
     {{
-      "reasoning": "Current candidates are verbose and reactive. This candidate focuses on efficiency and proactive assistance, which could reduce interaction time and improve user satisfaction. Addresses the gap in workflow optimization.",
-      "diversity_focus": "Efficiency-first approach with proactive user guidance, contrasting with existing reactive verbose style",
+      "reasoning": "TARGETS FAILURE MODE: Implementation errors (40% of failures). Current candidates provide vague descriptions. This candidate provides concrete examples and validation steps, directly addressing the #1 cause of failures. Expected improvement: 30-40% reduction in errors based on structured guidance approach.",
+      "diversity_focus": "Precision specialist: Exhaustive examples with validation, completely different from existing vague descriptions",
       "parameters": {{
-        "list0": "Concise, action-focused tool descriptions emphasizing speed and efficiency...",
-        "str0": "Prioritize quick resolution and minimal back-and-forth. Always suggest next steps proactively..."
+        "param1": "Each operation includes 3 concrete usage examples with exact formats. Always validate inputs before execution. Include step-by-step verification procedures...",
+        "param2": "CRITICAL: Before any operation, verify all required inputs are present and correctly formatted. If validation fails, provide specific guidance with concrete examples..."
       }}
     }},
     {{
-      "reasoning": "Existing candidates lack robust error handling. This candidate specializes in error recovery and provides multiple fallback options, potentially improving success rates in complex scenarios.",
-      "diversity_focus": "Error-resilience specialist with comprehensive fallback strategies, unique focus on failure recovery",
+      "reasoning": "ENHANCES SUCCESS PATTERN: Builds on candidate 2's structured approach but optimizes for multi-step processes. Current candidates handle single operations well but fail in complex sequences. This candidate provides systematic orchestration with checkpoint validation, targeting 20% of remaining failures.",
+      "diversity_focus": "Process orchestration expert: Multi-step optimization with checkpoints, unique systematic approach",
       "parameters": {{
-        "list0": "Detailed tool descriptions with extensive error handling examples and fallback procedures...",
-        "str0": "Comprehensive error recovery protocols. When any tool fails, immediately provide alternatives..."
+        "param1": "For complex processes, break into phases with validation checkpoints. Phase 1: Input gathering and validation. Phase 2: Execution with confirmation. Phase 3: Result verification and output...",
+        "param2": "PROCESS PROTOCOL: At each step, confirm previous step completion before proceeding. If any step fails, provide specific recovery options rather than generic error messages..."
       }}
     }},
     {{
-      "reasoning": "Current candidates assume user expertise. This candidate prioritizes user education and confirmation, potentially improving user satisfaction and reducing misunderstandings in complex transactions.",
-      "diversity_focus": "Educational approach with emphasis on user understanding and confirmation, contrasts with assumption-heavy existing candidates",
+      "reasoning": "ADDRESSES UNEXPLORED AREA: Edge case and exception handling (15% of failures). No current candidates handle boundary conditions effectively. This candidate specializes in robust exception handling and edge case management, targeting a completely different failure category.",
+      "diversity_focus": "Robustness guardian: Edge case handling with exception management, novel defensive approach",
       "parameters": {{
-        "list0": "User-friendly tool descriptions with natural language explanations and examples...",
-        "str0": "Explain every action in simple terms. Always confirm understanding before proceeding..."
+        "param1": "Before any operation, check for boundary conditions and edge cases. Validate input ranges, handle null/empty values, and provide graceful degradation for unexpected scenarios...",
+        "param2": "ROBUSTNESS FIRST: When edge cases occur, provide clear explanations and alternative approaches. Always validate assumptions and handle exceptions gracefully with informative feedback..."
       }}
     }}
   ]
@@ -816,9 +877,14 @@ Use exactly these parameter keys; values must be strings:
 {example_param_schema_json}
 
 ## Task
-Generate {num_to_generate} diverse new candidates that could outperform existing ones. Focus on different approaches and address different weaknesses you identify in the current buffer.
+Follow the Critical Analysis Framework:
+1. **Analyze failures**: Identify specific failure modes and performance gaps in current candidates
+2. **Extract successes**: Find what works and can be enhanced
+3. **Generate strategically**: Create {num_to_generate} candidates that each target DIFFERENT performance bottlenecks
 
-Return ONLY the JSON object with your analysis and generated candidates.
+**MANDATORY**: Each candidate must solve a fundamentally different problem. No similar approaches allowed.
+
+Return ONLY the JSON object following the exact format shown in the example.
 """,
             },
         ]
@@ -828,7 +894,8 @@ Return ONLY the JSON object with your analysis and generated candidates.
         # LLM call with retry logic
         def llm_call():
             return self.llm(prompt_messages, response_format=response_format)
-
+        if verbose:
+            print("candidats_in_prompt_messages: ", candidate_summaries_json)
         llm_response = retry_with_exponential_backoff(
             llm_call,
             max_retries=10,
@@ -880,12 +947,12 @@ Return ONLY the JSON object with your analysis and generated candidates.
                 parameters_raw = candidate_data.get("parameters", {})
                 reasoning = candidate_data.get("reasoning", "No reasoning provided")
                 diversity_focus = candidate_data.get("diversity_focus", "No diversity focus provided")
-                # Validate tools_info
-                tools_info_data = None
+                # Validate parameter structure consistency
+                list_param_data = None
                 # Find any list parameter in parameters_raw
                 for key, value in parameters_raw.items():
                     if isinstance(value, list):
-                        tools_info_data = value
+                        list_param_data = value
                         break
                 
                 if self.num_tools is None:
@@ -895,11 +962,11 @@ Return ONLY the JSON object with your analysis and generated candidates.
                             self.num_tools = len(param_value)
                             break
                     
-                # check whether tools_info contains the same number of tools as the first candidate in the buffer
-                if tools_info_data:
-                    if len(tools_info_data) != self.num_tools:
+                # check whether list parameter contains the same number of items as the first candidate
+                if list_param_data:
+                    if len(list_param_data) != self.num_tools:
                         if verbose:
-                            print_color(f"Skipping candidate {i+1}: tools_info contains {len(tools_info_data)} tools, expected {self.num_tools}", "yellow")
+                            print_color(f"Skipping candidate {i+1}: list parameter contains {len(list_param_data)} items, expected {self.num_tools}", "yellow")
                         continue
                 # Convert parameters to the correct format
                 candidate_params_dict = self.construct_update_dict(parameters_raw)
@@ -934,9 +1001,637 @@ Return ONLY the JSON object with your analysis and generated candidates.
     def llm_generate_candidate(self, buffer, verbose: bool = False): 
         # Add new candidates to the buffer
         # Every time we call this function, it will delete candidates without scores first
-        self.buffer = self.llm_generator(buffer, verbose = False, num_to_generate=1)
+        self.buffer = self.llm_generator(buffer, verbose = True, num_to_generate=3)
 
         # Use the LLM regression model to select the best candidate from the buffer
         return self.llm_regressor(self.buffer, verbose)
 
-    
+class LLMRegressThenGenerate_onecall(LLMRegressionModel):
+    """Do the same thing as LLMGenerator, but in one call to the LLM.
+    LLMGenerator will call the LLM twice, once to generate the candidates using llm_generator, and once to select the best candidate using llm_regressor.
+    LLMRegressThenGenerate_onecall will call the LLM once.
+    """
+    def __init__(self, agent, num_threads, logger, update_dicts, enable_estimate_scores=False, domain_context=None, *args, **kwargs):
+        super().__init__(agent, num_threads, logger, update_dicts, enable_estimate_scores, domain_context, *args, **kwargs)
+        # Could add parameters here.
+
+    def llm_generate_candidate(self, buffer, verbose: bool = False):
+        """Combined generation and regression in one LLM call.
+        
+        1. Generate new candidates based on current buffer
+        2. Predict scores for all candidates (existing + new)
+        3. Select best candidate for evaluation
+        4. If new candidate selected, add to buffer
+        """
+        # Calculate budget information
+        total_budget = self.num_epochs * self.horizon
+        used_budget = self.selection_count
+        remaining_budget = total_budget - used_budget
+        
+        # Filter buffer to only include candidates with valid scores for analysis
+        buffer_with_scores = [c for c in buffer if c['eval_count'] > 0]
+        
+        # Prepare serializable candidate summaries for existing candidates
+        serializable_candidate_summaries = []
+        self.update_buffer_scores()
+        for idx, cand_entry in enumerate(buffer):
+            summary = {
+                "index": idx,
+                "parameters": {k.py_name: v for k,v in cand_entry['params'].items()},
+                "eval_count": cand_entry['eval_count'],
+                "mean_score": cand_entry['mean_score'],
+                "ucb_score": cand_entry.get('ucb_score', None),
+                "lcb_score": cand_entry.get('lcb_score', None)
+            }
+            serializable_candidate_summaries.append(summary)
+        candidate_summaries_json = json.dumps(serializable_candidate_summaries, indent=2)
+        
+        example_param_schema_json = json.dumps({p.py_name: copy.deepcopy(p.data) for p in self.agent.parameters()}, indent=2)
+
+        # Create the combined prompt
+        prompt_messages = [
+            {
+                "role": "system",
+                "content": f"""
+{self.domain_context}
+
+## Combined Task: Generation + Regression + Selection
+
+You will perform three tasks in sequence:
+
+### Task 1: Generate New Candidates
+Based on current buffer analysis, generate 3 diverse new candidates that could outperform existing ones.
+
+#### Critical Analysis Framework
+Before generating candidates, you MUST:
+
+**Step 1: Failure Pattern Analysis**
+- Identify specific failure modes in current candidates
+- Quantify performance gaps and analyze parameter weaknesses
+- Understand what causes poor performance
+
+**Step 2: Success Pattern Extraction**  
+- Identify what works in higher-performing candidates
+- Extract transferable patterns and understand performance drivers
+- Find successful approaches that can be enhanced
+
+**Step 3: Strategic Diversification**
+Each new candidate must target a DIFFERENT performance bottleneck:
+- Candidate 1: Address the #1 failure pattern identified
+- Candidate 2: Enhance the #1 success pattern found
+- Candidate 3: Target a completely unexplored approach
+
+#### Mandatory Diversity Requirements
+**CRITICAL - EACH CANDIDATE MUST BE FUNDAMENTALLY DIFFERENT**:
+- Different core strategies and parameter structures
+- Different performance targets (accuracy vs efficiency vs robustness)
+- Different risk profiles (conservative vs aggressive, detailed vs streamlined)
+
+**VALIDATION CHECK**: If any two candidates could be described with similar adjectives, they are TOO SIMILAR.
+
+### Task 2: Score Prediction
+Using parameter-performance patterns, predict scores for ALL candidates (existing + newly generated):
+
+#### Pattern Learning Process
+- Analyze parameter characteristics that correlate with performance
+- Learn from existing evaluation data and parameter quality
+- Apply patterns consistently to predict scores for all candidates
+
+#### Prediction Strategy
+- Use learned patterns to predict performance for all candidates
+- Consider both parameter quality and existing evaluation data
+- Make predictions based on parameter-performance correlations
+
+### Task 3: Candidate Selection
+Choose the candidate most likely to have the highest true performance:
+- Select based on predicted performance ranking
+- Consider prediction confidence and information value
+- Choose the candidate that maximizes expected performance
+
+## Budget Information
+- Remaining budget: {remaining_budget} evaluations
+- Selection number: {self.selection_count}/{total_budget}
+
+## Output Requirements
+Return ONLY a JSON object with these fields:
+- "buffer_analysis": string with failure patterns, success patterns, and performance gaps analysis
+- "generated_candidates": array of 3 objects, each with:
+  - "reasoning": string explaining the SPECIFIC performance problem this candidate solves
+  - "diversity_focus": string describing the UNIQUE strategy that makes this candidate different
+  - "parameters": object with parameter values (matching schema exactly)
+- "score_estimates": object mapping ALL candidate indices (existing + new) to predicted scores with reasoning
+- "selection_reasoning": string explaining your candidate choice based on predicted performance
+- "selected_candidate": object with:
+  - "is_new": boolean (true if selecting a newly generated candidate, false if existing)
+  - "index": integer (if is_new=false, index in existing buffer; if is_new=true, index in generated_candidates 0-2)
+
+## NON-NEGOTIABLE CONSTRAINTS
+**CRITICAL - VIOLATIONS WILL CAUSE REJECTION**:
+
+### Parameter Structure Requirements
+- Use ONLY the parameter keys provided in the schema
+- All parameter values must be strings
+- Include ALL required parameters, no omissions allowed
+- Follow consistent naming and structure conventions
+
+### Content Quality Requirements  
+- Concrete specificity: Avoid vague phrases
+- Actionable instructions: Provide clear, executable guidance
+- Practical relevance: Content must be applicable to the optimization domain
+- Length appropriateness: Match expected parameter length patterns
+
+### Diversity Enforcement
+- Each candidate must solve a DIFFERENT core problem
+- No two candidates should have similar methodologies
+- Significantly different parameter organization and emphasis
+
+## Example Output Format
+{{
+  "buffer_analysis": "FAILURE ANALYSIS: Candidate 0 (score 0.45) fails due to vague parameter descriptions - causes 40% implementation errors. SUCCESS ANALYSIS: Candidate 2 (score 0.78) succeeds with structured examples. PERFORMANCE GAPS: No candidates address edge cases, missing systematic error recovery.",
+  "generated_candidates": [
+    {{
+      "reasoning": "TARGETS FAILURE MODE: Implementation errors (40% of failures). This candidate provides concrete examples and validation steps.",
+      "diversity_focus": "Precision specialist: Exhaustive examples with validation",
+      "parameters": {{
+        "param1": "Each operation includes concrete examples with exact formats...",
+        "param2": "CRITICAL: Verify all inputs before execution..."
+      }}
+    }},
+    {{
+      "reasoning": "ENHANCES SUCCESS PATTERN: Builds on structured approach but optimizes for multi-step processes.",
+      "diversity_focus": "Process orchestration expert: Multi-step optimization with checkpoints",
+      "parameters": {{
+        "param1": "For complex processes, break into phases with validation...",
+        "param2": "PROCESS PROTOCOL: Confirm each step completion..."
+      }}
+    }},
+    {{
+      "reasoning": "ADDRESSES UNEXPLORED AREA: Edge case handling (15% of failures).",
+      "diversity_focus": "Robustness guardian: Edge case handling with exception management",
+      "parameters": {{
+        "param1": "Check boundary conditions and edge cases before operations...",
+        "param2": "ROBUSTNESS FIRST: Handle exceptions gracefully..."
+      }}
+    }}
+  ],
+  "score_estimates": {{
+    "0": {{"reasoning": "Parameter analysis shows vague descriptions. Current score 0.45 matches pattern of poor parameter quality.", "predicted_score": 0.47}},
+    "1": {{"reasoning": "Structured parameters with good examples. Score 0.78 reflects excellent parameter-performance correlation.", "predicted_score": 0.76}},
+    "new_0": {{"reasoning": "Precision-focused approach with concrete examples should address main failure mode. Predicted high performance.", "predicted_score": 0.82}},
+    "new_1": {{"reasoning": "Process optimization builds on successful patterns. Expected strong performance.", "predicted_score": 0.79}},
+    "new_2": {{"reasoning": "Edge case handling addresses unexplored area. Moderate improvement expected.", "predicted_score": 0.73}}
+  }},
+  "selection_reasoning": "Predicted ranking: new_0 (0.82) > new_1 (0.79) > existing_1 (0.76) > new_2 (0.73) > existing_0 (0.47). Selecting new_0 because it has highest predicted score and directly addresses the main failure mode.",
+  "selected_candidate": {{
+    "is_new": true,
+    "index": 0
+  }}
+}}
+""",
+            },
+            {
+                "role": "user",
+                "content": f"""
+## Current Buffer Data
+{candidate_summaries_json}
+
+## Parameter Schema
+Use exactly these parameter keys; values must be strings:
+{example_param_schema_json}
+
+## Task
+Perform the combined generation + regression + selection process:
+1. Analyze current buffer and generate 3 diverse new candidates
+2. Predict scores for all candidates (existing + new) using parameter-performance patterns
+3. Select the best candidate for evaluation
+
+Return ONLY the JSON object following the exact format shown in the example.
+""",
+            },
+        ]
+        
+        response_format = {"type": "json_object"}
+        
+        # Single LLM call
+        def llm_call():
+            return self.llm(prompt_messages, response_format=response_format)
+            
+        if verbose:
+            print("Combined generation+regression candidates in prompt: ", candidate_summaries_json)
+            
+        llm_response = retry_with_exponential_backoff(
+            llm_call,
+            max_retries=10,
+            base_delay=1.0,
+            operation_name="LLM combined generation+regression"
+        )
+        
+        # Default fallback
+        default_entry = max(buffer_with_scores, key=lambda c: c['mean_score'])
+        
+        if llm_response is None:
+            if verbose:
+                print_color("LLM combined call failed after retries. Returning highest scoring candidate.", "yellow")
+            return default_entry
+
+        llm_response_str = getattr(getattr(llm_response, 'choices', [{}])[0], 'message', None)
+        llm_response_str = getattr(llm_response_str, 'content', None)
+        if not llm_response_str:
+            if verbose:
+                print_color("LLM returned empty response.", "yellow")
+            return default_entry
+
+        cleaned_llm_response_str = llm_response_str.strip()
+        
+        if verbose:
+            print_color(f"LLM Combined response: {cleaned_llm_response_str}", "cyan")
+            
+        try:
+            llm_output = json.loads(cleaned_llm_response_str)
+        except json.JSONDecodeError:
+            if verbose:
+                print_color("Failed to parse LLM combined JSON output.", "yellow")
+            return default_entry
+
+        if not isinstance(llm_output, dict):
+            return default_entry
+
+        # Extract components
+        generated_candidates = llm_output.get("generated_candidates", [])
+        selected_candidate_info = llm_output.get("selected_candidate", {})
+        
+        if verbose:
+            buffer_analysis = llm_output.get("buffer_analysis", "No analysis provided")
+            selection_reasoning = llm_output.get("selection_reasoning", "No reasoning provided")
+            print_color(f"Buffer Analysis: {buffer_analysis}", "cyan")
+            print_color(f"Selection Reasoning: {selection_reasoning}", "cyan")
+            print_color(f"Generated {len(generated_candidates)} new candidates", "green")
+
+        # Process selection
+        is_new = selected_candidate_info.get("is_new", False)
+        selected_index = selected_candidate_info.get("index", 0)
+        
+        if is_new and 0 <= selected_index < len(generated_candidates):
+            # Selected a new candidate - need to create buffer entry
+            try:
+                selected_generated = generated_candidates[selected_index]
+                parameters_raw = selected_generated.get("parameters", {})
+                
+                # Validate parameter structure for lists (same as in llm_generator)
+                list_param_data = None
+                for key, value in parameters_raw.items():
+                    if isinstance(value, list):
+                        list_param_data = value
+                        break
+                
+                if self.num_tools is None:
+                    params_dict = buffer[0]['params']
+                    for param_node, param_value in params_dict.items():
+                        if isinstance(param_value, list):
+                            self.num_tools = len(param_value)
+                            break
+                    
+                if list_param_data and len(list_param_data) != self.num_tools:
+                    if verbose:
+                        print_color(f"Selected new candidate has invalid list parameter length {len(list_param_data)}, expected {self.num_tools}. Falling back to best existing.", "yellow")
+                    return default_entry
+                
+                # Convert parameters to correct format
+                candidate_params_dict = self.construct_update_dict(parameters_raw)
+                
+                # Create new buffer entry
+                new_candidate_entry = {
+                    "params": candidate_params_dict,
+                    "score_sum": 0.0,
+                    "eval_count": 0,
+                    "mean_score": None,
+                    "ucb_score": None,
+                    "lcb_score": None
+                }
+                
+                # Add to buffer
+                buffer.append(new_candidate_entry)
+                
+                if verbose:
+                    reasoning = selected_generated.get("reasoning", "No reasoning provided")
+                    diversity_focus = selected_generated.get("diversity_focus", "No diversity focus provided")
+                    print_color(f"Selected NEW candidate {selected_index}:", "green")
+                    print_color(f"  Reasoning: {reasoning}", "green")
+                    print_color(f"  Diversity Focus: {diversity_focus}", "green")
+                
+                return new_candidate_entry
+                
+            except Exception as e:
+                if verbose:
+                    print_color(f"Error creating new candidate: {e}. Falling back to best existing.", "yellow")
+                return default_entry
+                
+        elif not is_new and 0 <= selected_index < len(buffer):
+            # Selected existing candidate
+            selected_entry = buffer[selected_index]
+            if verbose:
+                print_color(f"Selected EXISTING candidate {selected_index}", "green")
+            
+            return selected_entry
+            
+        else:
+            # Invalid selection
+            if verbose:
+                print_color("Invalid candidate selection. Falling back to best existing.", "yellow")
+            return default_entry
+
+class LLMSimpleGenerator(LLMRegressionModel):
+    """Simple generator that only calls the LLM once to generate candidates.
+    """
+    def __init__(self, agent, num_threads, logger, update_dicts, enable_estimate_scores=False, domain_context=None,enable_using_regressor=False, *args, **kwargs):
+        super().__init__(agent, num_threads, logger, update_dicts, enable_estimate_scores, domain_context, *args, **kwargs)
+        # Could add parameters here.
+        # If enable_using_regressor is True, the LLM will use the regressor predict scores before making the final selection.
+        self.enable_using_regressor = enable_using_regressor
+
+    def llm_generate_candidate(self, buffer, verbose: bool = False):
+        """Skip the step of generating new candidates explicitly. Given the history, compute the estimate on the history. At the end, let the LLM select a candidate to evaluate, which might not be within the current buffer.
+         To be specific, the LLM reasoning process should be:
+         1. Given the history, if enable_using_regressor is True, compute the estimate on the candidates in the history.
+         2. Ask the LLM to select a candidate to evaluate, which might not be within the current buffer.
+         3. If LLM selects a new candidate, create a new buffer entry for the new candidate.
+         4. Return the selected candidate entry.
+         """
+        # Calculate budget information
+        total_budget = self.num_epochs * self.horizon
+        used_budget = self.selection_count
+        remaining_budget = total_budget - used_budget
+        
+        # Filter buffer to only include candidates with valid scores for analysis
+        buffer_with_scores = [c for c in buffer if c['eval_count'] > 0]
+        
+        # Prepare serializable candidate summaries for existing candidates
+        serializable_candidate_summaries = []
+        self.update_buffer_scores()
+        for idx, cand_entry in enumerate(buffer):
+            summary = {
+                "index": idx,
+                "parameters": {k.py_name: v for k,v in cand_entry['params'].items()},
+                "eval_count": cand_entry['eval_count'],
+                "mean_score": cand_entry['mean_score'],
+                "ucb_score": cand_entry.get('ucb_score', None),
+                "lcb_score": cand_entry.get('lcb_score', None)
+            }
+            serializable_candidate_summaries.append(summary)
+        candidate_summaries_json = json.dumps(serializable_candidate_summaries, indent=2)
+        
+        example_param_schema_json = json.dumps({p.py_name: copy.deepcopy(p.data) for p in self.agent.parameters()}, indent=2)
+
+        # Create the prompt for regression + optional generation
+        prompt_messages = [
+            {
+                "role": "system",
+                "content": f"""
+{self.domain_context}
+
+## Task: Regression Analysis + Candidate Selection
+
+You will perform two main tasks:
+
+### Task 1: Parameter-Performance Analysis
+Analyze the existing candidates to understand performance patterns:
+
+#### Pattern Learning Process
+- **Identify parameter-performance correlations**: What parameter characteristics lead to higher/lower performance?
+- **Learn from evaluation data**: Use existing scores and evaluation counts to understand reliability
+- **Extract success patterns**: What makes high-performing candidates successful?
+- **Identify failure patterns**: What causes poor performance in low-scoring candidates?
+- **Understand performance drivers**: Which specific parameter elements correlate with better outcomes?
+
+{'#### Score Prediction' if self.enable_using_regressor else ''}
+{'For each existing candidate, predict their true performance based on:' if self.enable_using_regressor else ''}
+{'- Parameter quality analysis using learned patterns' if self.enable_using_regressor else ''}
+{'- Integration of existing evaluation data when available' if self.enable_using_regressor else ''}
+{'- Pattern matching against successful configurations' if self.enable_using_regressor else ''}
+{'- Confidence assessment based on parameter-performance correlations' if self.enable_using_regressor else ''}
+
+### Task 2: Candidate Selection
+Based on your analysis, choose the best candidate to evaluate next:
+
+#### Selection Options
+You have two choices:
+1. **Select an existing candidate**: Choose from the current buffer based on predicted performance
+2. **Propose a new candidate**: If existing candidates are insufficient, create a new one that addresses identified gaps
+
+#### Decision Criteria
+- **Predicted performance**: Which option is most likely to achieve the highest score?
+- **Information value**: Which choice provides the most learning value?
+- **Gap analysis**: Do existing candidates adequately explore the parameter space, or is a new approach needed?
+
+## Budget Information
+- Remaining budget: {remaining_budget} evaluations
+- Selection number: {self.selection_count}/{total_budget}
+
+## Output Requirements
+Return ONLY a JSON object with these fields:
+- "buffer_analysis": string analyzing parameter-performance patterns and candidate reliability
+{'- "score_estimates": object mapping candidate indices to predicted scores with detailed reasoning' if self.enable_using_regressor else ''}
+- "selection_reasoning": string explaining your choice (existing vs new) and why it's optimal
+- "selected_candidate": object with:
+  - "is_new": boolean (true if proposing new candidate, false if selecting existing)
+  - "index": integer (if is_new=false, index in buffer; ignored if is_new=true)
+  - "parameters": object (if is_new=true, provide new parameter values; empty object if is_new=false)
+
+## NON-NEGOTIABLE CONSTRAINTS
+**CRITICAL - VIOLATIONS WILL CAUSE REJECTION**:
+
+### Parameter Structure Requirements (for new candidates)
+- Use ONLY the parameter keys provided in the schema
+- All parameter values must be strings
+- Include ALL required parameters, no omissions allowed
+- Follow consistent naming and structure conventions
+
+### Content Quality Requirements
+- Concrete specificity: Avoid vague phrases like "better handling"
+- Actionable instructions: Provide clear, executable guidance
+- Practical relevance: Content must be applicable to the optimization domain
+- Length appropriateness: Match expected parameter length patterns
+
+## Example Output Format
+
+### Example 1: Selecting Existing Candidate
+{{
+  "buffer_analysis": "Parameter-Performance Analysis: Analyzed 4 candidates. Pattern Analysis: Candidates with detailed parameter content (>500 chars) show higher performance trends. Candidate 2 (score 0.78, eval_count 15) has excellent parameter structure with concrete examples. Candidates 0,1 have weaker parameter quality correlating with lower scores. Statistical Reliability: Candidate 2 has moderate reliability, others have sufficient data for assessment.",
+  {'  "score_estimates": {{' if self.enable_using_regressor else ''}
+  {'    "0": {{"reasoning": "Parameter analysis shows basic content (300 chars), minimal examples. Current score 0.45 matches pattern of weak parameter quality. Predicted performance reflects limited parameter effectiveness.", "predicted_score": 0.47}},' if self.enable_using_regressor else ''}
+  {'    "1": {{"reasoning": "Moderate parameter content (450 chars) with some structure. Score 0.62 aligns with mid-tier parameter quality. Prediction based on consistent parameter-performance correlation.", "predicted_score": 0.64}},' if self.enable_using_regressor else ''}
+  {'    "2": {{"reasoning": "Excellent parameter quality (650+ chars) with concrete examples and clear structure. Score 0.78 reflects strong parameter-performance match. High confidence in continued strong performance.", "predicted_score": 0.76}}' if self.enable_using_regressor else ''}
+  {'  }},' if self.enable_using_regressor else ''}
+  "selection_reasoning": "{'Predicted ranking: candidate 2 (0.76) > candidate 1 (0.64) > candidate 0 (0.47). Selecting candidate 2 because it has the highest predicted performance based on excellent parameter quality and proven track record. The parameter structure suggests continued strong performance with additional evaluation.' if self.enable_using_regressor else 'Analysis shows candidate 2 has the best combination of current performance (0.78) and parameter quality. The detailed parameter structure with concrete examples makes it the most promising candidate for continued evaluation.'}",
+  "selected_candidate": {{
+    "is_new": false,
+    "index": 2,
+    "parameters": {{}}
+  }}
+}}
+
+### Example 2: Proposing New Candidate
+{{
+  "buffer_analysis": "Parameter-Performance Analysis: Analyzed 3 candidates with scores 0.35, 0.42, 0.38. Pattern Analysis: All candidates show similar weaknesses - vague parameter descriptions lacking concrete examples and specific guidance. No candidate demonstrates strong parameter-performance patterns. Performance Gap: Missing systematic approach to edge case handling and validation procedures.",
+  {'  "score_estimates": {{' if self.enable_using_regressor else ''}
+  {'    "0": {{"reasoning": "Basic parameter content with generic descriptions. Score 0.35 reflects weak parameter quality. Limited improvement potential with current approach.", "predicted_score": 0.37}},' if self.enable_using_regressor else ''}
+  {'    "1": {{"reasoning": "Slightly better structure but still lacks specificity. Score 0.42 is highest among weak candidates. Marginal improvement expected.", "predicted_score": 0.44}},' if self.enable_using_regressor else ''}
+  {'    "2": {{"reasoning": "Similar issues to other candidates - vague content, no concrete examples. Score 0.38 consistent with poor parameter patterns.", "predicted_score": 0.40}}' if self.enable_using_regressor else ''}
+  {'  }},' if self.enable_using_regressor else ''}
+  "selection_reasoning": "{'All existing candidates show consistently poor performance (0.37-0.44 predicted) due to weak parameter quality. Gap Analysis: No candidate addresses systematic validation or provides concrete operational examples. Proposing new candidate that targets these specific weaknesses with structured approach and concrete examples. Expected significant improvement over existing candidates.' if self.enable_using_regressor else 'All existing candidates show consistently poor performance (0.35-0.42 observed) due to weak parameter quality. Gap Analysis: No candidate addresses systematic validation or provides concrete operational examples. Proposing new candidate that targets these specific weaknesses with structured approach and concrete examples. Expected significant improvement over existing candidates.'}",
+  "selected_candidate": {{
+    "is_new": true,
+    "index": -1,
+    "parameters": {{
+      "param1": "Each operation includes concrete validation steps with specific examples. Example format: validate_input(data) -> check_format() -> verify_constraints() -> execute_operation(). Always provide step-by-step verification procedures...",
+      "param2": "SYSTEMATIC APPROACH: Before any operation, follow validation protocol: 1) Input verification, 2) Constraint checking, 3) Edge case handling, 4) Execution with monitoring. If validation fails, provide specific corrective guidance..."
+    }}
+  }}
+}}
+""",
+            },
+            {
+                "role": "user",
+                "content": f"""
+## Current Buffer Data
+{candidate_summaries_json}
+
+## Parameter Schema (for new candidates)
+Use exactly these parameter keys; values must be strings:
+{example_param_schema_json}
+
+## Task
+Perform parameter-performance analysis and select the best candidate to evaluate:
+1. Analyze existing candidates{'and predict their scores based on parameter-performance patterns' if self.enable_using_regressor else ' to understand their strengths and weaknesses'}
+2. Decide whether to select an existing candidate or propose a new one
+3. If proposing new candidate, ensure it addresses gaps in current candidates
+
+Return ONLY the JSON object following the exact format shown in the examples.
+""",
+            },
+        ]
+        
+        response_format = {"type": "json_object"}
+        
+        # Single LLM call
+        def llm_call():
+            return self.llm(prompt_messages, response_format=response_format)
+            
+        if verbose:
+            print("Simple generator candidates in prompt: ", candidate_summaries_json)
+        self.print_buffer_statistics()
+        llm_response = retry_with_exponential_backoff(
+            llm_call,
+            max_retries=10,
+            base_delay=1.0,
+            operation_name="LLM simple generation"
+        )
+        
+        # Default fallback
+        default_entry = max(buffer_with_scores, key=lambda c: c['mean_score'])
+        
+        if llm_response is None:
+            if verbose:
+                print_color("LLM simple generation call failed after retries. Returning highest scoring candidate.", "yellow")
+            return default_entry
+
+        llm_response_str = getattr(getattr(llm_response, 'choices', [{}])[0], 'message', None)
+        llm_response_str = getattr(llm_response_str, 'content', None)
+        if not llm_response_str:
+            if verbose:
+                print_color("LLM returned empty response.", "yellow")
+            return default_entry
+
+        cleaned_llm_response_str = llm_response_str.strip()
+        
+        if verbose:
+            print_color(f"LLM Simple Generator response: {cleaned_llm_response_str}", "cyan")
+            
+        try:
+            llm_output = json.loads(cleaned_llm_response_str)
+        except json.JSONDecodeError:
+            if verbose:
+                print_color("Failed to parse LLM simple generation JSON output.", "yellow")
+            return default_entry
+
+        if not isinstance(llm_output, dict):
+            return default_entry
+
+        # Extract components
+        selected_candidate_info = llm_output.get("selected_candidate", {})
+        
+        if verbose:
+            buffer_analysis = llm_output.get("buffer_analysis", "No analysis provided")
+            selection_reasoning = llm_output.get("selection_reasoning", "No reasoning provided")
+            print_color(f"Buffer Analysis: {buffer_analysis}", "cyan")
+            print_color(f"Selection Reasoning: {selection_reasoning}", "cyan")
+
+        # Process selection
+        is_new = selected_candidate_info.get("is_new", False)
+        selected_index = selected_candidate_info.get("index", 0)
+        new_parameters = selected_candidate_info.get("parameters", {})
+        
+        if is_new and len(new_parameters) > 0:
+            # Selected a new candidate - need to create buffer entry
+            try:
+                # Validate parameter structure for lists (same as in other generators)
+                list_param_data = None
+                for key, value in new_parameters.items():
+                    if isinstance(value, list):
+                        list_param_data = value
+                        break
+                
+                if self.num_tools is None:
+                    params_dict = buffer[0]['params']
+                    for param_node, param_value in params_dict.items():
+                        if isinstance(param_value, list):
+                            self.num_tools = len(param_value)
+                            break
+                    
+                if list_param_data and len(list_param_data) != self.num_tools:
+                    if verbose:
+                        print_color(f"New candidate has invalid list parameter length {len(list_param_data)}, expected {self.num_tools}. Falling back to best existing.", "yellow")
+                    return default_entry
+                
+                # Convert parameters to correct format
+                candidate_params_dict = self.construct_update_dict(new_parameters)
+                
+                # Create new buffer entry
+                new_candidate_entry = {
+                    "params": candidate_params_dict,
+                    "score_sum": 0.0,
+                    "eval_count": 0,
+                    "mean_score": None,
+                    "ucb_score": None,
+                    "lcb_score": None
+                }
+                
+                # Add to buffer
+                buffer.append(new_candidate_entry)
+                
+                if verbose:
+                    print_color(f"Selected NEW candidate:", "green")
+                    for param_node, param_value in candidate_params_dict.items():
+                        if isinstance(param_value, str):
+                            print_color(f"  {param_node.py_name}: {param_value}", "green")
+                
+                return new_candidate_entry
+                
+            except Exception as e:
+                if verbose:
+                    print_color(f"Error creating new candidate: {e}. Falling back to best existing.", "yellow")
+                return default_entry
+                
+        elif not is_new and 0 <= selected_index < len(buffer):
+            # Selected existing candidate
+            selected_entry = buffer[selected_index]
+            if verbose:
+                print_color(f"Selected EXISTING candidate {selected_index}", "green")
+            
+            return selected_entry
+            
+        else:
+            # Invalid selection
+            if verbose:
+                print_color("Invalid candidate selection. Falling back to best existing.", "yellow")
+            return default_entry
