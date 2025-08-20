@@ -78,8 +78,9 @@ class BAIAlgorithmBase(AlgorithmBase):
         # 2. Best candidate identification. At each epoch, we will do some evaluation using sample budget, update the buffer statistics, and output the best candidate for test.
         self.print_buffer_statistics()
         self.num_epochs = num_epochs
+        self.epoch = 0
         for epoch in range(num_epochs):
-
+            self.epoch = epoch
             print_color(f"Epoch {epoch+1}/{num_epochs}", "blue")
             # Evaluate the best candidate at this epoch and update the buffer statistics.
             best_candidate_at_this_epoch, used_sample_budget = self.step(guide, validate_dataset, num_threads, **kwargs)
@@ -91,7 +92,7 @@ class BAIAlgorithmBase(AlgorithmBase):
                 set_parameters_for_agent(self.agent, best_candidate_at_this_epoch['params'])
                 test_score = evaluate_agent(self.agent, guide, test_dataset, num_threads=num_threads, num_eval_times=5)
                 self.logger.log("Test score", test_score,epoch+1,color='green')
-                self.logger.log("Vaidate score", best_candidate_at_this_epoch['mean_score'],epoch+1,color='green')
+                self.logger.log("Validate score", best_candidate_at_this_epoch['mean_score'],epoch+1,color='green')
         
     def step(self, guide, validate_dataset, num_threads, **kwargs):
         """The best candidate identification step. At each epoch, we will do some evaluation using sample budget, update the buffer statistics, and output the best candidate for test. The output should be the entry of the best candidate in the buffer and the used sample budget."""
@@ -724,8 +725,240 @@ Return ONLY the JSON object with your analysis and selection.
             if verbose:
                 print_color("LLM regression output invalid; falling back to best existing candidate", "yellow")
             return default_entry
+    def predict_scores(self, buffer, verbose: bool = False, temperature: float = 0.0):
+        """
+        Predict scores for all candidates in the buffer.
+        This function is almost the same as llm_regressor, but it will not return the selected candidate. 
         
-class LLMGenerator(LLMRegressionModel):
+        Args:
+            buffer: List of candidate entries with parameters and statistics
+            verbose: Whether to print verbose output and debugging information
+            temperature: Temperature parameter for LLM sampling (0.0 = deterministic, higher = more random)
+            
+        Returns:
+            np.array: Vector of predicted scores, defaults to mean scores if LLM fails
+        """
+        
+        # Prepare serializable candidate summaries with parameters
+        serializable_candidate_summaries = []
+        self.update_buffer_scores()
+        for idx, cand_entry in enumerate(buffer):
+            summary = {
+                "index": idx,
+                "parameters": {k.py_name: v for k,v in cand_entry['params'].items()},
+                "eval_count": cand_entry['eval_count'],
+                "mean_score": cand_entry['mean_score'],
+                "ucb_score": cand_entry.get('ucb_score', None),
+                "lcb_score": cand_entry.get('lcb_score', None)
+            }
+            serializable_candidate_summaries.append(summary)
+        candidate_summaries_json = json.dumps(serializable_candidate_summaries, indent=2)
+        
+        example_param_schema_json = json.dumps({p.py_name: copy.deepcopy(p.data) for p in self.agent.parameters()}, indent=2)
+
+        # Create the score prediction prompt (always with score estimation enabled)
+        example_format = '''{{
+  "buffer_analysis": "Parameter-Performance Learning: Analyzed 5 candidates with varying evaluation data. Pattern Analysis: Candidates with detailed parameter content (>500 chars) show higher performance trends. Parameter descriptions with specific examples correlate with better outcomes (+0.12 average boost). Comprehensive structure emphasis adds performance value (+0.08). Statistical Patterns: Higher eval_count candidates show more reliable score patterns, but parameter quality remains primary predictor across all candidates.",
+  "score_estimates": {{
+    "0": {{"reasoning": "Parameter analysis: comprehensive parameter content (650 chars), detailed descriptions, strong structure. Current data shows mean_score=0.75 with eval_count=25. Parameter quality strongly matches high-performance patterns. Predicted score reflects excellent parameter characteristics with confidence from existing data.", "predicted_score": 0.74}},
+    "1": {{"reasoning": "Parameter analysis: moderate parameter content (400 chars), basic descriptions, minimal detail. Current data shows mean_score=0.65 with eval_count=30. Parameter patterns suggest mid-range performance, consistent with observed data. Missing key high-performance characteristics.", "predicted_score": 0.68}},
+    "2": {{"reasoning": "Parameter analysis: excellent parameter focus (700+ chars), comprehensive examples, strong structure. Current data shows mean_score=0.82 with eval_count=8. Parameter quality strongly indicates high performance potential. Prediction based on strong parameter-performance correlation patterns.", "predicted_score": 0.79}},
+    "3": {{"reasoning": "Parameter analysis: good parameter content (580 chars), decent examples, some structure. Limited evaluation data (eval_count=0) but parameter patterns similar to high-performing candidates. Predicted score based on parameter similarity analysis and learned performance patterns.", "predicted_score": 0.71}},
+    "4": {{"reasoning": "Parameter analysis: basic parameter content (350 chars), minimal examples, limited structure. No evaluation data yet (eval_count=0) but parameter patterns match lower-performing profiles. Predicted score reflects weaker parameter characteristics based on learned patterns.", "predicted_score": 0.63}}
+  }}
+}}'''
+
+        prompt_messages = [
+            {
+                "role": "system",
+                "content": f"""
+{self.domain_context}
+
+## Core Capabilities
+1. **Pattern Learning**: Identify which parameter characteristics correlate with high/low performance
+2. **Score Prediction**: Predict scores for candidates based on their parameters
+3. **Statistical Analysis**: Account for noise and confidence intervals in existing data
+4. **Extrapolation**: Predict scores for new candidates by comparing their parameters to evaluated ones
+
+## Input Data Analysis
+You receive candidates with:
+- **Parameters**: Configuration settings and instructions for each candidate
+- **Statistics**: Candidates may have varying amounts of evaluation data (eval_count, mean_score, UCB/LCB bounds)
+- **Data Variance**: Some candidates have extensive evaluation history, others have limited or no evaluation data
+
+## Learning Objectives
+**Learn parameter-performance patterns**:
+- Which parameter characteristics correlate with higher performance?
+- What content patterns, style, and structure work best?
+- How do different parameter approaches affect outcomes?
+
+**Apply patterns to predict scores**:
+- Use learned patterns to predict performance for all candidates
+- Consider both parameter quality and existing evaluation data
+- Make predictions based on parameter-performance correlations
+
+## Required Analysis Process
+
+### Step 1: Parameter-Performance Pattern Learning
+Analyze all candidates to identify performance patterns:
+- **High-performing patterns**: What parameter characteristics correlate with better performance?
+- **Low-performing patterns**: What characteristics correlate with weaker performance?
+- **Content analysis**: Specific words, phrases, structures that correlate with scores
+- **Length patterns**: How parameter length and detail level affect performance
+- **Style patterns**: Detailed vs concise, formal vs conversational, structured vs flexible
+
+### Step 2: Score Prediction for All Candidates
+For each candidate, predict performance based on:
+- **Parameter analysis**: Evaluate parameter quality using learned patterns
+- **Existing data integration**: Incorporate available evaluation statistics when present
+- **Pattern matching**: Compare parameters to successful patterns identified
+- **Confidence assessment**: How confident are you in each prediction based on pattern strength?
+- **Reasoning**: Explain your prediction based on parameter-performance correlations
+
+## Prediction Strategy
+When predicting scores for all candidates:
+1. **Identify parameter patterns**: What patterns do you see across all candidates?
+2. **Correlate with performance**: How do parameter characteristics relate to observed performance?
+3. **Apply patterns consistently**: Use learned patterns to predict scores for all candidates
+4. **Weight evidence appropriately**: Balance parameter analysis with existing evaluation data
+5. **Justify predictions**: Explain reasoning based on parameter-performance patterns
+
+## Output Requirements
+Return ONLY a JSON object with these fields:
+- "buffer_analysis": string analyzing parameter-performance patterns across all candidates. Focus on identifying what parameter characteristics correlate with performance, considering both parameter quality and available evaluation data.
+- "score_estimates": object mapping candidate indices to predicted scores with detailed reasoning
+
+## Example Output Format
+{example_format}
+""",
+            },
+            {
+                "role": "user", 
+                "content": f"""
+## Candidate Data
+{candidate_summaries_json}
+
+## Parameter Schema
+{example_param_schema_json}
+
+## Task
+Analyze parameter-performance patterns across all candidates and predict scores for each candidate. Use pattern-based predictions to estimate scores for all candidates, focusing on parameter characteristics that correlate with performance.
+
+Return ONLY the JSON object with your analysis and score predictions.
+""",
+            },
+        ]
+        
+        response_format = {"type": "json_object"}
+        
+        # Single LLM call with internal backoff handled by helper
+        def llm_call():
+            return self.llm(prompt_messages, response_format=response_format, temperature=temperature)
+            
+        llm_response = retry_with_exponential_backoff(
+            llm_call,
+            max_retries=10,
+            base_delay=1.0,
+            operation_name="LLM score prediction"
+        )
+        
+        # Default fallback: return mean scores from buffer statistics
+        default_scores = np.array([c.get('mean_score', 0.0) for c in buffer])
+        
+        if llm_response is None:
+            if verbose:
+                print_color("LLM score prediction call failed after retries. Returning mean scores.", "yellow")
+            return default_scores
+
+        llm_response_str = getattr(getattr(llm_response, 'choices', [{}])[0], 'message', None)
+        llm_response_str = getattr(llm_response_str, 'content', None)
+        if not llm_response_str:
+            if verbose:
+                print_color("LLM returned empty response for score prediction.", "yellow")
+            return default_scores
+
+        cleaned_llm_response_str = llm_response_str.strip()
+        
+        if verbose:
+            self.print_buffer_statistics()
+            print_color(f"LLM Score Prediction (temperature={temperature}): {cleaned_llm_response_str}", "cyan")
+            
+        try:
+            llm_output = json.loads(cleaned_llm_response_str)
+        except json.JSONDecodeError:
+            if verbose:
+                print_color("Failed to parse LLM score prediction JSON output.", "yellow")
+            return default_scores
+
+        if not isinstance(llm_output, dict):
+            return default_scores
+
+        # Extract score estimates
+        score_estimates = llm_output.get("score_estimates", {})
+        
+        if verbose:
+            buffer_analysis = llm_output.get("buffer_analysis", "No analysis provided")
+            print_color(f"Buffer Analysis: {buffer_analysis}", "cyan")
+            print_color(f"Score Estimates: {score_estimates}", "blue")
+
+        # Convert score estimates to numpy array
+        predicted_scores = []
+        for idx in range(len(buffer)):
+            candidate_key = str(idx)
+            if candidate_key in score_estimates:
+                try:
+                    predicted_score = score_estimates[candidate_key].get("predicted_score", buffer[idx].get('mean_score', 0.0))
+                    predicted_scores.append(float(predicted_score))
+                except (ValueError, TypeError):
+                    # Fallback to mean score if prediction is invalid
+                    print_color(f"Invalid predicted score for candidate {idx}: {score_estimates[candidate_key]}", "yellow")
+                    predicted_scores.append(buffer[idx].get('mean_score', 0.0))
+            else:
+                # Fallback to mean score if no prediction available
+                print_color(f"No predicted score for candidate {idx}", "yellow")
+                predicted_scores.append(buffer[idx].get('mean_score', 0.0))
+        
+        predicted_scores_array = np.array(predicted_scores)
+        
+        if verbose:
+            print_color(f"Predicted scores: {predicted_scores_array}", "green")
+            print_color(f"Mean scores (fallback): {default_scores}", "yellow")
+            
+        return predicted_scores_array
+
+class LLMThompsonSampling(LLMRegressionModel):
+    def __init__(self, agent, num_threads, logger, update_dicts, enable_estimate_scores=False, domain_context=None,enable_using_regressor=False, temperature=0.0, *args, **kwargs):
+        super().__init__(agent, num_threads, logger, update_dicts, enable_estimate_scores, domain_context,enable_using_regressor, *args, **kwargs)
+        self.temperature = temperature
+    def llm_regressor(self, buffer, verbose: bool = False):
+        """
+        1. Given the history, compute the estimate on the candidates in the history.
+        2. Choose the candidate with the highest score.
+        """
+        predicted_scores = self.predict_scores(buffer, verbose=True,temperature=self.temperature)
+        print_color(f"Predicted scores with temperature {self.temperature}: {predicted_scores}", "cyan")
+        
+        # Find the index of the highest predicted score
+        best_index = np.argmax(predicted_scores)
+        selected_entry = buffer[best_index]
+
+        # The following is for debugging. We want to show what the predicted scores are for different temperatures. Especially, we want to show the effect of temperature on the predicted scores of candidates without any score.
+        # num_predict = 5
+        # for _ in range(num_predict):
+        #     predicted_scores = self.predict_scores(buffer, verbose=False,temperature=0)
+        #     print_color(f"Predicted scores with temperature 0: {predicted_scores}", "cyan")
+        # for _ in range(num_predict):
+        #     predicted_scores = self.predict_scores(buffer, verbose=False,temperature=0.5)
+        #     print_color(f"Predicted scores with temperature 0.5: {predicted_scores}", "cyan")
+        # for _ in range(num_predict):
+        #     predicted_scores = self.predict_scores(buffer, verbose=False,temperature=1)
+        #     print_color(f"Predicted scores with temperature 1: {predicted_scores}", "cyan")
+        # for _ in range(num_predict):
+        #     predicted_scores = self.predict_scores(buffer, verbose=False,temperature=2)
+        #     print_color(f"Predicted scores with temperature 2: {predicted_scores}", "cyan")
+        return selected_entry
+        
+class LLMGenerator(LLMThompsonSampling):
     "Ask LLM to come up with more candidates."
         
     def llm_generator(self, buffer, verbose: bool = False, num_to_generate: int = 1):
@@ -1339,6 +1572,373 @@ Return ONLY the JSON object following the exact format shown in the example.
             if verbose:
                 print_color("Invalid candidate selection. Falling back to best existing.", "yellow")
             return default_entry
+        
+class LLMTS_onecall(LLMRegressionModel):
+    """Do the same thing as LLMThompsonSampling, but in one call to the LLM.
+    """
+    def __init__(self, agent, num_threads, logger, update_dicts, enable_estimate_scores=False, domain_context=None,enable_using_regressor=False, temperature=0.0, *args, **kwargs):
+        super().__init__(agent, num_threads, logger, update_dicts, enable_estimate_scores, domain_context,enable_using_regressor, *args, **kwargs)
+        self.temperature = temperature
+    
+    
+    def llm_generate_candidate(self, buffer, verbose: bool = False):
+        """
+        Combined generation and score prediction in one LLM call, then select highest scoring candidate.
+        
+        1. Generate new candidates based on current buffer
+        2. Predict scores for all candidates (existing + new)
+        3. Programmatically select candidate with highest predicted score
+        4. If new candidate selected, add to buffer
+        
+        Output: selected candidate entry.
+        """
+        # Calculate budget information
+        # total_budget = self.num_epochs * self.horizon
+        # used_budget = self.selection_count
+        # remaining_budget = total_budget - used_budget
+        
+        
+        # Prepare serializable candidate summaries for existing candidates
+        serializable_candidate_summaries = []
+        self.update_buffer_scores()
+        for idx, cand_entry in enumerate(buffer):
+            summary = {
+                "index": idx,
+                "parameters": {k.py_name: v for k,v in cand_entry['params'].items()},
+                "eval_count": cand_entry['eval_count'],
+                "mean_score": cand_entry['mean_score'],
+                "ucb_score": cand_entry.get('ucb_score', None),
+                "lcb_score": cand_entry.get('lcb_score', None)
+            }
+            serializable_candidate_summaries.append(summary)
+        candidate_summaries_json = json.dumps(serializable_candidate_summaries, indent=2)
+        
+        example_param_schema_json = json.dumps({p.py_name: copy.deepcopy(p.data) for p in self.agent.parameters()}, indent=2)
+
+        # Create the combined prompt
+        prompt_messages = [
+            {
+                "role": "system",
+                "content": f"""
+{self.domain_context}
+
+## Combined Task: Generation + Score Prediction
+
+You will perform two tasks in sequence:
+
+### Task 1: Generate New Candidates
+Based on current buffer analysis, generate 3 diverse new candidates that could outperform existing ones.
+
+#### Critical Analysis Framework
+Before generating candidates, you MUST:
+
+**Step 1: Failure Pattern Analysis**
+- Identify specific failure modes in current candidates
+- Quantify performance gaps and analyze parameter weaknesses
+- Understand what causes poor performance
+
+**Step 2: Success Pattern Extraction**  
+- Identify what works in higher-performing candidates
+- Extract transferable patterns and understand performance drivers
+- Find successful approaches that can be enhanced
+
+**Step 3: Strategic Diversification**
+Each new candidate must target a DIFFERENT performance bottleneck:
+- Candidate 1: Address the #1 failure pattern identified
+- Candidate 2: Enhance the #1 success pattern found
+- Candidate 3: Target a completely unexplored approach
+
+#### Mandatory Diversity Requirements
+**CRITICAL - EACH CANDIDATE MUST BE FUNDAMENTALLY DIFFERENT**:
+- Different core strategies and parameter structures
+- Different performance targets (accuracy vs efficiency vs robustness)
+- Different risk profiles (conservative vs aggressive, detailed vs streamlined)
+
+**VALIDATION CHECK**: If any two candidates could be described with similar adjectives, they are TOO SIMILAR.
+
+### Task 2: Score Prediction
+Using parameter-performance patterns, predict scores for ALL candidates (existing + newly generated):
+
+#### Pattern Learning Process
+- Analyze parameter characteristics that correlate with performance
+- Learn from existing evaluation data and parameter quality
+- Apply patterns consistently to predict scores for all candidates
+
+#### Prediction Strategy
+- Use learned patterns to predict performance for all candidates
+- Consider both parameter quality and existing evaluation data
+- Make predictions based on parameter-performance correlations
+
+
+## Output Requirements
+Return ONLY a JSON object with these fields:
+- "buffer_analysis": string with failure patterns, success patterns, and performance gaps analysis
+- "generated_candidates": array of 3 objects, each with:
+  - "reasoning": string explaining the SPECIFIC performance problem this candidate solves
+  - "diversity_focus": string describing the UNIQUE strategy that makes this candidate different
+  - "parameters": object with parameter values (matching schema exactly)
+- "score_estimates": object mapping ALL candidate indices (existing + new) to predicted scores with reasoning
+
+## NON-NEGOTIABLE CONSTRAINTS
+**CRITICAL - VIOLATIONS WILL CAUSE REJECTION**:
+
+### Parameter Structure Requirements
+- Use ONLY the parameter keys provided in the schema
+- All parameter values must be strings
+- Include ALL required parameters, no omissions allowed
+- Follow consistent naming and structure conventions
+
+### Content Quality Requirements  
+- Concrete specificity: Avoid vague phrases
+- Actionable instructions: Provide clear, executable guidance
+- Practical relevance: Content must be applicable to the optimization domain
+- Length appropriateness: Match expected parameter length patterns
+
+### Diversity Enforcement
+- Each candidate must solve a DIFFERENT core problem
+- No two candidates should have similar methodologies
+- Significantly different parameter organization and emphasis
+
+## Example Output Format
+{{
+  "buffer_analysis": "FAILURE ANALYSIS: Candidate 0 (score 0.45) fails due to vague parameter descriptions - causes 40% implementation errors. SUCCESS ANALYSIS: Candidate 2 (score 0.78) succeeds with structured examples. PERFORMANCE GAPS: No candidates address edge cases, missing systematic error recovery.",
+  "generated_candidates": [
+    {{
+      "reasoning": "TARGETS FAILURE MODE: Implementation errors (40% of failures). This candidate provides concrete examples and validation steps.",
+      "diversity_focus": "Precision specialist: Exhaustive examples with validation",
+      "parameters": {{
+        "param1": "Each operation includes concrete examples with exact formats...",
+        "param2": "CRITICAL: Verify all inputs before execution..."
+      }}
+    }},
+    {{
+      "reasoning": "ENHANCES SUCCESS PATTERN: Builds on structured approach but optimizes for multi-step processes.",
+      "diversity_focus": "Process orchestration expert: Multi-step optimization with checkpoints",
+      "parameters": {{
+        "param1": "For complex processes, break into phases with validation...",
+        "param2": "PROCESS PROTOCOL: Confirm each step completion..."
+      }}
+    }},
+    {{
+      "reasoning": "ADDRESSES UNEXPLORED AREA: Edge case handling (15% of failures).",
+      "diversity_focus": "Robustness guardian: Edge case handling with exception management",
+      "parameters": {{
+        "param1": "Check boundary conditions and edge cases before operations...",
+        "param2": "ROBUSTNESS FIRST: Handle exceptions gracefully..."
+      }}
+    }}
+  ],
+  "score_estimates": {{
+    "0": {{"reasoning": "Parameter analysis shows vague descriptions. Current score 0.45 matches pattern of poor parameter quality.", "predicted_score": 0.47}},
+    "1": {{"reasoning": "Structured parameters with good examples. Score 0.78 reflects excellent parameter-performance correlation.", "predicted_score": 0.76}},
+    "new_0": {{"reasoning": "Precision-focused approach with concrete examples should address main failure mode. Predicted high performance.", "predicted_score": 0.82}},
+    "new_1": {{"reasoning": "Process optimization builds on successful patterns. Expected strong performance.", "predicted_score": 0.79}},
+    "new_2": {{"reasoning": "Edge case handling addresses unexplored area. Moderate improvement expected.", "predicted_score": 0.73}}
+  }}
+}}
+""",
+            },
+            {
+                "role": "user",
+                "content": f"""
+## Current Buffer Data
+{candidate_summaries_json}
+
+## Parameter Schema
+Use exactly these parameter keys; values must be strings:
+{example_param_schema_json}
+
+## Task
+Perform the combined generation + score prediction process:
+1. Analyze current buffer and generate 3 diverse new candidates
+2. Predict scores for all candidates (existing + new) using parameter-performance patterns
+
+Return ONLY the JSON object following the exact format shown in the example.
+""",
+            },
+        ]
+        
+        response_format = {"type": "json_object"}
+        
+        # Single LLM call
+        def llm_call():
+            return self.llm(prompt_messages, response_format=response_format, temperature=self.temperature)
+            
+        if verbose:
+            print("LLMTS_onecall candidates in prompt: ", candidate_summaries_json)
+            
+        llm_response = retry_with_exponential_backoff(
+            llm_call,
+            max_retries=10,
+            base_delay=1.0,
+            operation_name="LLM Thompson Sampling one call"
+        )
+        
+        # Default fallback
+        default_entry = max(buffer, key=lambda c: c['mean_score'])
+        
+        if llm_response is None:
+            if verbose:
+                print_color("LLM Thompson Sampling call failed after retries. Returning highest scoring candidate.", "yellow")
+            return default_entry
+
+        llm_response_str = getattr(getattr(llm_response, 'choices', [{}])[0], 'message', None)
+        llm_response_str = getattr(llm_response_str, 'content', None)
+        if not llm_response_str:
+            if verbose:
+                print_color("LLM returned empty response.", "yellow")
+            return default_entry
+
+        cleaned_llm_response_str = llm_response_str.strip()
+        
+        if verbose:
+            print_color(f"LLM Thompson Sampling response (temperature={self.temperature}): {cleaned_llm_response_str}", "cyan")
+            
+        try:
+            llm_output = json.loads(cleaned_llm_response_str)
+        except json.JSONDecodeError:
+            if verbose:
+                print_color("Failed to parse LLM Thompson Sampling JSON output.", "yellow")
+            return default_entry
+
+        if not isinstance(llm_output, dict):
+            return default_entry
+
+        # Extract components
+        generated_candidates = llm_output.get("generated_candidates", [])
+        score_estimates = llm_output.get("score_estimates", {})
+        
+        if verbose:
+            buffer_analysis = llm_output.get("buffer_analysis", "No analysis provided")
+            print_color(f"Buffer Analysis: {buffer_analysis}", "cyan")
+            print_color(f"Generated {len(generated_candidates)} new candidates", "green")
+            print_color(f"Score Estimates: {score_estimates}", "blue")
+
+        # Collect all candidates with their predicted scores
+        all_candidates = []
+        
+        # Add existing candidates with their predicted scores
+        for idx, candidate_entry in enumerate(buffer):
+            candidate_key = str(idx)
+            predicted_score = score_estimates.get(candidate_key, {}).get("predicted_score", candidate_entry.get('mean_score', 0.0))
+            try:
+                predicted_score = float(predicted_score)
+            except (ValueError, TypeError):
+                predicted_score = candidate_entry.get('mean_score', 0.0)
+            
+            all_candidates.append({
+                "type": "existing",
+                "index": idx,
+                "entry": candidate_entry,
+                "predicted_score": predicted_score
+            })
+        
+        # Process and add new candidates with their predicted scores
+        valid_new_candidates = []
+        for i, candidate_data in enumerate(generated_candidates):
+            try:
+                parameters_raw = candidate_data.get("parameters", {})
+                reasoning = candidate_data.get("reasoning", "No reasoning provided")
+                diversity_focus = candidate_data.get("diversity_focus", "No diversity focus provided")
+                
+                # Validate parameter structure consistency
+                list_param_data = None
+                for key, value in parameters_raw.items():
+                    if isinstance(value, list):
+                        list_param_data = value
+                        break
+                
+                if self.num_tools is None:
+                    params_dict = buffer[0]['params']
+                    for param_node, param_value in params_dict.items():
+                        if isinstance(param_value, list):
+                            self.num_tools = len(param_value)
+                            break
+                    
+                # Check whether list parameter contains the same number of items as expected
+                if list_param_data:
+                    if len(list_param_data) != self.num_tools:
+                        if verbose:
+                            print_color(f"Skipping new candidate {i}: list parameter contains {len(list_param_data)} items, expected {self.num_tools}", "yellow")
+                        continue
+                
+                # Convert parameters to the correct format
+                candidate_params_dict = self.construct_update_dict(parameters_raw)
+
+                # Create new buffer entry
+                new_candidate_entry = {
+                    "params": candidate_params_dict,
+                    "score_sum": 0.0,
+                    "eval_count": 0,
+                    "mean_score": None,
+                    "ucb_score": None,
+                    "lcb_score": None
+                }
+                
+                # Get predicted score for this new candidate
+                new_candidate_key = f"new_{i}"
+                predicted_score = score_estimates.get(new_candidate_key, {}).get("predicted_score", 0.0)
+                try:
+                    predicted_score = float(predicted_score)
+                except (ValueError, TypeError):
+                    predicted_score = 0.0
+                
+                valid_new_candidates.append({
+                    "type": "new",
+                    "index": i,
+                    "entry": new_candidate_entry,
+                    "predicted_score": predicted_score,
+                    "reasoning": reasoning,
+                    "diversity_focus": diversity_focus
+                })
+                
+                all_candidates.append({
+                    "type": "new",
+                    "index": i,
+                    "entry": new_candidate_entry,
+                    "predicted_score": predicted_score,
+                    "reasoning": reasoning,
+                    "diversity_focus": diversity_focus
+                })
+
+                if verbose:
+                    print_color(f"Valid new candidate {i}:", "blue")
+                    print_color(f"  Reasoning: {reasoning}", "blue")
+                    print_color(f"  Diversity Focus: {diversity_focus}", "blue")
+                    print_color(f"  Predicted Score: {predicted_score}", "blue")
+
+            except Exception as e:
+                if verbose:
+                    print_color(f"Error processing new candidate {i}: {e}", "yellow")
+                continue
+
+        # Find the candidate with the highest predicted score
+        if not all_candidates:
+            if verbose:
+                print_color("No valid candidates found. Returning default.", "yellow")
+            return default_entry
+        
+        best_candidate = max(all_candidates, key=lambda x: x['predicted_score'])
+        
+        predicted_scores = [float(c['predicted_score']) for c in all_candidates]
+        buffer_scores = [float(c['mean_score']) if c['mean_score'] is not None else 0.0 for c in buffer]
+        if verbose:
+            print_color(f"Buffer scores: {buffer_scores}", "cyan")
+            print_color(f"Predicted scores with temperature {self.temperature}: {predicted_scores}", "cyan")
+            print_color(f"Best candidate type: {best_candidate['type']}, predicted score: {best_candidate['predicted_score']}", "green")
+        
+        # If the best candidate is new, add it to the buffer
+        if best_candidate['type'] == 'new':
+            buffer.append(best_candidate['entry'])
+            if verbose:
+                print_color(f"Selected NEW candidate {best_candidate['index']} with predicted score {best_candidate['predicted_score']}", "green")
+                print_color(f"  Reasoning: {best_candidate.get('reasoning', 'N/A')}", "green")
+                print_color(f"  Diversity Focus: {best_candidate.get('diversity_focus', 'N/A')}", "green")
+        else:
+            if verbose:
+                print_color(f"Selected EXISTING candidate {best_candidate['index']} with predicted score {best_candidate['predicted_score']}", "green")
+        
+        return best_candidate['entry']
 
 class LLMSimpleGenerator(LLMRegressionModel):
     """Simple generator that only calls the LLM once to generate candidates.
@@ -1635,3 +2235,4 @@ Return ONLY the JSON object following the exact format shown in the examples.
             if verbose:
                 print_color("Invalid candidate selection. Falling back to best existing.", "yellow")
             return default_entry
+        
