@@ -935,7 +935,13 @@ class LLMThompsonSampling(LLMRegressionModel):
         1. Given the history, compute the estimate on the candidates in the history.
         2. Choose the candidate with the highest score.
         """
-        predicted_scores = self.predict_scores(buffer, verbose=True,temperature=self.temperature)
+        # decrease temperature as the number of epochs increases.
+        temperature = 2 - 2 * np.sqrt(self.epoch / self.num_epochs)
+        predicted_scores = self.predict_scores(buffer, verbose=True,temperature=temperature)
+        
+
+
+
         print_color(f"Predicted scores with temperature {self.temperature}: {predicted_scores}", "cyan")
         
         # Find the index of the highest predicted score
@@ -957,8 +963,11 @@ class LLMThompsonSampling(LLMRegressionModel):
         #     predicted_scores = self.predict_scores(buffer, verbose=False,temperature=2)
         #     print_color(f"Predicted scores with temperature 2: {predicted_scores}", "cyan")
         return selected_entry
-        
-class LLMGenerator(LLMThompsonSampling):
+
+# For fixed buffer, we have two versions of the regressor.
+# 1. LLMThompsonSampling: use LLM to predict scores, then Thompson sampling to select the candidate with the highest predicted score.
+# 2. LLMRegressionModel: use LLM to predict scores, then reasoning to select a candidate.
+class LLMGenerator(LLMRegressionModel):
     "Ask LLM to come up with more candidates."
         
     def llm_generator(self, buffer, verbose: bool = False, num_to_generate: int = 1):
@@ -2235,4 +2244,4 @@ Return ONLY the JSON object following the exact format shown in the examples.
             if verbose:
                 print_color("Invalid candidate selection. Falling back to best existing.", "yellow")
             return default_entry
-        
+    
