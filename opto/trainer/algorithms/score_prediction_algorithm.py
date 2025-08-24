@@ -433,47 +433,75 @@ class Embedding_Regression(ScorePrediction_half_buffer):
     
     def _update_regression_model(self):
         """
-        Update the embedding linear regression model using SGD.
-        Only processes new data points since last update (incremental learning).
+        Update the embedding linear regression model using closed-form solution.
+        Uses all data in self.raw_data to compute optimal weights and bias analytically.
         """
         if len(self.raw_data) == 0:
             return
         
-        # Check if we have new data to process
-        if len(self.raw_data) <= self.processed_data_count:
-            return  # No new data
+        # Collect all embeddings and scores from raw_data
+        embeddings = []
+        scores = []
         
-        # Process only the new data points (typically just the last one)
-        new_data_points = self.raw_data[self.processed_data_count:]
+        for data_entry in self.raw_data:
+            embeddings.append(data_entry["embedding"])
+            scores.append(data_entry["score"])
         
-        for data_entry in new_data_points:
-            embedding = np.array(data_entry["embedding"])
-            true_score = data_entry["score"]
-            
-            # Forward pass: predict score with current weights
-            predicted_score = np.dot(self.weights, embedding) + self.bias
-            
-            # Compute error
-            error = predicted_score - true_score
-            
-            # SGD update: gradients for linear regression
-            # Loss = 0.5 * (predicted - true)^2
-            # dL/dw = error * embedding
-            # dL/db = error
-            
-            # Update weights and bias
-            self.weights -= self.learning_rate * error * embedding
-            self.bias -= self.learning_rate * error
+        # Convert to numpy arrays
+        X = np.array(embeddings)  # Shape: (n_samples, n_features)
+        y = np.array(scores)      # Shape: (n_samples,)
         
-        # Update the count of processed data points
+        # Add bias column to X for closed-form solution
+        # X_with_bias = [X | 1] where 1 is a column of ones
+        X_with_bias = np.column_stack([X, np.ones(X.shape[0])])
+        
+        try:
+            # Closed-form solution: (X^T X)^(-1) X^T y
+            # This gives us [weights, bias] in one solution
+            XtX = X_with_bias.T @ X_with_bias
+            Xty = X_with_bias.T @ y
+            coefficients = np.linalg.solve(XtX, Xty)
+            
+            self.weights = coefficients[:-1]  # All but last coefficient
+            self.bias = coefficients[-1]     # Last coefficient is bias
+            
+            # Calculate training error for monitoring
+            y_pred = X @ self.weights + self.bias
+            mse = np.mean((y - y_pred) ** 2)
+            
+            print_color(f"Closed-form regression updated:", "green")
+            print_color(f"  Training samples: {len(self.raw_data)}", "green")
+            print_color(f"  Weights norm: {np.linalg.norm(self.weights):.4f}", "green")
+            print_color(f"  Bias: {self.bias:.4f}", "green")
+            print_color(f"  Training MSE: {mse:.6f}", "green")
+            
+        except np.linalg.LinAlgError:
+            # If matrix is singular, use pseudo-inverse
+            print_color("Warning: Singular matrix, using pseudo-inverse", "yellow")
+            coefficients = np.linalg.pinv(X_with_bias) @ y
+            self.weights = coefficients[:-1]
+            self.bias = coefficients[-1]
+            
+            # Calculate training error
+            y_pred = X @ self.weights + self.bias
+            mse = np.mean((y - y_pred) ** 2)
+            print_color(f"Pseudo-inverse regression updated:", "yellow")
+            print_color(f"  Training samples: {len(self.raw_data)}", "yellow")
+            print_color(f"  Weights norm: {np.linalg.norm(self.weights):.4f}", "yellow")
+            print_color(f"  Bias: {self.bias:.4f}", "yellow")
+            print_color(f"  Training MSE: {mse:.6f}", "yellow")
+        
+        # Update processed count (though not used in closed-form)
         self.processed_data_count = len(self.raw_data)
     
     def _predict_single(self, embedding):
         """
         Predict score for a single embedding using linear regression.
         Score = weights^T * embedding + bias
+        Clips the prediction to [0, 1] range.
         """
-        return np.dot(self.weights, embedding) + self.bias
+        prediction = np.dot(self.weights, embedding) + self.bias
+        return np.clip(prediction, 0.0, 1.0)
     
     def predict_scores(self, buffer, verbose: bool = False, temperature: float = 0.0):
         """
