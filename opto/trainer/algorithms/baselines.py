@@ -1674,7 +1674,9 @@ class UCBAlgorithm(MinibatchAlgorithm):
                 candidate_entry['lcb_score'] = -np.inf
             else:
                 candidate_entry['ucb_score'] = candidate_entry['mean_score'] + self.exploration_factor * np.sqrt(np.log(self.total_samples) / candidate_entry['eval_count'] )
+                candidate_entry['ucb_score'] = np.clip(candidate_entry['ucb_score'], 0, 1)
                 candidate_entry['lcb_score'] = candidate_entry['mean_score'] - self.exploration_factor * np.sqrt(np.log(self.total_samples) / candidate_entry['eval_count'] )
+                candidate_entry['lcb_score'] = np.clip(candidate_entry['lcb_score'], 0, 1)
         return 
     
     def update(self, outputs, verbose=False, num_threads=None, **kwargs):
@@ -1783,7 +1785,7 @@ class UCBAlgorithm(MinibatchAlgorithm):
             if self.enable_control_variate:
                 new_score = new_score - score + selected_candidate_entry['mean_score']
                 # clip the new score to be between 0 and 1
-                new_score = np.clip(new_score, 0, 1)
+                # new_score = np.clip(new_score, 0, 1)
                 self.logger.log('New candidate controlled score', new_score, i+1, color='yellow')
 
             new_candidate_entry = {
