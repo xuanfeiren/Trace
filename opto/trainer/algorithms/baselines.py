@@ -1714,12 +1714,14 @@ class UCBAlgorithm(MinibatchAlgorithm):
         self.optimizer.zero_feedback()
         self.optimizer.backward(target, feedback)
         step_kwargs = dict(bypassing=True, verbose='output' if verbose else False)
-        while True: # retry until the new parameters are generated successfully
-            try:
-                new_update_dict = self.optimizer.step(**step_kwargs)
-                break
-            except Exception as e:
-                print_color(f"Error when generating new parameters: {e}", "red")
+
+        def optimizer_step_func():
+            return self.optimizer.step(**step_kwargs)
+        
+        new_update_dict = retry_with_exponential_backoff(
+            optimizer_step_func, 
+            operation_name="Optimizer step (UCB parameter generation)"
+        )
 
         return average_score, new_update_dict  # return the average score of the minibatch of inputs
     
