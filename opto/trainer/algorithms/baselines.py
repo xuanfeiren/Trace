@@ -1,6 +1,3 @@
-#TODO: Implement MinibatchwithValidation and IslandSearch Algorithms (Done)
-#TODO: log raw test scores and the final best candidate for each baseline algorithm (Done)
-#TODO: debug for IslandSearchAlgorithm
 import numpy as np
 import copy
 import time
@@ -322,8 +319,13 @@ class MinibatchAlgorithm(Minibatch):
             targets.append(target)
             feedbacks.append(feedback)
         target = batchify(*targets)
-        feedback = batchify(*feedbacks).data  # str
-        average_score = np.mean(scores) if all([s is not None for s in scores]) else None
+        feedback = batchify(*feedbacks).data  # 
+        # old version
+        # average_score = np.mean(scores) if all([s is not None for s in scores]) else None
+        # new version: using all non-None scores to compute the mean score.
+        valid_scores = [s for s in scores if s is not None]
+        # If all scores are None, return 0
+        average_score = np.mean(valid_scores) if valid_scores else 0
 
         # Update the agent using the feedback
         self.optimizer.zero_feedback()
@@ -1629,3 +1631,178 @@ class LearnFromSuccessAlgorithm(MinibatchAlgorithm):
         print_color(f"Training completed. Total successful conversations collected: {len(self.successful_conversations)}", 'blue')
         
         return self.successful_conversations
+    
+from opto.trainer.utils import evaluate_agent
+class UCBAlgorithm(MinibatchAlgorithm):
+    """
+    This is a search algorithm that uses the UCB score to select the candidate. At each epoch, the algorithm selects the candidate with the highest UCB score in the buffer, to do the forward process, and generate the next candidate. We have two options of estimating the score of the new candidate:
+    1. Using the control variate method to estimate the score of the new candidate. (when enable_control_variate is True)
+    2. Using the raw score of the new candidate. (when enable_control_variate is False)
+    """
+    def __init__(self, agent, optimizer, num_threads: int = None, logger=None,ucb_exploration_factor: float = 0.1, enable_control_variate: bool = False, *args, **kwargs):
+        super().__init__(agent, optimizer, num_threads=num_threads, logger=logger, *args, **kwargs)
+        self.buffer = deque(maxlen=500)
+        self.exploration_factor = ucb_exploration_factor
+        self.enable_control_variate = enable_control_variate
+        self.total_samples = 0
+        self.min_score = 0
+        # initialize the buffer with the initial parameter entry
+        initial_update_dict = {p: copy.deepcopy(p.data) for p in self.optimizer.parameters}
+        initial_candidate_entry = {
+            'params': initial_update_dict,
+            'score_sum': 0,
+            'eval_count': 0,
+        }
+        self.buffer.append(initial_candidate_entry)
+
+    def print_buffer_statistics(self):
+        """print the buffer statistics"""
+        print_color("Buffer statistics:", "magenta")
+        for i,candidate_entry in enumerate(self.buffer):            
+            # print the mean score and evaluation count, and confidence intervals.
+            print_color(f"Candidate {i}. Mean score {candidate_entry['mean_score']}, eval_count {candidate_entry['eval_count']}. Confidence interval: [{candidate_entry['lcb_score']} , {candidate_entry['ucb_score']}]", "green")
+            # for p in candidate_entry['params']:
+            #     print_color(f"Parameter value: {candidate_entry['params'][p]}", "cyan")
+        return 
+    
+    def update_buffer_scores(self):
+        """Update the buffer statistics."""
+        for candidate_entry in self.buffer:
+            candidate_entry['mean_score'] = candidate_entry['score_sum'] / (candidate_entry['eval_count'] or 1E-9)
+            if candidate_entry['eval_count'] == 0:
+                candidate_entry['ucb_score'] = np.inf
+                candidate_entry['lcb_score'] = -np.inf
+            else:
+                candidate_entry['ucb_score'] = candidate_entry['mean_score'] + self.exploration_factor * np.sqrt(np.log(self.total_samples) / candidate_entry['eval_count'] )
+                candidate_entry['lcb_score'] = candidate_entry['mean_score'] - self.exploration_factor * np.sqrt(np.log(self.total_samples) / candidate_entry['eval_count'] )
+        return 
+    
+    def update(self, outputs, verbose=False, num_threads=None, **kwargs):
+        """I made some modifications to the original update method.
+        The original update method is:
+        """
+        """ Subclasses can implement this method to update the agent.
+            Args:
+                outputs: returned value from self.step
+                verbose: whether to print the output of the agent
+                num_threads: maximum number of threads to use (overrides self.num_threads)
+            Returns:
+                score: average score of the minibatch of inputs
+
+        """
+
+        num_threads = num_threads or self.num_threads  # Use provided num_threads or fall back to self.num_threads
+
+        scores, targets, feedbacks = [], [], []
+        # Concatenate the targets and feedbacks into a single string
+        for target, score, feedback in outputs:
+            scores.append(score)
+            targets.append(target)
+            feedbacks.append(feedback)
+        target = batchify(*targets)
+        feedback = batchify(*feedbacks).data  # 
+        # old version
+        # average_score = np.mean(scores) if all([s is not None for s in scores]) else None
+        # new version: using all non-None scores to compute the mean score.
+        valid_scores = [s for s in scores if s is not None]
+        # If all scores are None, return 0
+        average_score = np.mean(valid_scores) if valid_scores else 0
+
+        # Update the agent using the feedback
+        self.optimizer.zero_feedback()
+        self.optimizer.backward(target, feedback)
+        step_kwargs = dict(bypassing=True, verbose='output' if verbose else False)
+        while True: # retry until the new parameters are generated successfully
+            try:
+                new_update_dict = self.optimizer.step(**step_kwargs)
+                break
+            except Exception as e:
+                print_color(f"Error when generating new parameters: {e}", "red")
+
+        return average_score, new_update_dict  # return the average score of the minibatch of inputs
+    
+    def train(self,
+              guide,
+              train_dataset,
+              *,
+              num_epochs: int = 1,  # number of training epochs
+              batch_size: int = 1,  # batch size for updating the agent
+              test_dataset = None,  # dataset of (x, info) pairs to evaluate the agent
+              eval_frequency: int = 5,  # frequency of evaluation
+              num_eval_samples: int = 5,  # number of samples to use to evaluate each input
+              log_frequency: Union[int, None] = None,  # frequency of logging
+              save_frequency: Union[int, None] = None,  # frequency of saving the agent
+              save_path: str = "checkpoints/agent.pkl",  # path to save the agent
+              min_score: Union[int, None] = None,  # minimum score to update the agent
+              verbose: Union[bool, str] = False,  # whether to print the output of the agent
+              num_threads: int = None,  # maximum number of threads to use (overrides self.num_threads)
+              **kwargs
+              ):
+        """
+            At each epoch, the algorithm will:
+            1. Forward the agent (using the parameter with the highest UCB score) on the inputs and compute the feedback using the guide.
+            2. Generate a new parameter using the optimizer.
+            3. Evaluate the agent on the test dataset and log the results.
+        """
+        # Initial evaluation
+        if eval_frequency > 0:
+            eval_scores = evaluate_agent(self.agent, guide, test_dataset, num_threads=num_threads, num_eval_times=num_eval_samples)
+            self.logger.log('Test score', eval_scores, 0, color='green')
+            self.logger.log('Total samples', self.total_samples, 0, color='cyan')
+
+        for i in range(num_epochs):
+            self.update_buffer_scores()
+            self.print_buffer_statistics()
+            # select the candidate with the highest UCB score
+            selected_candidate_entry = max(self.buffer, key=lambda x: x['ucb_score'])
+            self.optimizer.update(selected_candidate_entry['params'])
+            
+            # sample a minibatch from the train dataset
+            xs, infos = self._sample_minibatch(train_dataset, batch_size)
+            
+            forward = batch_run(max_workers=num_threads, description=f"Forward pass (batch size: {len(xs)})")(self.forward)
+            outputs = forward(self.agent, xs, guide, infos)
+
+            # Update the agent
+            score, new_update_dict = self.update(outputs, verbose=verbose, num_threads=num_threads, **kwargs)
+            self.total_samples += len(xs)
+            # update the buffer statistics of the current candidate
+            selected_candidate_entry['score_sum'] += score*len(xs)
+            selected_candidate_entry['eval_count'] += len(xs)
+
+            # evaluate the new candidate on the same minibatch
+            mini_batch = {'inputs': xs, 'infos': infos}
+            self.optimizer.update(new_update_dict)
+            new_score = evaluate_agent(self.agent, guide, mini_batch, num_threads=num_threads, num_eval_times=1)
+            self.total_samples += len(xs)
+            # log raw scores
+            self.logger.log('Train score', score, i+1, color='cyan')
+            self.logger.log('New candidate raw score', new_score, i+1, color='green')
+            
+            # update the buffer statistics of the new candidate
+            if self.enable_control_variate:
+                new_score = new_score - score + selected_candidate_entry['mean_score']
+                # clip the new score to be between 0 and 1
+                new_score = np.clip(new_score, 0, 1)
+                self.logger.log('New candidate controlled score', new_score, i+1, color='yellow')
+
+            new_candidate_entry = {
+                'params': new_update_dict,
+                'score_sum': new_score*len(xs),
+                'eval_count': len(xs)
+            }
+            self.buffer.append(new_candidate_entry)
+            
+            if (i+1) % eval_frequency == 0:
+                self.update_buffer_scores()
+                self.print_buffer_statistics()
+                # select the candidate with the highest UCB score
+                best_candidate_entry = max(self.buffer, key=lambda x: x['mean_score'])
+                self.optimizer.update(best_candidate_entry['params'])
+                # evaluate the best candidate on the test dataset
+                test_score = evaluate_agent(self.agent, guide, test_dataset, num_threads=num_threads, num_eval_times=num_eval_samples)
+                self.logger.log('Selected candidate mean score', best_candidate_entry['mean_score'], i+1, color='blue')
+                self.logger.log('Test score', test_score, i+1, color='green')
+                self.logger.log('Total samples', self.total_samples, i+1, color='cyan')
+                
+        return 
