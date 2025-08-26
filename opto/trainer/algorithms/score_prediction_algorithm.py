@@ -369,7 +369,7 @@ class ScorePrediction_half_buffer(ScorePrediction):
         """
         Only collect data for the first half of the buffer. At each time, randomly sample one of the candidates in the first half of the buffer. Do a evaluation.
         """
-        validate_eval_times = 1
+        validate_eval_times = 2
         # Convert deque to list to enable slicing
         buffer_list = list(self.buffer)
         half_size = len(buffer_list) // 2
@@ -453,9 +453,7 @@ class Embedding_Regression(ScorePrediction_half_buffer):
         # Track how many data points we've processed for SGD
         self.processed_data_count = 0
         
-        print_color(f"Linear regression model initialized:", "cyan")
-        print_color(f"  Weights: zeros({self.linear_dim})", "cyan")
-        print_color(f"  Bias: 0.0", "cyan")
+    
         
         # Initialize the regression model with current buffer data
         self._update_regression_model(alpha=self.alpha)
@@ -587,7 +585,7 @@ class Embedding_Regression(ScorePrediction_half_buffer):
             print_color(f"Regression weights norm: {np.linalg.norm(self.weights):.4f}", "cyan")
             print_color(f"Regression bias: {self.bias:.4f}", "cyan")
             print_color(f"Predicted scores: {predicted_scores_array}", "green")
-            print_color(f"Mean scores (fallback): {mean_scores}", "yellow")
+            print_color(f"Mean scores (fallback): {[float(score) if score is not None else 0.0 for score in mean_scores]}", "yellow")
             print_color(f"Ground truth scores: {self.ground_truth_scores}", "blue")
             
             # Show training data statistics if available
@@ -604,7 +602,32 @@ class Embedding_Regression(ScorePrediction_half_buffer):
                     print_color(f"Last training point - True: {last_true_score:.4f}, Predicted: {last_predicted:.4f}, Error: {abs(last_predicted - last_true_score):.4f}", "cyan")
         
         return predicted_scores_array
-    
+
+class Projected_Embedding_Regression(Embedding_Regression):
+    """
+    Use Gaussian random matrix to project the embedding to a lower dimension.
+    """
+    def __init__(self, agent, num_threads, logger, update_dicts, ground_truth_scores, 
+                 embedding_model="gemini/text-embedding-004", learning_rate=0.01, alpha=1e-4, lower_dim = 10, *args, **kwargs):
+        super().__init__(agent, num_threads, logger, update_dicts, ground_truth_scores, 
+                 embedding_model="gemini/text-embedding-004", learning_rate=0.01, alpha=1e-4, *args, **kwargs)
+        
+        # Generate a Gaussian random matrix to project the embedding to a lower dimension
+        self.random_matrix = np.random.randn(lower_dim, self.linear_dim)
+        print_color(f"Random matrix shape: {self.random_matrix.shape}", "cyan")
+        # Project the embedding to the lower dimension
+        for agent_entry in self.buffer:
+            embedding = agent_entry.get("embedding")
+            if embedding is not None:
+                agent_entry["embedding"] = self.random_matrix @ embedding
+            else:
+                print_color("Warning: No embedding available, cannot project", "yellow")
+        # Initialize the weights and bias for the projected embedding regression model
+        self.weights = np.zeros(lower_dim)
+        self.bias = 0.0
+
+
+
 class Embedding_Regression_with_true_scores(Embedding_Regression):
     """
     Use the embedding, ground truth scores to do a linear regression. Calculate the misspecification error.
