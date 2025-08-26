@@ -280,7 +280,7 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
             
         return predicted_scores_array
     
-    def train(self, guide, validate_dataset, test_dataset,num_threads,num_epochs, eval_frequency,temperature=0.0, *args, **kwargs):
+    def train(self, guide, validate_dataset, test_dataset,num_threads,num_epochs, eval_frequency,temperature=0.0,validate_batch_size=None, *args, **kwargs):
         """A general training method. In each epoch collect some data by evaluating agents. Then calculate the prediction error by comparing the predicted scores and ground truth scores."""
         self.validate_dataset = validate_dataset
         self.test_dataset = test_dataset
@@ -304,7 +304,7 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
             self.epoch = epoch
             print_color(f"Epoch {epoch+1} of {self.num_epochs}", "green")
             # Evaluate the agents in the buffer.
-            self.collect_data(self.buffer, guide, validate_dataset, num_threads)
+            self.collect_data(self.buffer, guide, validate_dataset, num_threads,validate_batch_size=validate_batch_size)
             predicted_scores = self.predict_scores(self.buffer, verbose=True,temperature=self.temperature)
             self.calculate_prediction_error(self.buffer,predicted_scores)
             # print_color(f"Prediction error: {error}", "red")
@@ -321,7 +321,7 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
             self.logger.log("Regret", highest_ground_truth_score - ground_truth_score_of_arm_with_highest_predicted_score, epoch+1, color="red")
         return 
     
-    def collect_data(self, buffer, guide, validate_dataset, num_threads):
+    def collect_data(self, buffer, guide, validate_dataset, num_threads,**kwargs):
         """
         Do evaluations and collect the data. Update the buffer statistics.
         By default, we evaluate the agents in the buffer, and update the buffer statistics.
@@ -347,21 +347,48 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
         return prediction_error
 
 class ScorePrediction_half_buffer(ScorePrediction):
-    def collect_data(self, buffer, guide, validate_dataset, num_threads):
+
+    def _sample_minibatch(self, dataset: Dict[str, List[Any]], batch_size: int) -> Tuple[List[Any], List[Any]]:
+        """Sample a minibatch from the dataset."""
+        if not dataset or not dataset.get('inputs') or not dataset.get('infos'):
+            print_color("Warning: Attempted to sample from an empty or malformed dataset.", color='yellow')
+            return [], []
+        
+        dataset_size = len(dataset['inputs'])
+        if dataset_size == 0:
+            print_color("Warning: Dataset is empty, cannot sample minibatch.", color='yellow')
+            return [], []
+
+        actual_batch_size = min(batch_size, dataset_size)
+        indices = np.random.choice(dataset_size, actual_batch_size, replace=False)
+        xs = [dataset['inputs'][i] for i in indices]
+        infos = [dataset['infos'][i] for i in indices]
+        return xs, infos
+    
+    def collect_data(self, buffer, guide, validate_dataset, num_threads,validate_batch_size,**kwargs):
         """
         Only collect data for the first half of the buffer. At each time, randomly sample one of the candidates in the first half of the buffer. Do a evaluation.
         """
+        validate_eval_times = 1
         # Convert deque to list to enable slicing
         buffer_list = list(self.buffer)
         half_size = len(buffer_list) // 2
         # Randomly sample one of the candidates in the first half of the buffer.
         candidate_entry = random.choice(buffer_list[:half_size])
         set_parameters_for_agent(self.agent, candidate_entry["params"])
-        score = evaluate_agent(self.agent, guide, validate_dataset, num_threads=num_threads, num_eval_times=2)
+        # sample a subset of the validate_dataset
+        if validate_batch_size == None:
+            xs,infos = validate_dataset['inputs'], validate_dataset['infos']
+        else:
+            xs,infos = self._sample_minibatch(validate_dataset, validate_batch_size)
+        # create a validate_subset with the same structure as the self.validate_dataset
+        validate_subset = {'inputs': xs, 'infos': infos}
+        score = evaluate_agent(self.agent, guide, validate_subset, num_threads=num_threads, num_eval_times=validate_eval_times)
         # Collect the raw data for the embedding regression model.
-        self.raw_data.append({"embedding": candidate_entry["embedding"], "score": score})
+        if candidate_entry.get("embedding") is not None:
+            self.raw_data.append({"embedding": candidate_entry["embedding"], "score": score})
 
-        eval_count = len(validate_dataset['inputs'])*2
+        eval_count = len(validate_subset['inputs'])*validate_eval_times
         candidate_entry["score_sum"] += score*eval_count
         candidate_entry["eval_count"] += eval_count
         self.total_samples += eval_count
@@ -390,14 +417,16 @@ class Embedding_Regression(ScorePrediction_half_buffer):
     Instead of using LLM response to predict the scores directly, we train a linear regression model from the embedding to the ground truth scores.
     """
     def __init__(self, agent, num_threads, logger, update_dicts, ground_truth_scores, 
-                 embedding_model="gemini/text-embedding-004", learning_rate=0.01, *args, **kwargs):
+                 embedding_model="gemini/text-embedding-004", learning_rate=0.01, alpha=1e-4, *args, **kwargs):
         super().__init__(agent, num_threads, logger, update_dicts, ground_truth_scores, *args, **kwargs)
         
-        # Set embedding model and learning rate from parameters
+        # Set embedding model, learning rate, and regularization parameter
         self.embedding_model = embedding_model
         self.learning_rate = learning_rate
+        self.alpha = alpha  # Regularization strength for Ridge regression
         self.linear_dim = None
         print_color(f"Computing embeddings for {len(self.buffer)} buffer entries...", "yellow")
+        print_color(f"Ridge regression regularization strength (alpha): {self.alpha}", "cyan")
         
         for i, agent_entry in enumerate(self.buffer):
             additional_instructions = list(agent_entry["params"].values())[0]
@@ -429,12 +458,15 @@ class Embedding_Regression(ScorePrediction_half_buffer):
         print_color(f"  Bias: 0.0", "cyan")
         
         # Initialize the regression model with current buffer data
-        self._update_regression_model()
+        self._update_regression_model(alpha=self.alpha)
     
-    def _update_regression_model(self):
+    def _update_regression_model(self, alpha=1e-4):
         """
-        Update the embedding linear regression model using closed-form solution.
-        Uses all data in self.raw_data to compute optimal weights and bias analytically.
+        Update the embedding linear regression model using regularized closed-form solution (Ridge regression).
+        Uses all data in self.raw_data to compute optimal weights and bias analytically with L2 regularization.
+        
+        Args:
+            alpha: Regularization strength. Higher values mean more regularization (less overfitting).
         """
         if len(self.raw_data) == 0:
             return
@@ -456,40 +488,59 @@ class Embedding_Regression(ScorePrediction_half_buffer):
         X_with_bias = np.column_stack([X, np.ones(X.shape[0])])
         
         try:
-            # Closed-form solution: (X^T X)^(-1) X^T y
-            # This gives us [weights, bias] in one solution
+            # Regularized closed-form solution (Ridge regression): (X^T X + alpha*I)^(-1) X^T y
+            # Create regularization matrix - regularize weights but not bias
+            n_features = X_with_bias.shape[1]
+            regularization_matrix = alpha * np.eye(n_features)
+            regularization_matrix[-1, -1] = 0  # Don't regularize bias term
+            
             XtX = X_with_bias.T @ X_with_bias
+            XtX_regularized = XtX + regularization_matrix
             Xty = X_with_bias.T @ y
-            coefficients = np.linalg.solve(XtX, Xty)
+            coefficients = np.linalg.solve(XtX_regularized, Xty)
             
             self.weights = coefficients[:-1]  # All but last coefficient
             self.bias = coefficients[-1]     # Last coefficient is bias
             
-            # Calculate training error for monitoring
+            # Calculate training error and regularization penalty
             y_pred = X @ self.weights + self.bias
             mse = np.mean((y - y_pred) ** 2)
+            l2_penalty = alpha * np.sum(self.weights ** 2)  # L2 penalty on weights only
+            regularized_loss = mse + l2_penalty
             
-            print_color(f"Closed-form regression updated:", "green")
+            print_color(f"Ridge regression updated (alpha={alpha}):", "green")
             print_color(f"  Training samples: {len(self.raw_data)}", "green")
             print_color(f"  Weights norm: {np.linalg.norm(self.weights):.4f}", "green")
             print_color(f"  Bias: {self.bias:.4f}", "green")
             print_color(f"  Training MSE: {mse:.6f}", "green")
+            print_color(f"  L2 penalty: {l2_penalty:.6f}", "green")
+            print_color(f"  Regularized loss: {regularized_loss:.6f}", "green")
             
         except np.linalg.LinAlgError:
-            # If matrix is singular, use pseudo-inverse
-            print_color("Warning: Singular matrix, using pseudo-inverse", "yellow")
-            coefficients = np.linalg.pinv(X_with_bias) @ y
+            # If matrix is still singular (very rare with regularization), use pseudo-inverse with regularization
+            print_color("Warning: Singular matrix even with regularization, using pseudo-inverse", "yellow")
+            n_features = X_with_bias.shape[1]
+            regularization_matrix = alpha * np.eye(n_features)
+            regularization_matrix[-1, -1] = 0  # Don't regularize bias term
+            
+            XtX_regularized = X_with_bias.T @ X_with_bias + regularization_matrix
+            coefficients = np.linalg.pinv(XtX_regularized) @ (X_with_bias.T @ y)
             self.weights = coefficients[:-1]
             self.bias = coefficients[-1]
             
             # Calculate training error
             y_pred = X @ self.weights + self.bias
             mse = np.mean((y - y_pred) ** 2)
-            print_color(f"Pseudo-inverse regression updated:", "yellow")
+            l2_penalty = alpha * np.sum(self.weights ** 2)
+            regularized_loss = mse + l2_penalty
+            
+            print_color(f"Pseudo-inverse Ridge regression updated (alpha={alpha}):", "yellow")
             print_color(f"  Training samples: {len(self.raw_data)}", "yellow")
             print_color(f"  Weights norm: {np.linalg.norm(self.weights):.4f}", "yellow")
             print_color(f"  Bias: {self.bias:.4f}", "yellow")
             print_color(f"  Training MSE: {mse:.6f}", "yellow")
+            print_color(f"  L2 penalty: {l2_penalty:.6f}", "yellow")
+            print_color(f"  Regularized loss: {regularized_loss:.6f}", "yellow")
         
         # Update processed count (though not used in closed-form)
         self.processed_data_count = len(self.raw_data)
@@ -513,12 +564,19 @@ class Embedding_Regression(ScorePrediction_half_buffer):
         # Predict the scores for each candidate in the buffer
         predicted_scores = []
         for agent_entry in buffer:
-            embedding = agent_entry["embedding"]
-            predicted_score = self._predict_single(embedding)
+            embedding = agent_entry.get("embedding")
+            if embedding is not None:
+                predicted_score = self._predict_single(embedding)
+            else:
+                # Fallback to mean score if no embedding available
+                predicted_score = agent_entry.get('mean_score', 0.0)
             predicted_scores.append(predicted_score)
             
             if verbose:
-                print(f"Embedding shape: {len(embedding)}, Predicted score: {predicted_score:.4f}")
+                if embedding is not None:
+                    print(f"Embedding shape: {len(embedding)}, Predicted score: {predicted_score:.4f}")
+                else:
+                    print(f"No embedding available, using fallback score: {predicted_score:.4f}")
         
         predicted_scores_array = np.array(predicted_scores)
         
@@ -570,8 +628,15 @@ class Embedding_Regression_with_true_scores(Embedding_Regression):
         else:
             training_buffer = buffer_list[:half_size]
             
-        embeddings = np.array([c["embedding"] for c in training_buffer])
-        true_scores = np.array([c["ground_truth_score"] for c in training_buffer])
+        # Filter buffer entries that have embeddings
+        training_buffer_with_embeddings = [c for c in training_buffer if c.get("embedding") is not None]
+        
+        if len(training_buffer_with_embeddings) == 0:
+            print_color("Warning: No embeddings found in buffer, cannot train regression model", "yellow")
+            return
+            
+        embeddings = np.array([c["embedding"] for c in training_buffer_with_embeddings])
+        true_scores = np.array([c["ground_truth_score"] for c in training_buffer_with_embeddings])
         
         # Add bias column to embeddings for least squares
         X_with_bias = np.column_stack([embeddings, np.ones(embeddings.shape[0])])
