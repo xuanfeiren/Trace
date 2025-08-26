@@ -85,8 +85,8 @@ class llm_search(MinibatchAlgorithm):
             # print the mean score, predicted score, and evaluation count.
             predicted_score = candidate_entry.get('predicted_score', 'None')
             print_color(f"Candidate {i}. Mean score {candidate_entry['mean_score']}, predicted score {predicted_score}, eval_count {candidate_entry['eval_count']}.", "green")
-            for p in candidate_entry['params']:
-                print_color(f"Parameter value: {candidate_entry['params'][p]}", "cyan")
+            # for p in candidate_entry['params']:
+            #     print_color(f"Parameter value: {candidate_entry['params'][p]}", "cyan")
         return 
     
     def update_buffer_scores(self):
@@ -315,6 +315,21 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
             print_color(f"Mean scores (fallback): {default_scores}", "yellow")
             # print_color(f"Ground truth scores: {self.ground_truth_scores}", "blue")
         
+        # Add a check to ensure all candidates have a predicted score. Use try except to handle the case where the LLM fails to predict the score. If no predicted score is available, use the mean score as the predicted score, and print a warning. If the mean score is also None, print a warning and use 0.0 as the predicted score.
+        for candidate_entry in buffer:
+            try:
+                predicted_score = candidate_entry['predicted_score']
+            except KeyError:
+                print_color(f"No predicted score for candidate {candidate_entry['index']}", "yellow")
+                predicted_score = candidate_entry.get('mean_score', 0.0)
+                candidate_entry['predicted_score'] = predicted_score
+                print_color(f"Using mean score {predicted_score} as predicted score for candidate {candidate_entry['index']}", "yellow")
+            except TypeError:
+                print_color(f"No predicted score for candidate {candidate_entry['index']}", "yellow")
+                predicted_score = 0.0
+                candidate_entry['predicted_score'] = predicted_score
+                print_color(f"Using 0.0 as predicted score for candidate {candidate_entry['index']}", "yellow")
+
         return predicted_scores_array
     
     def update(self, outputs, verbose=False, num_threads=None, **kwargs):
@@ -359,7 +374,7 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
     
     def generate_new_candidates(self, train_batch_size: int = 2, num_steps: int = 5):
         """Generate new candidates. Default to be, select the arm with the highest predicted score, then do a sequential search for several steps (like what MinibatchAlgorithm does) to generate new candidates. Create entries and add all the candidates to the buffer."""
-        # select the arm with the highest predicted score, update the agent with the selected arm
+        # select the arm with the highest predicted score, update the agent with the selected arm.
         selected_candidate_entry = max(self.buffer, key=lambda x: x['predicted_score'])
         self.optimizer.update(selected_candidate_entry['params'])
 
