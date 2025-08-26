@@ -1646,6 +1646,7 @@ class UCBAlgorithm(MinibatchAlgorithm):
         self.enable_control_variate = enable_control_variate
         self.total_samples = 0
         self.min_score = 0
+        
         # initialize the buffer with the initial parameter entry
         initial_update_dict = {p: copy.deepcopy(p.data) for p in self.optimizer.parameters}
         initial_candidate_entry = {
@@ -1769,6 +1770,7 @@ class UCBAlgorithm(MinibatchAlgorithm):
 
             # Update the agent
             score, new_update_dict = self.update(outputs, verbose=verbose, num_threads=num_threads, **kwargs)
+            self.total_proposals += 1
             self.total_samples += len(xs)
             # update the buffer statistics of the current candidate
             selected_candidate_entry['score_sum'] += score*len(xs)
@@ -1808,5 +1810,7 @@ class UCBAlgorithm(MinibatchAlgorithm):
                 self.logger.log('Selected candidate mean score', best_candidate_entry['mean_score'], i+1, color='blue')
                 self.logger.log('Test score', test_score, i+1, color='green')
                 self.logger.log('Total samples', self.total_samples, i+1, color='cyan')
-                
+                self.logger.log('Total proposals', self.total_proposals, i+1, color='magenta')
+        # TODO: make this more general by admitting a list of parameters
+        self.logger.log('Final parameter 1', best_candidate_entry['params'][0], i+1, color='magenta')
         return 
