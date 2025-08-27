@@ -60,7 +60,7 @@ class llm_search(MinibatchAlgorithm):
     """
     def __init__(self, agent, optimizer, num_threads: int = None, logger=None, *args, **kwargs):
         super().__init__(agent, optimizer, num_threads=num_threads, logger=logger, *args, **kwargs)
-        self.buffer = deque(maxlen=200)
+        self.buffer = deque(maxlen=500)
         self.llm_model = "gemini/gemini-2.0-flash"
         self.llm = LLM(model=self.llm_model)
         self.min_score = 0
@@ -70,7 +70,7 @@ class llm_search(MinibatchAlgorithm):
             'params': initial_update_dict,
             'score_sum': 0,
             'eval_count': 0,
-            'mean_score': None,
+            'mean_score': 0,
             'predicted_score': None
         }
         self.buffer.append(initial_candidate_entry)
@@ -246,14 +246,22 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
         
         if llm_response is None:
             if verbose:
-                print_color("LLM score prediction call failed after retries. Returning mean scores.", "yellow")
+                print_color("LLM score prediction call failed after retries. Using mean scores as fallback.", "yellow")
+            # Update buffer entries with fallback scores even when LLM fails
+            for idx in range(len(buffer)):
+                fallback_score = buffer[idx].get('mean_score', 0.0)
+                buffer[idx]['predicted_score'] = fallback_score
             return default_scores
 
         llm_response_str = getattr(getattr(llm_response, 'choices', [{}])[0], 'message', None)
         llm_response_str = getattr(llm_response_str, 'content', None)
         if not llm_response_str:
             if verbose:
-                print_color("LLM returned empty response for score prediction.", "yellow")
+                print_color("LLM returned empty response for score prediction. Using mean scores as fallback.", "yellow")
+            # Update buffer entries with fallback scores even when LLM returns empty response
+            for idx in range(len(buffer)):
+                fallback_score = buffer[idx].get('mean_score', 0.0)
+                buffer[idx]['predicted_score'] = fallback_score
             return default_scores
 
         cleaned_llm_response_str = llm_response_str.strip()
@@ -266,10 +274,20 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
             llm_output = json.loads(cleaned_llm_response_str)
         except json.JSONDecodeError:
             if verbose:
-                print_color("Failed to parse LLM score prediction JSON output.", "yellow")
+                print_color("Failed to parse LLM score prediction JSON output. Using mean scores as fallback.", "yellow")
+            # Update buffer entries with fallback scores even when JSON parsing fails
+            for idx in range(len(buffer)):
+                fallback_score = buffer[idx].get('mean_score', 0.0)
+                buffer[idx]['predicted_score'] = fallback_score
             return default_scores
 
         if not isinstance(llm_output, dict):
+            if verbose:
+                print_color("LLM output is not a valid dictionary. Using mean scores as fallback.", "yellow")
+            # Update buffer entries with fallback scores even when LLM output is invalid
+            for idx in range(len(buffer)):
+                fallback_score = buffer[idx].get('mean_score', 0.0)
+                buffer[idx]['predicted_score'] = fallback_score
             return default_scores
 
         # Extract score estimates
@@ -346,7 +364,6 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
         self.optimizer.zero_feedback()
         self.optimizer.backward(target, feedback)
         step_kwargs = dict(bypassing=True, verbose='output' if verbose else False)
-        step_kwargs = dict(bypassing=True, verbose='output')
 
 
         def optimizer_step_func():
@@ -362,7 +379,7 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
     def generate_new_candidates(self, train_batch_size: int = 2, num_steps: int = 5):
         """Generate new candidates. Default to be, select the arm with the highest predicted score, then do a sequential search for several steps (like what MinibatchAlgorithm does) to generate new candidates. Create entries and add all the candidates to the buffer."""
         # select the arm with the highest predicted score, update the agent with the selected arm.
-        selected_candidate_entry = max(self.buffer, key=lambda x: x.get('predicted_score', 0.0))
+        selected_candidate_entry = max(self.buffer, key=lambda x: x.get('predicted_score', 0.0) if x.get('predicted_score') is not None else 0.0)
         self.optimizer.update(selected_candidate_entry['params'])
 
         # do a sequential search for several steps (like what MinibatchAlgorithm does) to generate new candidates.
@@ -384,7 +401,7 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
                 'params': new_update_dict,
                 'score_sum': 0,
                 'eval_count': 0,
-                'mean_score': None,
+                'mean_score': 0,
                 'predicted_score': None
             }
             self.buffer.append(new_candidate_entry)
