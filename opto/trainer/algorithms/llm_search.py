@@ -377,11 +377,14 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
         return average_score, new_update_dict 
     
     def generate_new_candidates(self, train_batch_size: int = 2, num_steps: int = 5):
-        """Generate new candidates. Default to be, select the arm with the highest predicted score, then do a sequential search for several steps (like what MinibatchAlgorithm does) to generate new candidates. Create entries and add all the candidates to the buffer."""
+        """Generate new candidates. Default to be, select the arm with the highest predicted score, then do a sequential search for several steps (like what MinibatchAlgorithm does) to generate new candidates. Create entries and add all the candidates to the buffer.
+        Also use the training data to update the current entry.
+        """
         # select the arm with the highest predicted score, update the agent with the selected arm.
         selected_candidate_entry = max(self.buffer, key=lambda x: x.get('predicted_score', 0.0) if x.get('predicted_score') is not None else 0.0)
         self.optimizer.update(selected_candidate_entry['params'])
 
+        current_entry = selected_candidate_entry
         # do a sequential search for several steps (like what MinibatchAlgorithm does) to generate new candidates.
         for _ in range(num_steps):
             current_update_dict = {p: copy.deepcopy(p.data) for p in self.optimizer.parameters}
@@ -391,7 +394,10 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
             forward = batch_run(max_workers=self.num_threads, description=f"Forward pass (batch size: {len(xs)})")(self.forward)
             outputs = forward(self.agent, xs, self.guide, infos)
             # Update the agent
-            _, new_update_dict = self.update(outputs)
+            score, new_update_dict = self.update(outputs)
+            # update the current entry with the new score
+            current_entry['score_sum'] += score*len(xs)
+            current_entry['eval_count'] += len(xs)
             # The new update dict may only contain part of the parameters, we need to merge it with the current update dict
             for p in current_update_dict:
                 if p not in new_update_dict:
@@ -404,6 +410,7 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
                 'mean_score': 0,
                 'predicted_score': None
             }
+            current_entry = new_candidate_entry
             self.buffer.append(new_candidate_entry)
             # update the agent
             self.optimizer.update(new_update_dict)
@@ -485,7 +492,9 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
                 self.logger.log('Test score', test_score, epoch+1, color='green')
                 self.logger.log('Total samples', self.total_samples, epoch+1, color='cyan')
                 self.logger.log('Total proposals', self.total_proposals, epoch+1, color='magenta')
-        self.logger.log('Final instruction', best_candidate_entry['params'][0], epoch+1, color='magenta')
+        # Extract just the string values from the params dictionary
+        param_values = list(best_candidate_entry['params'].values())
+        self.logger.log('Final parameters', param_values, epoch+1, color='magenta')
         print_color("Training completed.", "green")
 
 
