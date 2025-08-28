@@ -58,7 +58,7 @@ class llm_search(MinibatchAlgorithm):
     3. Do several steps of evaluation on the buffer.
     4. Test the performance of the arm with the highest predicted score, periodically.
     """
-    def __init__(self, agent, optimizer, num_threads: int = None, logger=None, *args, **kwargs):
+    def __init__(self, agent, optimizer, num_threads: int = None, logger=None,select_arm_by_predicted_score: bool = True, *args, **kwargs):
         super().__init__(agent, optimizer, num_threads=num_threads, logger=logger, *args, **kwargs)
         self.buffer = deque(maxlen=500)
         self.llm_model = "gemini/gemini-2.0-flash"
@@ -77,6 +77,7 @@ class llm_search(MinibatchAlgorithm):
         self.total_samples = 0
         self.total_proposals = 0
         self.domain_context = DOMAIN_CONTEXT
+        self.select_arm_by_predicted_score = select_arm_by_predicted_score
 
     def print_buffer_statistics(self):
         """print the buffer statistics"""
@@ -376,12 +377,16 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
 
         return average_score, new_update_dict 
     
-    def generate_new_candidates(self, train_batch_size: int = 2, num_steps: int = 5):
+    def select_starting_point_entry(self):
+        """Select the starting point entry. Default to be the arm with the highest predicted score."""
+        return 
+
+    def generate_new_candidates(self,starting_point_entry, train_batch_size: int = 2, num_steps: int = 4):
         """Generate new candidates. Default to be, select the arm with the highest predicted score, then do a sequential search for several steps (like what MinibatchAlgorithm does) to generate new candidates. Create entries and add all the candidates to the buffer.
         Also use the training data to update the current entry.
         """
         # select the arm with the highest predicted score, update the agent with the selected arm.
-        selected_candidate_entry = max(self.buffer, key=lambda x: x.get('predicted_score', 0.0) if x.get('predicted_score') is not None else 0.0)
+        selected_candidate_entry = starting_point_entry
         self.optimizer.update(selected_candidate_entry['params'])
 
         current_entry = selected_candidate_entry
@@ -473,10 +478,18 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
 
         for epoch in range(num_epochs):
             print_color(f"Epoch {epoch+1} of {num_epochs}", "magenta")
+            # update the buffer scores
             self.update_buffer_scores()
             self.print_buffer_statistics()
-            self.predict_scores(self.buffer, verbose=verbose)
-            self.generate_new_candidates(train_batch_size=batch_size, num_steps=num_generation_steps)
+            # Could decide whether to select the arm by predicted score or mean score. If by predicted score, the algorithm would predict the scores for all the candidates in the buffer, and select the arm with the highest predicted score.
+            if self.select_arm_by_predicted_score:
+                # For all the candidates in the buffer, predict the scores.
+                self.predict_scores(self.buffer, verbose=verbose)
+                starting_point_entry = max(self.buffer, key=lambda x: x.get('predicted_score', 0.0) if x.get('predicted_score') is not None else 0.0)
+            else:
+                starting_point_entry = max(self.buffer, key=lambda x: x.get('mean_score', 0.0))
+
+            self.generate_new_candidates(starting_point_entry, train_batch_size=batch_size, num_steps=num_generation_steps)
             self.buffer_evaluation(validate_batch_size=validate_batch_size)
 
             if (epoch+1) % eval_frequency == 0:
