@@ -58,7 +58,7 @@ class llm_search(MinibatchAlgorithm):
     3. Do several steps of evaluation on the buffer.
     4. Test the performance of the arm with the highest predicted score, periodically.
     """
-    def __init__(self, agent, optimizer, num_threads: int = None, logger=None,select_arm_by_predicted_score: bool = True, *args, **kwargs):
+    def __init__(self, agent, optimizer, num_threads: int = None, logger=None,select_arm_by_predicted_score: bool = True, num_multiple_generations: int = 1, do_validation: bool = True, *args, **kwargs):
         super().__init__(agent, optimizer, num_threads=num_threads, logger=logger, *args, **kwargs)
         self.buffer = deque(maxlen=500)
         self.llm_model = "gemini/gemini-2.0-flash"
@@ -71,13 +71,20 @@ class llm_search(MinibatchAlgorithm):
             'score_sum': 0,
             'eval_count': 0,
             'mean_score': 0,
-            'predicted_score': None
+            'predicted_score': None,
+            'will_be_evaluated': True
         }
         self.buffer.append(initial_candidate_entry)
         self.total_samples = 0
         self.total_proposals = 0
         self.domain_context = DOMAIN_CONTEXT
+        # flags to do ablation study
+        # 1. select_arm_by_predicted_score: whether to select the arm by predicted score or mean score.
+        # 2. num_multiple_generations: the number of times to call OptoPrime optimizer to generate more candidates. 
+        # 3. do_validation: default to be True. If false, the algorithm only using training data to update the buffer statistics.
         self.select_arm_by_predicted_score = select_arm_by_predicted_score
+        self.num_multiple_generations = num_multiple_generations
+        self.do_validation = do_validation
 
     def print_buffer_statistics(self):
         """print the buffer statistics"""
@@ -380,8 +387,8 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
     def select_starting_point_entry(self):
         """Select the starting point entry. Default to be the arm with the highest predicted score."""
         return 
-
-    def generate_new_candidates(self,starting_point_entry, train_batch_size: int = 2, num_steps: int = 4):
+        
+    def generate_new_candidates(self, starting_point_entry, train_batch_size: int = 2, num_steps: int = 4):
         """Generate new candidates. Default to be, select the arm with the highest predicted score, then do a sequential search for several steps (like what MinibatchAlgorithm does) to generate new candidates. Create entries and add all the candidates to the buffer.
         Also use the training data to update the current entry.
         """
@@ -413,24 +420,50 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
                 'score_sum': 0,
                 'eval_count': 0,
                 'mean_score': 0,
-                'predicted_score': None
+                'predicted_score': None,
+                'will_be_evaluated': True
             }
             current_entry = new_candidate_entry
             self.buffer.append(new_candidate_entry)
             # update the agent
             self.optimizer.update(new_update_dict)
-        self.total_proposals += num_steps
+
+            if self.num_multiple_generations > 1: # if self.num_multiple_generations is greater than 1, the algorithm will call OptoPrime optimizer multiple times to generate more candidates. But only part of the candidates will be evaluated.
+                for _ in range(self.num_multiple_generations-1):
+                    _, new_update_dict = self.update(outputs)
+                    for p in current_update_dict:
+                        if p not in new_update_dict:
+                            new_update_dict[p] = current_update_dict[p]
+                        # create a new candidate entry
+                    new_candidate_entry = {
+                        'params': new_update_dict,
+                        'score_sum': 0,
+                        'eval_count': 0,
+                        'mean_score': 0,
+                        'predicted_score': None,
+                        'will_be_evaluated': False
+                    }
+                    self.buffer.append(new_candidate_entry)
+        self.total_proposals += num_steps*self.num_multiple_generations
         return 
         
     
-    def buffer_evaluation(self,validate_batch_size: int = 20):
+    def buffer_evaluation(self,starting_point_entry, validate_batch_size: int = 20):
         """Evaluate several candidates in the buffer. Default to be, evaluating all arms without statistics."""
+        
         # sample a subset of the self.validate_dataset
         xs,infos = self._sample_minibatch(self.validate_dataset, validate_batch_size)
         # create a validate_subset with the same structure as the self.validate_dataset
         validate_subset = {'inputs': xs, 'infos': infos}
+        # First evaluate the starting point entry. Then evaluate one generated candidate at each generation step.
+        self.optimizer.update(starting_point_entry['params'])
+        score = evaluate_agent(self.agent, self.guide, validate_subset, num_threads=self.num_threads, num_eval_times=1)
+        starting_point_entry['eval_count'] = validate_batch_size
+        starting_point_entry['score_sum'] = score*validate_batch_size
+        self.total_samples += validate_batch_size
+        # Then evaluate the generated candidates.
         for candidate_entry in self.buffer:
-            if candidate_entry['eval_count'] == 0: # evaluate all unobserved arms
+            if candidate_entry['eval_count'] == 0 and candidate_entry['will_be_evaluated']: # evaluate all unobserved arms that will be evaluated
                 # Update agent with candidate's parameters before evaluation
                 self.optimizer.update(candidate_entry['params'])
                 score = evaluate_agent(self.agent, self.guide, validate_subset, num_threads=self.num_threads, num_eval_times=1)
@@ -490,7 +523,9 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
                 starting_point_entry = max(self.buffer, key=lambda x: x.get('mean_score', 0.0))
 
             self.generate_new_candidates(starting_point_entry, train_batch_size=batch_size, num_steps=num_generation_steps)
-            self.buffer_evaluation(validate_batch_size=validate_batch_size)
+
+            if self.do_validation: # could do validation or not.
+                self.buffer_evaluation(starting_point_entry, validate_batch_size=validate_batch_size)
 
             if (epoch+1) % eval_frequency == 0:
                 self.update_buffer_scores()
