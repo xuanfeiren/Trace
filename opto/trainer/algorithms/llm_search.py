@@ -72,7 +72,8 @@ class llm_search(MinibatchAlgorithm):
             'eval_count': 0,
             'mean_score': 0,
             'predicted_score': None,
-            'will_be_evaluated': True
+            'will_be_evaluated': True,
+            'num_validation':0,
         }
         self.buffer.append(initial_candidate_entry)
         self.total_samples = 0
@@ -442,7 +443,8 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
                         'eval_count': 0,
                         'mean_score': 0,
                         'predicted_score': None,
-                        'will_be_evaluated': False
+                        'will_be_evaluated': False,
+                        'num_validation':0,
                     }
                     self.buffer.append(new_candidate_entry)
         self.total_proposals += num_steps*self.num_multiple_generations
@@ -464,7 +466,7 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
         self.total_samples += validate_batch_size
         # Then evaluate the generated candidates.
         for candidate_entry in self.buffer:
-            if candidate_entry['eval_count'] == 0 and candidate_entry['will_be_evaluated']: # evaluate all unobserved arms that will be evaluated
+            if candidate_entry['num_validation'] == 0 and candidate_entry['will_be_evaluated']: # evaluate all unvalidated arms that will be evaluated
                 # Update agent with candidate's parameters before evaluation
                 self.optimizer.update(candidate_entry['params'])
                 score = evaluate_agent(self.agent, self.guide, validate_subset, num_threads=self.num_threads, num_eval_times=1)
