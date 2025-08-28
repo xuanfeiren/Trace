@@ -423,7 +423,8 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
                 'eval_count': 0,
                 'mean_score': 0,
                 'predicted_score': None,
-                'will_be_evaluated': True
+                'will_be_evaluated': True,
+                'num_validation': 0
             }
             current_entry = new_candidate_entry
             self.buffer.append(new_candidate_entry)
@@ -449,30 +450,29 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
                     self.buffer.append(new_candidate_entry)
         self.total_proposals += num_steps*self.num_multiple_generations
         return 
-        
+    
+    def single_candidate_evaluation(self, candidate_entry, validate_subset):
+        """Evaluate a single candidate. Update the candidate entry with the evaluation result."""
+        self.optimizer.update(candidate_entry['params'])
+        score = evaluate_agent(self.agent, self.guide, validate_subset, num_threads=self.num_threads, num_eval_times=1)
+        candidate_entry['eval_count'] += len(validate_subset['inputs'])
+        candidate_entry['score_sum'] += score*len(validate_subset['inputs'])
+        candidate_entry['num_validation'] += 1
+        self.total_samples += len(validate_subset['inputs'])
     
     def buffer_evaluation(self,starting_point_entry, validate_batch_size: int = 20):
-        """Evaluate several candidates in the buffer. Default to be, evaluating all arms without statistics."""
+        """Evaluate several candidates in the buffer. Default to be, evaluating all arms without validation. Also evaluate the starting point the algorithm selected."""
         
         # sample a subset of the self.validate_dataset
         xs,infos = self._sample_minibatch(self.validate_dataset, validate_batch_size)
         # create a validate_subset with the same structure as the self.validate_dataset
         validate_subset = {'inputs': xs, 'infos': infos}
         # First evaluate the starting point entry. Then evaluate one generated candidate at each generation step.
-        self.optimizer.update(starting_point_entry['params'])
-        score = evaluate_agent(self.agent, self.guide, validate_subset, num_threads=self.num_threads, num_eval_times=1)
-        starting_point_entry['eval_count'] = validate_batch_size
-        starting_point_entry['score_sum'] = score*validate_batch_size
-        self.total_samples += validate_batch_size
+        self.single_candidate_evaluation(starting_point_entry, validate_subset)
         # Then evaluate the generated candidates.
         for candidate_entry in self.buffer:
             if candidate_entry['num_validation'] == 0 and candidate_entry['will_be_evaluated']: # evaluate all unvalidated arms that will be evaluated
-                # Update agent with candidate's parameters before evaluation
-                self.optimizer.update(candidate_entry['params'])
-                score = evaluate_agent(self.agent, self.guide, validate_subset, num_threads=self.num_threads, num_eval_times=1)
-                candidate_entry['eval_count'] = validate_batch_size
-                candidate_entry['score_sum'] = score*validate_batch_size
-                self.total_samples += validate_batch_size
+                self.single_candidate_evaluation(candidate_entry, validate_subset)
         return
 
     def train(self,
