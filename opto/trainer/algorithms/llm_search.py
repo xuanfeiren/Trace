@@ -516,7 +516,6 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
             print_color(f"Epoch {epoch+1} of {num_epochs}", "magenta")
             # update the buffer scores
             self.update_buffer_scores()
-            self.print_buffer_statistics()
             # Could decide whether to select the arm by predicted score or mean score. If by predicted score, the algorithm would predict the scores for all the candidates in the buffer, and select the arm with the highest predicted score.
             if self.select_arm_by_predicted_score:
                 # For all the candidates in the buffer, predict the scores.
@@ -524,7 +523,7 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
                 starting_point_entry = max(self.buffer, key=lambda x: x.get('predicted_score', 0.0) if x.get('predicted_score') is not None else 0.0)
             else:
                 starting_point_entry = max(self.buffer, key=lambda x: x.get('mean_score', 0.0))
-
+            self.print_buffer_statistics()
             self.generate_new_candidates(starting_point_entry, train_batch_size=batch_size, num_steps=num_generation_steps)
 
             if self.do_validation: # could do validation or not.
@@ -533,9 +532,12 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
             if (epoch+1) % eval_frequency == 0:
                 self.update_buffer_scores()
                 self.print_buffer_statistics()
-                self.predict_scores(self.buffer, verbose=verbose)
-                # select the candidate with the highest predicted score
-                best_candidate_entry = max(self.buffer, key=lambda x: x.get('predicted_score', 0.0) if x.get('predicted_score') is not None else 0.0)
+                
+                if self.select_arm_by_predicted_score:
+                    self.predict_scores(self.buffer, verbose=verbose)
+                    best_candidate_entry = max(self.buffer, key=lambda x: x.get('predicted_score', 0.0) if x.get('predicted_score') is not None else 0.0)
+                else:
+                    best_candidate_entry = max(self.buffer, key=lambda x: x.get('mean_score', 0.0))
                 self.optimizer.update(best_candidate_entry['params'])
                 # evaluate the best candidate on the test dataset
                 test_score = evaluate_agent(self.agent, guide, test_dataset, num_threads=num_threads, num_eval_times=num_eval_samples)
