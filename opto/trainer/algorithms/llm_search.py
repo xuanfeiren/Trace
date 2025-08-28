@@ -350,7 +350,9 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
     def update(self, outputs, verbose=False, num_threads=None, **kwargs):
         """
         I made some modifications to the original update method.
-        return the average score of the minibatch of inputs, and the new update dictionary.
+        return the average score of the minibatch of inputs, and the new update dictionary/dictionaries.
+        If self.num_multiple_generations == 1, returns (average_score, new_update_dict)
+        If self.num_multiple_generations > 1, returns (average_score, [update_dict1, update_dict2, ...])
         """
 
         num_threads = num_threads or self.num_threads  # Use provided num_threads or fall back to self.num_threads
@@ -375,16 +377,26 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
         self.optimizer.backward(target, feedback)
         step_kwargs = dict(bypassing=True, verbose='output' if verbose else False)
 
-
-        def optimizer_step_func():
-            return self.optimizer.step(**step_kwargs)
+        # General case: generate multiple update_dicts with retry logic
+        def single_optimizer_step_with_retry():
+            def optimizer_step_func():
+                return self.optimizer.step(**step_kwargs)
+            return retry_with_exponential_backoff(
+                optimizer_step_func, 
+                operation_name="Optimizer step"
+            )
         
-        new_update_dict = retry_with_exponential_backoff(
-            optimizer_step_func, 
-            operation_name="Optimizer step (UCB parameter generation)"
+        # Create list of functions for async_run (works for both single and multiple generations)
+        runs = [single_optimizer_step_with_retry] * self.num_multiple_generations
+        
+        # Run optimizer steps asynchronously (or sequentially if num_multiple_generations=1)
+        update_dicts = async_run(
+            runs,
+            max_workers=self.num_threads,
+            description=f"Generating {self.num_multiple_generations} parameter updates"
         )
-
-        return average_score, new_update_dict 
+        
+        return average_score, update_dicts 
     
     def select_starting_point_entry(self):
         """Select the starting point entry. Default to be the arm with the highest predicted score."""
@@ -401,53 +413,43 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
         current_entry = selected_candidate_entry
         # do a sequential search for several steps (like what MinibatchAlgorithm does) to generate new candidates.
         for _ in range(num_steps):
-            current_update_dict = {p: copy.deepcopy(p.data) for p in self.optimizer.parameters}
+            current_update_dict = current_entry['params']
             # sample a minibatch from the train dataset
             xs, infos = self._sample_minibatch(self.train_dataset, train_batch_size)
             # forward the agent
             forward = batch_run(max_workers=self.num_threads, description=f"Forward pass (batch size: {len(xs)})")(self.forward)
             outputs = forward(self.agent, xs, self.guide, infos)
             # Update the agent
-            score, new_update_dict = self.update(outputs)
+            score, update_dicts = self.update(outputs)
             # update the current entry with the new score
             current_entry['score_sum'] += score*len(xs)
             current_entry['eval_count'] += len(xs)
-            # The new update dict may only contain part of the parameters, we need to merge it with the current update dict
-            for p in current_update_dict:
-                if p not in new_update_dict:
-                    new_update_dict[p] = current_update_dict[p]
-            # create a new candidate entry
-            new_candidate_entry = {
-                'params': new_update_dict,
-                'score_sum': 0,
-                'eval_count': 0,
-                'mean_score': 0,
-                'predicted_score': None,
-                'will_be_evaluated': True,
-                'num_validation': 0
-            }
-            current_entry = new_candidate_entry
-            self.buffer.append(new_candidate_entry)
-            # update the agent
-            self.optimizer.update(new_update_dict)
+            
+            # update_dicts is always a list now
+            for i, new_update_dict in enumerate(update_dicts):
+                # The new update dict may only contain part of the parameters, we need to merge it with the current update dict
+                for p in current_update_dict:
+                    if p not in new_update_dict:
+                        new_update_dict[p] = current_update_dict[p]
+                # create a new candidate entry
+                # First one has will_be_evaluated=True, others have will_be_evaluated=False
+                new_candidate_entry = {
+                    'params': new_update_dict,
+                    'score_sum': 0,
+                    'eval_count': 0,
+                    'mean_score': 0,
+                    'predicted_score': None,
+                    'will_be_evaluated': True if i == 0 else False,
+                    'num_validation': 0
+                }
+                self.buffer.append(new_candidate_entry)
+                # Update current_entry to the first one for next iteration
+                if i == 0:
+                    current_entry = new_candidate_entry
+                    # update the agent with the first update_dict
+                    self.optimizer.update(new_update_dict)
 
-            if self.num_multiple_generations > 1: # if self.num_multiple_generations is greater than 1, the algorithm will call OptoPrime optimizer multiple times to generate more candidates. But only part of the candidates will be evaluated.
-                for _ in range(self.num_multiple_generations-1):
-                    _, new_update_dict = self.update(outputs)
-                    for p in current_update_dict:
-                        if p not in new_update_dict:
-                            new_update_dict[p] = current_update_dict[p]
-                        # create a new candidate entry
-                    new_candidate_entry = {
-                        'params': new_update_dict,
-                        'score_sum': 0,
-                        'eval_count': 0,
-                        'mean_score': 0,
-                        'predicted_score': None,
-                        'will_be_evaluated': False,
-                        'num_validation':0,
-                    }
-                    self.buffer.append(new_candidate_entry)
+            
         self.total_proposals += num_steps*self.num_multiple_generations
         return 
     
@@ -531,8 +533,7 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
 
             if (epoch+1) % eval_frequency == 0:
                 self.update_buffer_scores()
-                self.print_buffer_statistics()
-                
+                # self.print_buffer_statistics()
                 if self.select_arm_by_predicted_score:
                     self.predict_scores(self.buffer, verbose=verbose)
                     best_candidate_entry = max(self.buffer, key=lambda x: x.get('predicted_score', 0.0) if x.get('predicted_score') is not None else 0.0)
