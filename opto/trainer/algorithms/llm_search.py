@@ -115,10 +115,15 @@ class llm_search(MinibatchAlgorithm):
         Returns:
             np.array: Vector of predicted scores, defaults to mean scores if LLM fails
         """
-        # Prepare serializable candidate summaries with parameters
+        # Create a shuffled copy of buffer for randomized LLM presentation
+        import random
+        shuffled_buffer = list(buffer)
+        random.shuffle(shuffled_buffer)
+        
+        # Prepare serializable candidate summaries with parameters using shuffled order
         serializable_candidate_summaries = []
         self.update_buffer_scores()
-        for idx, cand_entry in enumerate(buffer):
+        for idx, cand_entry in enumerate(shuffled_buffer):
             summary = {
                 "index": idx,
                 "parameters": {k.py_name: v for k,v in cand_entry['params'].items()},
@@ -308,31 +313,27 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
             print_color(f"Function Mapping: {function_mapping}", "magenta")
             print_color(f"Score Estimates: {score_estimates}", "blue")
 
-        # Convert score estimates to numpy array and update buffer entries
-        predicted_scores = []
-        for idx in range(len(buffer)):
+        # Process predictions on shuffled_buffer and assign predicted scores
+        for idx in range(len(shuffled_buffer)):
             candidate_key = str(idx)
+            entry = shuffled_buffer[idx]
+            
             if candidate_key in score_estimates:
                 try:
-                    predicted_score = score_estimates[candidate_key].get("predicted_score", buffer[idx].get('mean_score', 0.0))
+                    predicted_score = score_estimates[candidate_key].get("predicted_score", entry.get('mean_score', 0.0))
                     predicted_score_float = float(predicted_score)
-                    predicted_scores.append(predicted_score_float)
-                    # Update the buffer entry with the predicted score
-                    buffer[idx]['predicted_score'] = predicted_score_float
+                    entry['predicted_score'] = predicted_score_float
                 except (ValueError, TypeError):
-                    # Fallback to mean score if prediction is invalid
                     print_color(f"Invalid predicted score for candidate {idx}: {score_estimates[candidate_key]}", "yellow")
-                    fallback_score = buffer[idx].get('mean_score', 0.0)
-                    predicted_scores.append(fallback_score)
-                    # Update the buffer entry with the fallback score
-                    buffer[idx]['predicted_score'] = fallback_score
+                    fallback_score = entry.get('mean_score', 0.0)
+                    entry['predicted_score'] = fallback_score
             else:
-                # Fallback to mean score if no prediction available
                 print_color(f"No predicted score for candidate {idx}", "yellow")
-                fallback_score = buffer[idx].get('mean_score', 0.0)
-                predicted_scores.append(fallback_score)
-                # Update the buffer entry with the fallback score
-                buffer[idx]['predicted_score'] = fallback_score
+                fallback_score = entry.get('mean_score', 0.0)
+                entry['predicted_score'] = fallback_score
+        
+        # Return predicted scores in original buffer order
+        predicted_scores = [entry.get('predicted_score', 0.0) for entry in buffer]
         
         predicted_scores_array = np.array(predicted_scores)
         
@@ -343,7 +344,7 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
         
         
 
-        return predicted_scores_array
+        return predicted_scores_array 
     
     def update(self, outputs, verbose=False, num_threads=None, **kwargs):
         """
