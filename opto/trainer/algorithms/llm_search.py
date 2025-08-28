@@ -424,6 +424,7 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
             # update the current entry with the new score
             current_entry['score_sum'] += score*len(xs)
             current_entry['eval_count'] += len(xs)
+            self.total_samples += len(xs)
             
             # update_dicts is always a list now
             for i, new_update_dict in enumerate(update_dicts):
