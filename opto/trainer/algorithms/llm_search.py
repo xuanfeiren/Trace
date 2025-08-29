@@ -247,26 +247,26 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
         # Single LLM call with internal backoff handled by helper
         def llm_call():
             return self.llm(prompt_messages, response_format=response_format, temperature=temperature)
-            
-        llm_response = retry_with_exponential_backoff(
-            llm_call,
-            max_retries=10,
-            base_delay=1.0,
-            operation_name="LLM score prediction"
-        )
         
         # Default fallback: return mean scores from buffer statistics
         default_scores = np.array([c.get('mean_score', 0.0) for c in buffer])
-        
-        if llm_response is None:
-            if verbose:
-                print_color("LLM score prediction call failed after retries. Using mean scores as fallback.", "yellow")
-            # Update buffer entries with fallback scores even when LLM fails
+
+        try:
+            llm_response = retry_with_exponential_backoff(
+                llm_call,
+                max_retries=10,
+                base_delay=1.0,
+                operation_name="LLM score prediction"
+            )
+        except Exception as e:
+            print(f"LLM score prediction call failed: {e}, returning mean scores as fallback.")
+            # Update buffer entries with fallback scores when LLM fails
             for idx in range(len(buffer)):
                 fallback_score = buffer[idx].get('mean_score', 0.0)
                 buffer[idx]['predicted_score'] = fallback_score
             return default_scores
-
+        
+        
         llm_response_str = getattr(getattr(llm_response, 'choices', [{}])[0], 'message', None)
         llm_response_str = getattr(llm_response_str, 'content', None)
         if not llm_response_str:
@@ -381,20 +381,36 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
         def single_optimizer_step_with_retry():
             def optimizer_step_func():
                 return self.optimizer.step(**step_kwargs)
-            return retry_with_exponential_backoff(
-                optimizer_step_func, 
-                operation_name="Optimizer step"
-            )
+            try:
+                return retry_with_exponential_backoff(
+                    optimizer_step_func, 
+                    operation_name="Optimizer step"
+                )
+            except Exception as e:
+                print(f"Optimizer step failed after retries: {e}. Returning None.")
+                return None
         
         # Create list of functions for async_run (works for both single and multiple generations)
         runs = [single_optimizer_step_with_retry] * self.num_multiple_generations
         
         # Run optimizer steps asynchronously (or sequentially if num_multiple_generations=1)
-        update_dicts = async_run(
-            runs,
-            max_workers=self.num_threads,
-            description=f"Generating {self.num_multiple_generations} parameter updates"
-        )
+        try:
+            update_dicts = async_run(
+                runs,
+                max_workers=self.num_threads,
+                description=f"Generating {self.num_multiple_generations} parameter updates"
+            )
+            # Filter out None results from failed optimizer steps
+            update_dicts = [update_dict for update_dict in update_dicts if update_dict is not None]
+            
+            # If all optimizer steps failed, return empty list
+            if not update_dicts:
+                print("All optimizer steps failed. Returning empty update_dicts.")
+                update_dicts = []
+                
+        except Exception as e:
+            print(f"Async run for optimizer steps failed: {e}. Returning empty update_dicts.")
+            update_dicts = []
         
         return average_score, update_dicts 
     
@@ -426,7 +442,7 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
             current_entry['eval_count'] += len(xs)
             self.total_samples += len(xs)
             
-            # update_dicts is always a list now
+            # update_dicts is always a list now. update dicts may be empty if all optimizer steps failed.
             for i, new_update_dict in enumerate(update_dicts):
                 # The new update dict may only contain part of the parameters, we need to merge it with the current update dict
                 for p in current_update_dict:

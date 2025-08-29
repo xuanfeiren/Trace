@@ -242,8 +242,8 @@ def retry_with_exponential_backoff(func, max_retries=10, base_delay=1.0, operati
             
             if retry_attempt == max_retries - 1:
                 # Last attempt failed
-                # print(f"{operation_name}: Failed after {max_retries} attempts. Error: {e}")
-                raise e
+                raise RuntimeError(f"{operation_name}: Failed after {max_retries} attempts. Error: {e}")
+                
             elif is_retryable:
                 # Special handling for rate limit errors - use longer delays
                 is_rate_limit = (
