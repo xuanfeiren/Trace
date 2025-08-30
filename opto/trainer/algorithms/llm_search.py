@@ -104,7 +104,37 @@ class llm_search(MinibatchAlgorithm):
             candidate_entry['mean_score'] = candidate_entry['score_sum'] / (candidate_entry['eval_count'] or 1E-9)
         return 
     
+    def get_fallback_score(self, entry):
+        """
+        Get fallback score for an entry based on the priority order:
+        1. Use existing positive predicted_score if available
+        2. Use non-negative mean_score if available
+        3. Use 0 as final fallback
+        
+        Args:
+            entry: Candidate entry dictionary
+            
+        Returns:
+            float: Fallback score
+        """
+        # First check if there's already a positive predicted score
+        existing_predicted = entry.get('predicted_score')
+        if existing_predicted is not None and existing_predicted > 0:
+            return existing_predicted
+        
+        # Then check for non-negative mean score
+        mean_score = entry.get('mean_score', 0.0)
+        if mean_score >= 0:
+            return mean_score
+        
+        # Final fallback to 0
+        return 0.0
+    
     def predict_scores(self, buffer, verbose: bool = False, temperature: float = 0.0):
+        """Default to use XML format."""
+        return self.predict_scores_xml(buffer, verbose, temperature)
+    
+    def predict_scores_json(self, buffer, verbose: bool = False, temperature: float = 0.0):
         """
         Predict scores for all candidates in the buffer.
         
@@ -114,12 +144,15 @@ class llm_search(MinibatchAlgorithm):
             temperature: Temperature parameter for LLM sampling (0.0 = deterministic, higher = more random)
             
         Returns:
-            np.array: Vector of predicted scores, defaults to mean scores if LLM fails
+            np.array: Vector of predicted scores, defaults to fallback scores if LLM fails
         """
         # Create a shuffled copy of buffer for randomized LLM presentation
         import random
-        shuffled_buffer = list(buffer)
-        random.shuffle(shuffled_buffer)
+        shuffled_buffer_with_original_idx = [(i, entry) for i, entry in enumerate(buffer)]
+        random.shuffle(shuffled_buffer_with_original_idx)
+        shuffled_buffer = [entry for _, entry in shuffled_buffer_with_original_idx]
+        # Create mapping from shuffled index to original index
+        shuffled_to_original_idx = {shuffled_idx: original_idx for shuffled_idx, (original_idx, _) in enumerate(shuffled_buffer_with_original_idx)}
         
         # Prepare serializable candidate summaries with parameters using shuffled order
         serializable_candidate_summaries = []
@@ -248,8 +281,8 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
         def llm_call():
             return self.llm(prompt_messages, response_format=response_format, temperature=temperature)
         
-        # Default fallback: return mean scores from buffer statistics
-        default_scores = np.array([c.get('mean_score', 0.0) for c in buffer])
+        # Default fallback: return fallback scores using improved logic
+        default_scores = np.array([self.get_fallback_score(c) for c in buffer])
 
         try:
             llm_response = retry_with_exponential_backoff(
@@ -259,10 +292,10 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
                 operation_name="LLM score prediction"
             )
         except Exception as e:
-            print_color(f"WARNING: LLM score prediction call failed: {e}, returning mean scores as fallback.", "red")
+            print_color(f"WARNING: LLM score prediction call failed: {e}, returning fallback scores.", "red")
             # Update buffer entries with fallback scores when LLM fails
             for idx in range(len(buffer)):
-                fallback_score = buffer[idx].get('mean_score', 0.0)
+                fallback_score = self.get_fallback_score(buffer[idx])
                 buffer[idx]['predicted_score'] = fallback_score
             return default_scores
         
@@ -270,10 +303,10 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
         llm_response_str = getattr(getattr(llm_response, 'choices', [{}])[0], 'message', None)
         llm_response_str = getattr(llm_response_str, 'content', None)
         if not llm_response_str:
-            print_color("WARNING: LLM returned empty response for score prediction. Using mean scores as fallback.", "red")
+            print_color("WARNING: LLM returned empty response for score prediction. Using fallback scores.", "red")
             # Update buffer entries with fallback scores even when LLM returns empty response
             for idx in range(len(buffer)):
-                fallback_score = buffer[idx].get('mean_score', 0.0)
+                fallback_score = self.get_fallback_score(buffer[idx])
                 buffer[idx]['predicted_score'] = fallback_score
             return default_scores
 
@@ -286,18 +319,18 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
         try:
             llm_output = json.loads(cleaned_llm_response_str)
         except json.JSONDecodeError:
-            print_color("WARNING: Failed to parse LLM score prediction JSON output. Using mean scores as fallback.", "red")
+            print_color("WARNING: Failed to parse LLM score prediction JSON output. Using fallback scores.", "red")
             # Update buffer entries with fallback scores even when JSON parsing fails
             for idx in range(len(buffer)):
-                fallback_score = buffer[idx].get('mean_score', 0.0)
+                fallback_score = self.get_fallback_score(buffer[idx])
                 buffer[idx]['predicted_score'] = fallback_score
             return default_scores
 
         if not isinstance(llm_output, dict):
-            print_color("WARNING: LLM output is not a valid dictionary. Using mean scores as fallback.", "red")
+            print_color("WARNING: LLM output is not a valid dictionary. Using fallback scores.", "red")
             # Update buffer entries with fallback scores even when LLM output is invalid
             for idx in range(len(buffer)):
-                fallback_score = buffer[idx].get('mean_score', 0.0)
+                fallback_score = self.get_fallback_score(buffer[idx])
                 buffer[idx]['predicted_score'] = fallback_score
             return default_scores
 
@@ -315,19 +348,20 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
         for idx in range(len(shuffled_buffer)):
             candidate_key = str(idx)
             entry = shuffled_buffer[idx]
+            original_idx = shuffled_to_original_idx[idx]
             
             if candidate_key in score_estimates:
                 try:
-                    predicted_score = score_estimates[candidate_key].get("predicted_score", entry.get('mean_score', 0.0))
+                    predicted_score = score_estimates[candidate_key].get("predicted_score", self.get_fallback_score(entry))
                     predicted_score_float = float(predicted_score)
                     entry['predicted_score'] = predicted_score_float
                 except (ValueError, TypeError):
-                    print_color(f"WARNING: Invalid predicted score for candidate {idx}: {score_estimates[candidate_key]}, using mean score as fallback.", "red")
-                    fallback_score = entry.get('mean_score', 0.0)
+                    print_color(f"WARNING: Invalid predicted score for candidate {idx} (original #{original_idx}): {score_estimates[candidate_key]}, using fallback score.", "red")
+                    fallback_score = self.get_fallback_score(entry)
                     entry['predicted_score'] = fallback_score
             else:
-                print_color(f"WARNING: No predicted score for candidate {idx}, using mean score as fallback.", "red")
-                fallback_score = entry.get('mean_score', 0.0)
+                print_color(f"WARNING: No predicted score for candidate {idx} (original #{original_idx}), using fallback score.", "red")
+                fallback_score = self.get_fallback_score(entry)
                 entry['predicted_score'] = fallback_score
         
         # Return predicted scores in original buffer order
@@ -344,6 +378,414 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
 
         return predicted_scores_array 
     
+    def predict_scores_xml(self, buffer, verbose: bool = False, temperature: float = 0.0):
+        """
+        Predict scores for all candidates in the buffer using XML format.
+        This XML version does EXACTLY the same thing as predict_scores but uses XML instead of JSON.
+        
+        Args:
+            buffer: List of candidate entries with parameters and statistics
+            verbose: Whether to print verbose output and debugging information
+            temperature: Temperature parameter for LLM sampling (0.0 = deterministic, higher = more random)
+            
+        Returns:
+            np.array: Vector of predicted scores, defaults to mean scores if LLM fails
+        """
+        import xml.etree.ElementTree as ET
+        from xml.etree.ElementTree import ParseError
+        import re
+        
+        # Create a shuffled copy of buffer for randomized LLM presentation
+        import random
+        shuffled_buffer_with_original_idx = [(i, entry) for i, entry in enumerate(buffer)]
+        random.shuffle(shuffled_buffer_with_original_idx)
+        shuffled_buffer = [entry for _, entry in shuffled_buffer_with_original_idx]
+        # Create mapping from shuffled index to original index
+        shuffled_to_original_idx = {shuffled_idx: original_idx for shuffled_idx, (original_idx, _) in enumerate(shuffled_buffer_with_original_idx)}
+        
+        # Prepare serializable candidate summaries with parameters using shuffled order
+        # This matches EXACTLY what the JSON version does
+        serializable_candidate_summaries = []
+        self.update_buffer_scores()
+        for idx, cand_entry in enumerate(shuffled_buffer):
+            summary = {
+                "index": idx,
+                "parameters": {k.py_name: v for k,v in cand_entry['params'].items()},
+                "eval_count": cand_entry['eval_count'],
+                "mean_score": cand_entry['mean_score'],
+            }
+            serializable_candidate_summaries.append(summary)
+        
+        # Convert to XML instead of JSON
+        candidates_xml = "<candidates>\n"
+        for summary in serializable_candidate_summaries:
+            candidates_xml += f"  <candidate index='{summary['index']}'>\n"
+            candidates_xml += f"    <eval_count>{summary['eval_count']}</eval_count>\n"
+            candidates_xml += f"    <mean_score>{summary['mean_score']}</mean_score>\n"
+            candidates_xml += "    <parameters>\n"
+            for param_name, param_value in summary['parameters'].items():
+                # Escape XML special characters
+                param_value_escaped = str(param_value).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;').replace("'", '&apos;')
+                candidates_xml += f"      <parameter name='{param_name}'><![CDATA[{param_value_escaped}]]></parameter>\n"
+            candidates_xml += "    </parameters>\n"
+            candidates_xml += "  </candidate>\n"
+        candidates_xml += "</candidates>"
+        
+        # Create example parameter schema XML (matches the JSON version logic)
+        example_param_schema_xml = "<parameter_schema>\n"
+        example_param_dict = {p.py_name: copy.deepcopy(p.data) for p in self.agent.parameters()}
+        for param_name, param_value in example_param_dict.items():
+            param_value_escaped = str(param_value).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;').replace("'", '&apos;')
+            example_param_schema_xml += f"  <parameter name='{param_name}'><![CDATA[{param_value_escaped}]]></parameter>\n"
+        example_param_schema_xml += "</parameter_schema>"
+
+        # Create the score prediction prompt using XML format
+        example_format = '''<prediction_result>
+    <pattern_analysis>
+        [Provide detailed analysis of what patterns you discovered across all candidates. Analyze parameter characteristics, identify similarities and differences, examine how observed scores relate to parameter features. Discuss your reasoning process for identifying correlations and your confidence in different patterns.]
+    </pattern_analysis>
+    <function_mapping>
+        <discovered_patterns>
+        <pattern>[List any parameter-performance patterns you identified]</pattern>
+        </discovered_patterns>
+        <similarity_groups>
+        <group>[Group similar candidates and explain why they are similar]</group>
+        </similarity_groups>
+        <uncertainty_notes>[Discuss what patterns are unclear or uncertain]</uncertainty_notes>
+    </function_mapping>
+    <score_estimates>
+        <candidate index="0">
+        <reasoning>[Provide thorough analysis: examine parameters in detail, compare to other candidates, explain how you arrived at prediction, discuss confidence level, explain any denoising logic]</reasoning>
+        <predicted_score>0.XX</predicted_score>
+        </candidate>
+        <candidate index="1">
+        <reasoning>[Detailed reasoning for this candidate...]</reasoning>
+        <predicted_score>0.XX</predicted_score>
+        </candidate>
+    </score_estimates>
+    </prediction_result>'''
+
+        prompt_messages = [
+            {
+                "role": "system",
+                "content": f"""
+    {self.domain_context}
+
+    ## Function Approximation Objective
+    You are a **parameter-to-score function approximator**. Your goal is to learn the underlying mapping from candidate parameters to their true performance scores, using observed data to build this mapping and apply it to all candidates.
+
+    ## Core Capabilities
+    1. **Pattern Learning**: Extract parameter-performance correlations from observed data
+    2. **Function Mapping**: Build a parameter → score mapping function from patterns
+    3. **Noise Reduction**: Use cross-candidate patterns to denoise observed scores
+    4. **Score Prediction**: Apply learned function to predict scores for all candidates (observed and unobserved)
+
+    ## Key Insights for Function Approximation
+    - **Observed scores contain noise**: Raw scores may not reflect true performance due to evaluation variance
+    - **Parameters reveal true performance**: Similar parameters should yield similar scores
+    - **Cross-candidate learning**: Information from one candidate can improve predictions for others
+    - **Pattern-based denoising**: Use parameter similarities to correct noisy observations
+
+    ## Analysis Approach
+
+    ### Step 1: Deep Data Examination
+    **Thoroughly analyze** all available data:
+    - **Parameter inspection**: Carefully examine each candidate's parameters in detail
+    - **Score relationships**: Look for any relationships between parameters and observed scores
+    - **Cross-candidate comparison**: Compare similar and different candidates
+    - **Pattern exploration**: Look for potential patterns, but don't force them if unclear
+
+    ### Step 2: Reasoning-Based Prediction
+    **Focus on comprehensive reasoning** rather than rigid rules:
+    - **Detailed analysis**: For each candidate, provide extensive reasoning about parameter quality
+    - **Similarity assessment**: Compare candidates and explain similarities/differences
+    - **Uncertainty acknowledgment**: Be honest about what is unclear or uncertain
+    - **Evidence-based prediction**: Base predictions on thorough analysis, not assumed patterns
+
+    ### Step 3: Thorough Documentation
+    **Provide extensive reasoning** for all predictions:
+    - **Analysis process**: Explain how you examined the parameters
+    - **Comparison logic**: Describe how you compared candidates
+    - **Prediction rationale**: Justify your score predictions with detailed reasoning
+    - **Confidence assessment**: Discuss your confidence level and any uncertainties
+
+    ## Prediction Methodology
+    1. **For observed candidates**: Use parameter patterns to denoise raw scores
+    - If raw score seems inconsistent with parameter quality, adjust based on similar candidates
+    - Consider evaluation count (higher count = more reliable, but still may need correction)
+    2. **For unobserved candidates**: Use parameter-based function approximation
+    - Find candidates with similar parameter profiles
+    - Apply learned parameter-performance mappings
+    - Predict score based on parameter quality indicators
+
+    ## Output Requirements
+    Return ONLY an XML structure with these elements:
+    - <pattern_analysis>: **Provide extensive analysis** of what you observe in the data
+    - <function_mapping>: Document any patterns you discovered and group similar candidates
+    - <score_estimates>: For each candidate, provide **detailed reasoning** and predicted score
+
+    ## Example Output Format
+    {example_format}
+
+    **CRITICAL**: Ensure all XML tags are properly closed. If you run out of response space, prioritize completing the current candidate element before stopping.
+    """,
+            },
+            {
+                "role": "user", 
+                "content": f"""
+    ## Candidate Data
+    {candidates_xml}
+
+    ## Parameter Schema
+    {example_param_schema_xml}
+
+    ## Task
+    **Function Approximation Challenge**: Analyze the relationship between parameters and performance, then predict scores for ALL candidates through detailed reasoning.
+
+    **Your Mission**:
+    1. **Thoroughly examine** all candidate parameters and any available score data
+    2. **Provide extensive reasoning** for each prediction based on your detailed analysis
+    3. **Compare candidates** to identify similarities and differences that might inform predictions
+    4. **Consider noise** in observed scores and use cross-candidate insights where helpful
+    5. **Focus on reasoning quality** over discovering specific patterns - be thorough in your analysis
+
+    **Key Approach**: Provide comprehensive, detailed reasoning for each prediction. Don't force patterns if they're not clear - focus on thorough analysis and honest assessment of what you observe.
+
+    **Critical**: Each candidate's reasoning should be extensive and detailed. Quality of reasoning is more important than finding specific patterns.
+
+    Return ONLY the XML structure with your detailed analysis and thoroughly reasoned score predictions.
+    """,
+            },
+        ]
+        
+        # Single LLM call with internal backoff handled by helper (NO response_format for XML)
+        def llm_call():
+            return self.llm(prompt_messages, temperature=temperature)
+        
+        # Default fallback: return fallback scores using improved logic (SAME as JSON version)
+        default_scores = np.array([self.get_fallback_score(c) for c in buffer])
+
+        try:
+            llm_response = retry_with_exponential_backoff(
+                llm_call,
+                max_retries=10,
+                base_delay=1.0,
+                operation_name="LLM score prediction (XML)"
+            )
+        except Exception as e:
+            print_color(f"WARNING: LLM score prediction call failed: {e}, returning fallback scores.", "red")
+            # Update buffer entries with fallback scores when LLM fails (SAME as JSON version)
+            for idx in range(len(buffer)):
+                fallback_score = self.get_fallback_score(buffer[idx])
+                buffer[idx]['predicted_score'] = fallback_score
+            return default_scores
+        
+        llm_response_str = getattr(getattr(llm_response, 'choices', [{}])[0], 'message', None)
+        llm_response_str = getattr(llm_response_str, 'content', None)
+        if not llm_response_str:
+            print_color("WARNING: LLM returned empty response for score prediction. Using fallback scores.", "red")
+            # Update buffer entries with fallback scores (SAME as JSON version)
+            for idx in range(len(buffer)):
+                fallback_score = self.get_fallback_score(buffer[idx])
+                buffer[idx]['predicted_score'] = fallback_score
+            return default_scores
+
+        cleaned_llm_response_str = llm_response_str.strip()
+        
+        if verbose:
+            self.print_buffer_statistics()
+            print_color(f"LLM Score Prediction XML (temperature={temperature}): {cleaned_llm_response_str}", "cyan")
+        
+        # Robust XML parsing with multiple fallback strategies
+        def robust_xml_parse(xml_content):
+            """Parse XML content robustly, handling truncated outputs"""
+            xml_content = xml_content.strip()
+            
+            # Strategy 1: Try to extract complete prediction_result
+            prediction_match = re.search(r'<prediction_result>.*?</prediction_result>', xml_content, re.DOTALL)
+            if prediction_match:
+                xml_content = prediction_match.group(0)
+            elif '<prediction_result>' in xml_content:
+                # Strategy 2: Handle truncated XML - find the start and try to fix
+                start_idx = xml_content.find('<prediction_result>')
+                xml_content = xml_content[start_idx:]
+                xml_content = fix_unclosed_xml_tags(xml_content)
+            else:
+                # Strategy 3: Look for score_estimates section directly
+                estimates_match = re.search(r'<score_estimates>.*?</score_estimates>', xml_content, re.DOTALL)
+                if estimates_match:
+                    xml_content = f"<prediction_result>{estimates_match.group(0)}</prediction_result>"
+                elif '<score_estimates>' in xml_content:
+                    start_idx = xml_content.find('<score_estimates>')
+                    estimates_content = xml_content[start_idx:]
+                    estimates_content = fix_unclosed_xml_tags(estimates_content)
+                    xml_content = f"<prediction_result>{estimates_content}</prediction_result>"
+            
+            try:
+                root = ET.fromstring(xml_content)
+                return parse_prediction_xml(root)
+            except ParseError as e:
+                if verbose:
+                    print_color(f"XML Parse Error, trying partial parsing: {e}", "yellow")
+                return parse_partial_xml(xml_content)
+        
+        def fix_unclosed_xml_tags(xml_content):
+            """Fix unclosed tags more comprehensively"""
+            # Add closing prediction_result tag if missing
+            if '</prediction_result>' not in xml_content and '<prediction_result>' in xml_content:
+                xml_content += '</prediction_result>'
+            
+            # Close unclosed score_estimates section
+            if '<score_estimates>' in xml_content and '</score_estimates>' not in xml_content:
+                # Count unclosed candidate tags and close them first
+                open_candidates = xml_content.count('<candidate') - xml_content.count('</candidate>')
+                xml_content += '</candidate>' * open_candidates
+                xml_content += '</score_estimates>'
+            
+            # Close unclosed candidate tags if no score_estimates wrapper
+            elif '<candidate' in xml_content:
+                open_candidates = xml_content.count('<candidate') - xml_content.count('</candidate>')
+                xml_content += '</candidate>' * open_candidates
+            
+            # Close unclosed reasoning tags
+            open_reasoning = xml_content.count('<reasoning>') - xml_content.count('</reasoning>')
+            xml_content += '</reasoning>' * open_reasoning
+            
+            # Close unclosed predicted_score tags  
+            open_scores = xml_content.count('<predicted_score>') - xml_content.count('</predicted_score>')
+            xml_content += '</predicted_score>' * open_scores
+            
+            return xml_content
+        
+        def parse_prediction_xml(root):
+            """Parse well-formed prediction XML to match JSON structure exactly"""
+            score_estimates = {}
+            
+            # Extract score estimates
+            score_estimates_elem = root.find('score_estimates')
+            if score_estimates_elem is not None:
+                for candidate_elem in score_estimates_elem.findall('candidate'):
+                    index = candidate_elem.get('index')
+                    if index is not None:
+                        reasoning_elem = candidate_elem.find('reasoning')
+                        score_elem = candidate_elem.find('predicted_score')
+                        
+                        reasoning = reasoning_elem.text if reasoning_elem is not None and reasoning_elem.text else ""
+                        try:
+                            predicted_score = float(score_elem.text) if score_elem is not None and score_elem.text else 0.0
+                        except (ValueError, TypeError):
+                            predicted_score = 0.0
+                        
+                        # Match JSON structure exactly: nested dict with predicted_score and reasoning
+                        score_estimates[index] = {
+                            'reasoning': reasoning,
+                            'predicted_score': predicted_score
+                        }
+            
+            return score_estimates
+        
+        def parse_partial_xml(xml_content):
+            """Extract data from partially formed XML using regex"""
+            score_estimates = {}
+            
+            # Try multiple regex patterns to handle different truncation scenarios
+            patterns = [
+                # Complete candidate with both reasoning and score
+                r'<candidate[^>]*index=["\'](\d+)["\'][^>]*>.*?<reasoning>(.*?)</reasoning>.*?<predicted_score>(.*?)</predicted_score>',
+                # Candidate with only reasoning (score truncated)
+                r'<candidate[^>]*index=["\'](\d+)["\'][^>]*>.*?<reasoning>(.*?)</reasoning>(?!.*<predicted_score>)',
+                # Candidate with only score (reasoning truncated) 
+                r'<candidate[^>]*index=["\'](\d+)["\'][^>]*>.*?<predicted_score>(.*?)</predicted_score>(?!.*<reasoning>)',
+            ]
+            
+            for pattern in patterns:
+                for match in re.finditer(pattern, xml_content, re.DOTALL):
+                    index = match.group(1)
+                    if index not in score_estimates:  # Don't overwrite complete matches
+                        if len(match.groups()) == 3:  # Complete match
+                            reasoning = match.group(2).strip()
+                            try:
+                                predicted_score = float(match.group(3).strip())
+                            except (ValueError, TypeError):
+                                predicted_score = 0.0
+                        elif 'reasoning' in pattern:  # Only reasoning
+                            reasoning = match.group(2).strip()
+                            predicted_score = 0.0
+                        else:  # Only score
+                            reasoning = ""
+                            try:
+                                predicted_score = float(match.group(2).strip())
+                            except (ValueError, TypeError):
+                                predicted_score = 0.0
+                        
+                        score_estimates[index] = {
+                            'reasoning': reasoning,
+                            'predicted_score': predicted_score
+                        }
+            
+            return score_estimates
+        
+        # Parse the XML response
+        try:
+            score_estimates = robust_xml_parse(cleaned_llm_response_str)
+        except Exception as e:
+            print_color(f"WARNING: Failed to parse LLM XML output: {e}. Using fallback scores.", "red")
+            # Update buffer entries with fallback scores when XML parsing fails
+            for idx in range(len(buffer)):
+                fallback_score = self.get_fallback_score(buffer[idx])
+                buffer[idx]['predicted_score'] = fallback_score
+            return default_scores
+
+        # EXACT same logic as JSON version for verbose output
+        if verbose:
+            # Extract additional info for verbose output (if available)
+            try:
+                root = ET.fromstring(cleaned_llm_response_str)
+                pattern_elem = root.find('pattern_analysis')
+                mapping_elem = root.find('function_mapping')
+                
+                pattern_analysis = pattern_elem.text if pattern_elem is not None else "No pattern analysis provided"
+                function_mapping = ET.tostring(mapping_elem, encoding='unicode') if mapping_elem is not None else "No function mapping provided"
+                
+                print_color(f"Pattern Analysis: {pattern_analysis}", "cyan")
+                print_color(f"Function Mapping: {function_mapping}", "magenta")
+            except:
+                pass  # Skip verbose extras if XML parsing fails
+            
+            print_color(f"Score Estimates: {score_estimates}", "blue")
+
+        # Process predictions on shuffled_buffer and assign predicted scores
+        # EXACT same logic as JSON version
+        for idx in range(len(shuffled_buffer)):
+            candidate_key = str(idx)
+            entry = shuffled_buffer[idx]
+            original_idx = shuffled_to_original_idx[idx]
+            
+            if candidate_key in score_estimates:
+                try:
+                    # FIXED: Use .get() method like JSON version to avoid KeyError
+                    predicted_score = score_estimates[candidate_key].get("predicted_score", self.get_fallback_score(entry))
+                    predicted_score_float = float(predicted_score)
+                    entry['predicted_score'] = predicted_score_float
+                except (ValueError, TypeError):
+                    print_color(f"WARNING: Invalid predicted score for candidate {idx} (original #{original_idx}): {score_estimates[candidate_key]}, using fallback score.", "red")
+                    fallback_score = self.get_fallback_score(entry)
+                    entry['predicted_score'] = fallback_score
+            else:
+                print_color(f"WARNING: No predicted score for candidate {idx} (original #{original_idx}), using fallback score.", "red")
+                fallback_score = self.get_fallback_score(entry)
+                entry['predicted_score'] = fallback_score
+        
+        # Return predicted scores in original buffer order (SAME as JSON version)
+        predicted_scores = [entry.get('predicted_score', 0.0) for entry in buffer]
+        predicted_scores_array = np.array(predicted_scores)
+        
+        if verbose:
+            print_color(f"Predicted scores: {predicted_scores_array}", "green")
+            print_color(f"Mean scores (fallback): {default_scores}", "yellow")
+        
+        return predicted_scores_array
+
     def update(self, outputs, verbose=False, num_threads=None, **kwargs):
         """
         I made some modifications to the original update method.
@@ -556,13 +998,29 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
                 self.optimizer.update(best_candidate_entry['params'])
                 # evaluate the best candidate on the test dataset
                 test_score = evaluate_agent(self.agent, guide, test_dataset, num_threads=num_threads, num_eval_times=num_eval_samples)
-                self.logger.log('Selected candidate predicted score', best_candidate_entry['predicted_score'], epoch+1, color='blue')
+                
+                # Log detailed statistics for the selected candidate
+                self.logger.log('Selected candidate predicted score', best_candidate_entry.get('predicted_score', 'None'), epoch+1, color='blue')
+                self.logger.log('Selected candidate mean score', best_candidate_entry.get('mean_score', 0.0), epoch+1, color='blue')
+                self.logger.log('Selected candidate eval count', best_candidate_entry.get('eval_count', 0), epoch+1, color='blue')
+                
+                
+                
+                # Log overall performance metrics
                 self.logger.log('Test score', test_score, epoch+1, color='green')
                 self.logger.log('Total samples', self.total_samples, epoch+1, color='cyan')
                 self.logger.log('Total proposals', self.total_proposals, epoch+1, color='magenta')
-        # Extract just the string values from the params dictionary
+        # Log final candidate statistics
         param_values = list(best_candidate_entry['params'].values())
         self.logger.log('Final parameters', param_values, epoch+1, color='magenta')
+        self.logger.log('Final candidate predicted score', best_candidate_entry.get('predicted_score', 'None'), epoch+1, color='magenta')
+        self.logger.log('Final candidate mean score', best_candidate_entry.get('mean_score', 0.0), epoch+1, color='magenta')
+        self.logger.log('Final candidate eval count', best_candidate_entry.get('eval_count', 0), epoch+1, color='magenta')
+        
+        
+        
+        
+        
         print_color("Training completed.", "green")
 
 
