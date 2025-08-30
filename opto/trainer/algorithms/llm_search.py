@@ -259,7 +259,7 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
                 operation_name="LLM score prediction"
             )
         except Exception as e:
-            print(f"LLM score prediction call failed: {e}, returning mean scores as fallback.")
+            print_color(f"WARNING: LLM score prediction call failed: {e}, returning mean scores as fallback.", "red")
             # Update buffer entries with fallback scores when LLM fails
             for idx in range(len(buffer)):
                 fallback_score = buffer[idx].get('mean_score', 0.0)
@@ -270,8 +270,7 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
         llm_response_str = getattr(getattr(llm_response, 'choices', [{}])[0], 'message', None)
         llm_response_str = getattr(llm_response_str, 'content', None)
         if not llm_response_str:
-            if verbose:
-                print_color("LLM returned empty response for score prediction. Using mean scores as fallback.", "yellow")
+            print_color("WARNING: LLM returned empty response for score prediction. Using mean scores as fallback.", "red")
             # Update buffer entries with fallback scores even when LLM returns empty response
             for idx in range(len(buffer)):
                 fallback_score = buffer[idx].get('mean_score', 0.0)
@@ -287,8 +286,7 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
         try:
             llm_output = json.loads(cleaned_llm_response_str)
         except json.JSONDecodeError:
-            if verbose:
-                print_color("Failed to parse LLM score prediction JSON output. Using mean scores as fallback.", "yellow")
+            print_color("WARNING: Failed to parse LLM score prediction JSON output. Using mean scores as fallback.", "red")
             # Update buffer entries with fallback scores even when JSON parsing fails
             for idx in range(len(buffer)):
                 fallback_score = buffer[idx].get('mean_score', 0.0)
@@ -296,8 +294,7 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
             return default_scores
 
         if not isinstance(llm_output, dict):
-            if verbose:
-                print_color("LLM output is not a valid dictionary. Using mean scores as fallback.", "yellow")
+            print_color("WARNING: LLM output is not a valid dictionary. Using mean scores as fallback.", "red")
             # Update buffer entries with fallback scores even when LLM output is invalid
             for idx in range(len(buffer)):
                 fallback_score = buffer[idx].get('mean_score', 0.0)
@@ -325,11 +322,11 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
                     predicted_score_float = float(predicted_score)
                     entry['predicted_score'] = predicted_score_float
                 except (ValueError, TypeError):
-                    print_color(f"Invalid predicted score for candidate {idx}: {score_estimates[candidate_key]}", "yellow")
+                    print_color(f"WARNING: Invalid predicted score for candidate {idx}: {score_estimates[candidate_key]}, using mean score as fallback.", "red")
                     fallback_score = entry.get('mean_score', 0.0)
                     entry['predicted_score'] = fallback_score
             else:
-                print_color(f"No predicted score for candidate {idx}", "yellow")
+                print_color(f"WARNING: No predicted score for candidate {idx}, using mean score as fallback.", "red")
                 fallback_score = entry.get('mean_score', 0.0)
                 entry['predicted_score'] = fallback_score
         
