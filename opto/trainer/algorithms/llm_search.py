@@ -557,21 +557,95 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
     """,
             },
         ]
-        
-        # Single LLM call with internal backoff handled by helper (NO response_format for XML)
-        def llm_call():
-            return self.llm(prompt_messages, temperature=temperature)
-        
         # Default fallback: return fallback scores using improved logic (SAME as JSON version)
         default_scores = np.array([self.get_fallback_score(c) for c in buffer])
 
+        # Multi-call LLM function to handle incomplete responses
+        def multi_call_llm():
+            """
+            Call LLM multiple times to get complete response if needed.
+            First call uses original prompt, subsequent calls append previous response to continue.
+            """
+            current_messages = prompt_messages.copy()
+            full_response = ""
+            max_continuation_calls = 10  # Limit to prevent infinite loops
+            
+            for call_num in range(max_continuation_calls):
+                def single_llm_call():
+                    return self.llm(current_messages, temperature=temperature)
+                
+                try:
+                    llm_response = retry_with_exponential_backoff(
+                        single_llm_call,
+                        max_retries=12,
+                        base_delay=1.0,
+                        operation_name=f"LLM score prediction (XML) call {call_num + 1}"
+                    )
+                    
+                    response_str = getattr(getattr(llm_response, 'choices', [{}])[0], 'message', None)
+                    response_str = getattr(response_str, 'content', None)
+                    
+                    # print the response_str for debug
+                    # print_color(f"Response str: {response_str}", "yellow")
+
+                    if not response_str:
+                        if call_num == 0:
+                            raise Exception("LLM returned empty response")
+                        else:
+                            break  # No more content to continue
+                    
+                    response_str = response_str.strip()
+                    full_response += response_str
+                    
+                    # Check if response is complete by looking for proper XML structure
+                    # For Gemini 2.0 Flash, we primarily rely on the presence of closing tag
+                    if '</prediction_result>' in full_response:
+                        break
+                        
+                    # Additional check: if this individual response is very short, 
+                    # it might indicate the model finished naturally (not truncated)
+                    if len(response_str.strip()) < 50:  # Very short response
+                        print_color(f"Call {call_num + 1}: Short response received, assuming completion", "yellow")
+                        break
+                        
+                    # Prepare continuation prompt using full accumulated response
+                    continuation_prompt = {
+                        "role": "user",
+                        "content": f"Continue from where you left off. Your response so far was:\n\n{full_response}\n\nPlease continue and complete the remaining candidates' score predictions in the same XML format. Do not repeat what you already provided, just continue from where you stopped."
+                    }
+                    
+                    current_messages = prompt_messages.copy()
+                    current_messages.append({"role": "assistant", "content": full_response})
+                    current_messages.append(continuation_prompt)
+
+                    # if call_num >0: # print the continuation behavior for debug
+                    #     print_color(f"Current messages: {current_messages}", "yellow")
+
+                    
+                except Exception as e:
+                    if call_num == 0:
+                        raise e  # Re-raise original exception for first call
+                    else:
+                        print_color(f"WARNING: Continuation call {call_num + 1} failed: {e}, using partial response.", "yellow")
+                        break
+            
+            # Create mock response object with combined content
+            class MockMessage:
+                def __init__(self, content):
+                    self.content = content
+                    
+            class MockChoice:
+                def __init__(self, message):
+                    self.message = message
+                    
+            class MockResponse:
+                def __init__(self, choices):
+                    self.choices = choices
+                    
+            return MockResponse([MockChoice(MockMessage(full_response))])
+
         try:
-            llm_response = retry_with_exponential_backoff(
-                llm_call,
-                max_retries=10,
-                base_delay=1.0,
-                operation_name="LLM score prediction (XML)"
-            )
+            llm_response = multi_call_llm()
         except Exception as e:
             print_color(f"WARNING: LLM score prediction call failed: {e}, returning fallback scores.", "red")
             # Update buffer entries with fallback scores when LLM fails (SAME as JSON version)
@@ -867,10 +941,13 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
 
         current_entry = selected_candidate_entry
         # do a sequential search for several steps (like what MinibatchAlgorithm does) to generate new candidates.
-        for _ in range(num_steps):
+        for iter in range(num_steps):
             current_update_dict = current_entry['params']
             # sample a minibatch from the train dataset
-            xs, infos = self._sample_minibatch(self.train_dataset, train_batch_size)
+            # xs, infos = self._sample_minibatch(self.train_dataset, train_batch_size)
+            # another choice: choose the training data sequentially 
+            xs = self.train_dataset['inputs'][iter*train_batch_size:(iter+1)*train_batch_size]
+            infos = self.train_dataset['infos'][iter*train_batch_size:(iter+1)*train_batch_size]
             # forward the agent
             forward = batch_run(max_workers=self.num_threads, description=f"Forward pass (batch size: {len(xs)})")(self.forward)
             outputs = forward(self.agent, xs, self.guide, infos)
