@@ -60,7 +60,7 @@ class llm_search(MinibatchAlgorithm):
     def __init__(self, agent, optimizer, num_threads: int = None, logger=None,select_arm_by_predicted_score: bool = True, num_multiple_generations: int = 1, do_validation: bool = True, *args, **kwargs):
         super().__init__(agent, optimizer, num_threads=num_threads, logger=logger, *args, **kwargs)
         self.buffer = deque(maxlen=500)
-        self.regressor = Regressor(model_name="gemini/gemini-2.0-flash", temperature=0.0, buffer=self.buffer, max_candidates_per_prompt=50, max_candidates_to_predict=20, num_repetitions=2)
+        self.regressor = Regressor(model_name="gemini/gemini-2.0-flash", temperature=0.0, buffer=self.buffer, max_candidates_per_prompt=50, max_candidates_to_predict=20, num_repetitions=5, num_threads=num_threads)
         
         self.llm_model = "gemini/gemini-2.0-flash"
         self.llm = LLM(model=self.llm_model)

@@ -59,12 +59,13 @@ class Regressor:
     """
     A LLM regressor to predict scores for a batch of candidates.
     """
-    def __init__(self, model_name = "gemini/gemini-2.0-flash", temperature = 0.0, buffer = None, max_candidates_per_prompt = 50, max_candidates_to_predict = 20, num_repetitions = 5):
+    def __init__(self, model_name = "gemini/gemini-2.0-flash", temperature = 0.0, buffer = None, max_candidates_per_prompt = 50, max_candidates_to_predict = 20, num_repetitions = 5,num_threads = None):
         self.LLM = LLM(model=model_name)
         self.buffer = buffer
         self.max_candidates_per_prompt = max_candidates_per_prompt
         self.max_candidates_to_predict = max_candidates_to_predict
         self.num_repetitions = num_repetitions
+        self.num_threads = num_threads
 
     def predict_scores(self):
         """Predict scores for all candidates in the buffer. It contains the candidates with noisy observed statistics and new candidates without any statistics.
@@ -83,9 +84,18 @@ class Regressor:
 
 
         # For each smaller batch, sample a subset of candidates with statistics to construct the prompt, call LLM to make the prediction. To make the predicition more reliable, we repeat this process multiple times (with different subsets in the prompt) and take the average.
-        for batch in batches:
-            # TODO: Parallelize the process.
-            self.predict_scores_for_batch(batch)
+        if hasattr(self, 'num_threads') and self.num_threads and self.num_threads > 1:
+            # Parallelize batch processing
+            batch_functions = [lambda batch=b: self.predict_scores_for_batch(batch) for b in batches]
+            async_run(
+                batch_functions,
+                max_workers=self.num_threads,
+                description=f"Processing {len(batches)} candidate batches"
+            )
+        else:
+            # Sequential processing
+            for batch in batches:
+                self.predict_scores_for_batch(batch)
         return 
     
     def sample_minibatch(self):
@@ -152,6 +162,8 @@ class Regressor:
             summary = {
                 "index": idx,
                 "parameters": {k.py_name if hasattr(k, 'py_name') else str(k): v for k, v in cand_entry['params'].items()},
+                "eval_count": cand_entry.get('eval_count', 0),
+                "mean_score": cand_entry.get('mean_score', 0.0),
             }
             serializable_prediction_summaries.append(summary)
         
@@ -159,6 +171,8 @@ class Regressor:
         prediction_candidates_xml = "<prediction_candidates>\n"
         for summary in serializable_prediction_summaries:
             prediction_candidates_xml += f"  <candidate index='{summary['index']}'>\n"
+            prediction_candidates_xml += f"    <eval_count>{summary['eval_count']}</eval_count>\n"
+            prediction_candidates_xml += f"    <mean_score>{summary['mean_score']}</mean_score>\n"
             prediction_candidates_xml += "    <parameters>\n"
             for param_name, param_value in summary['parameters'].items():
                 # Escape XML special characters
@@ -214,17 +228,54 @@ class Regressor:
         You are a **parameter-to-score function approximator**. Your goal is to learn the mapping from candidate parameters to their performance scores using training data, then apply this learned function to predict scores for new candidates.
 
         ## Core Capabilities
-        1. **Pattern Learning**: Extract parameter-performance correlations from training candidates with observed scores
-        2. **Function Mapping**: Build a parameter → score mapping function from discovered patterns
-        3. **Score Prediction**: Apply learned function to predict scores for new candidates without observed scores
+        1. **Pattern Learning**: Extract parameter-performance correlations from observed data
+        2. **Function Mapping**: Build a parameter → score mapping function from patterns
+        3. **Noise Reduction**: Use cross-candidate patterns to denoise observed scores
+        4. **Score Prediction**: Apply learned function to predict scores for all candidates (observed and unobserved)
+
+        ## Key Insights for Function Approximation
+        - **Observed scores contain noise**: Raw scores may not reflect true performance due to evaluation variance
+        - **Parameters reveal true performance**: Similar parameters should yield similar scores
+        - **Cross-candidate learning**: Information from one candidate can improve predictions for others
+        - **Pattern-based denoising**: Use parameter similarities to correct noisy observations
 
         ## Analysis Approach
-        1. **Analyze training data**: Examine training candidates' parameters and observed scores to discover patterns
-        2. **Learn function mapping**: Build understanding of how parameters influence performance scores
-        3. **Apply to new candidates**: Use learned patterns to predict scores for prediction candidates
+
+        ### Step 1: Deep Data Examination
+        **Thoroughly analyze** all available data:
+        - **Parameter inspection**: Carefully examine each candidate's parameters in detail
+        - **Score relationships**: Look for any relationships between parameters and observed scores
+        - **Cross-candidate comparison**: Compare similar and different candidates
+        - **Pattern exploration**: Look for potential patterns, but don't force them if unclear
+
+        ### Step 2: Reasoning-Based Prediction
+        **Focus on comprehensive reasoning** rather than rigid rules:
+        - **Detailed analysis**: For each candidate, provide extensive reasoning about parameter quality
+        - **Similarity assessment**: Compare candidates and explain similarities/differences
+        - **Uncertainty acknowledgment**: Be honest about what is unclear or uncertain
+        - **Evidence-based prediction**: Base predictions on thorough analysis, not assumed patterns
+
+        ### Step 3: Thorough Documentation
+        **Provide extensive reasoning** for all predictions:
+        - **Analysis process**: Explain how you examined the parameters
+        - **Comparison logic**: Describe how you compared candidates
+        - **Prediction rationale**: Justify your score predictions with detailed reasoning
+        - **Confidence assessment**: Discuss your confidence level and any uncertainties
+
+        ## Prediction Methodology
+        1. **For training candidates**: Use parameter patterns to denoise raw scores
+        - If raw score seems inconsistent with parameter quality, adjust based on similar candidates
+        - Consider evaluation count (higher count = more reliable, but still may need correction)
+        2. **For prediction candidates**: Use parameter-based function approximation
+        - Find candidates with similar parameter profiles from training data
+        - Apply learned parameter-performance mappings
+        - Predict score based on parameter quality indicators
 
         ## Output Requirements
-        Return ONLY an XML structure with pattern analysis, function mapping, and score estimates for prediction candidates.
+        Return ONLY an XML structure with these elements:
+        - <pattern_analysis>: **Provide extensive analysis** of what you observe in the data. Examine parameter characteristics across candidates, discuss how observed scores relate to parameters, explain your reasoning process. Be thorough and detailed in your analysis.
+        - <function_mapping>: Document any patterns you discovered (even if uncertain), group similar candidates, and note areas of uncertainty. Don't force patterns if they're not clear.
+        - <score_estimates>: For each prediction candidate, provide **detailed reasoning** explaining your analysis process, parameter evaluation, cross-candidate comparisons, and how you arrived at your prediction. Reasoning should be comprehensive and thorough.
 
         ## Example Output Format
         {example_format}
@@ -245,9 +296,20 @@ class Regressor:
         {example_param_schema_xml}
 
         ## Task
-        Learn the parameter-performance relationship from training candidates, then predict scores for the prediction candidates.
+        **Function Approximation Challenge**: Analyze the relationship between parameters and performance, then predict scores for ALL prediction candidates through detailed reasoning.
 
-        Return ONLY the XML structure with your detailed analysis and score predictions for the prediction candidates.
+        **Your Mission**:
+        1. **Thoroughly examine** all training candidate parameters and any available score data
+        2. **Provide extensive reasoning** for each prediction based on your detailed analysis
+        3. **Compare candidates** to identify similarities and differences that might inform predictions
+        4. **Consider noise** in observed scores and use cross-candidate insights where helpful
+        5. **Focus on reasoning quality** over discovering specific patterns - be thorough in your analysis
+
+        **Key Approach**: Provide comprehensive, detailed reasoning for each prediction. Don't force patterns if they're not clear - focus on thorough analysis and honest assessment of what you observe.
+
+        **Critical**: Each candidate's reasoning should be extensive and detailed. Quality of reasoning is more important than finding specific patterns.
+
+        Return ONLY the XML structure with your detailed analysis and thoroughly reasoned score predictions for the prediction candidates.
         """,
         },
         ]
@@ -255,7 +317,7 @@ class Regressor:
         # Call LLM with retry logic
         def single_llm_call():
             return self.LLM(prompt_messages, temperature=0.0)
-        print_color(prompt_messages, "blue")
+        # print_color(prompt_messages, "blue")
         try:
             llm_response = retry_with_exponential_backoff(
                 single_llm_call,
@@ -269,7 +331,7 @@ class Regressor:
         
         llm_response_str = getattr(getattr(llm_response, 'choices', [{}])[0], 'message', None)
         llm_response_str = getattr(llm_response_str, 'content', None)
-        print_color(llm_response_str, "green")
+        # print_color(llm_response_str, "green")
         if not llm_response_str:
             print_color("WARNING: Regressor LLM returned empty response. Using default scores.", "red")
             return default_scores
@@ -320,14 +382,27 @@ class Regressor:
         
     def predict_scores_for_batch(self, batch):
         """Predict scores for a batch of candidates. Update the buffer with the predicted scores."""
-        # TODO: Parallelize the process.
-        predicted_scores_all_rounds = []
-        for round in range(self.num_repetitions):
-            # Sample a subset of candidates with statistics to construct the prompt.
-            subset = self.sample_minibatch()
-            # Call LLM to make the prediction.
-            predicted_scores_in_this_round = self.call_regressor(subset, batch)
-            predicted_scores_all_rounds.append(predicted_scores_in_this_round)
+        if hasattr(self, 'num_threads') and self.num_threads and self.num_threads > 1:
+            # Parallelize the repetitions
+            def single_round():
+                subset = self.sample_minibatch()
+                return self.call_regressor(subset, batch)
+            
+            round_functions = [single_round for _ in range(self.num_repetitions)]
+            predicted_scores_all_rounds = async_run(
+                round_functions,
+                max_workers=self.num_threads,
+                description=f"Running {self.num_repetitions} prediction rounds"
+            )
+        else:
+            # Sequential processing
+            predicted_scores_all_rounds = []
+            for round in range(self.num_repetitions):
+                # Sample a subset of candidates with statistics to construct the prompt.
+                subset = self.sample_minibatch()
+                # Call LLM to make the prediction.
+                predicted_scores_in_this_round = self.call_regressor(subset, batch)
+                predicted_scores_all_rounds.append(predicted_scores_in_this_round)
         
         # Calculate the average predicted scores across all rounds
         avg_predicted_scores = np.mean(predicted_scores_all_rounds, axis=0)
