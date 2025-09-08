@@ -1,6 +1,4 @@
-# llm_search.py
 # At this stage, we want to extensively use LLM function approximator to search for the best parameters.
-
 import numpy as np
 import copy
 import time
@@ -22,6 +20,7 @@ import math
 from opto.trainer.utils import retry_with_exponential_backoff, sample_minibatch
 from opto.trainer.algorithms.baselines import MinibatchAlgorithm , batchify
 from opto.trainer.utils import evaluate_agent
+from opto.trainer.regressor import Regressor
 
 DOMAIN_CONTEXT = """## Problem Context and Domain Knowledge
 You are a score prediction model for tau-bench agent configurations. You are optimizing agents for tool-agent-user interaction in real-world domains (airline and retail environments).
@@ -61,6 +60,8 @@ class llm_search(MinibatchAlgorithm):
     def __init__(self, agent, optimizer, num_threads: int = None, logger=None,select_arm_by_predicted_score: bool = True, num_multiple_generations: int = 1, do_validation: bool = True, *args, **kwargs):
         super().__init__(agent, optimizer, num_threads=num_threads, logger=logger, *args, **kwargs)
         self.buffer = deque(maxlen=500)
+        self.regressor = Regressor(model_name="gemini/gemini-2.0-flash", temperature=0.0, buffer=self.buffer, max_candidates_per_prompt=50, max_candidates_to_predict=20, num_repetitions=2)
+        
         self.llm_model = "gemini/gemini-2.0-flash"
         self.llm = LLM(model=self.llm_model)
         self.min_score = 0
@@ -132,7 +133,10 @@ class llm_search(MinibatchAlgorithm):
     
     def predict_scores(self, buffer, verbose: bool = False, temperature: float = 0.0):
         """Default to use XML format."""
-        return self.predict_scores_xml(buffer, verbose, temperature)
+        
+        # self.predict_scores_xml(buffer, verbose, temperature)
+        self.regressor.predict_scores()
+        return 
     
     def predict_scores_json(self, buffer, verbose: bool = False, temperature: float = 0.0):
         """
