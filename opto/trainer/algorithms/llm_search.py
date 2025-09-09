@@ -999,7 +999,7 @@ class llm_search(MinibatchAlgorithm):
                 #     self.optimizer.update(new_update_dict)
 
             # select the one with the highest predicted score, to generate the next candidates.
-            temporary_batch_predicted_scores = self.regressor.predict_scores(temporary_batch)
+            temporary_batch_predicted_scores = self.regressor.predict_scores_for_batch(temporary_batch)
             selected_candidate_entry = temporary_batch[np.argmax(temporary_batch_predicted_scores)]
             self.optimizer.update(selected_candidate_entry['params'])
             current_entry = selected_candidate_entry    
