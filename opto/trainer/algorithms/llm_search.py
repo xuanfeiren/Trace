@@ -103,6 +103,9 @@ class llm_search(MinibatchAlgorithm):
         """Update the buffer statistics."""
         for candidate_entry in self.buffer:
             candidate_entry['mean_score'] = candidate_entry['score_sum'] / (candidate_entry['eval_count'] or 1E-9)
+            # Since we only use 0,1 scores, the squared_score_sum is the same as the score_sum.
+            candidate_entry['squared_score_sum'] = candidate_entry['score_sum']
+            candidate_entry['score_variance'] = candidate_entry['squared_score_sum'] / (candidate_entry['eval_count'] or 1E-9) - candidate_entry['mean_score']**2
         return 
     
     def get_fallback_score(self, entry):
@@ -1005,6 +1008,16 @@ class llm_search(MinibatchAlgorithm):
         self.total_samples += len(validate_subset['inputs'])
     
     def buffer_evaluation(self,starting_point_entry, validate_batch_size: int = 20):
+        """Use all the budget at this step, to evaluate the starting point entry."""
+        
+        self.optimizer.update(starting_point_entry['params'])
+        score = evaluate_agent(self.agent, self.guide, self.validate_dataset, num_threads=self.num_threads, num_eval_times=2)
+        starting_point_entry['eval_count'] += len(self.validate_dataset['inputs'])*2
+        starting_point_entry['score_sum'] += score*len(self.validate_dataset['inputs'])*2
+        self.total_samples += len(self.validate_dataset['inputs'])*2
+        return
+
+    def old_buffer_evaluation(self,starting_point_entry, validate_batch_size: int = 20):
         """Evaluate several candidates in the buffer. Default to be, evaluating all arms without validation. Also evaluate the starting point the algorithm selected."""
         
         # sample a subset of the self.validate_dataset
@@ -1066,8 +1079,10 @@ class llm_search(MinibatchAlgorithm):
                 print_color(f"Predicting scores for {len(self.buffer)} candidates", "magenta")
                 self.predict_scores(self.buffer, verbose=verbose)
                 starting_point_entry = max(self.buffer, key=lambda x: x.get('predicted_score', 0.0) if x.get('predicted_score') is not None else 0.0)
+                self.logger.log('Selected candidate predicted score at each round', starting_point_entry.get('predicted_score', 0.0), epoch+1, color='blue')
             else:
                 starting_point_entry = max(self.buffer, key=lambda x: x.get('mean_score', 0.0))
+            self.logger.log('Selected candidate mean score at each round', starting_point_entry.get('mean_score', 0.0), epoch+1, color='blue')
             self.print_buffer_statistics()
             self.generate_new_candidates(starting_point_entry, train_batch_size=batch_size, num_steps=num_generation_steps)
 
