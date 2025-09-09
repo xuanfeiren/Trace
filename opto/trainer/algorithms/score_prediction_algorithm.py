@@ -11,6 +11,7 @@ from opto.optimizers.utils import print_color
 from opto.trainer.utils import retry_with_exponential_backoff, evaluate_agent
 from opto.trainer.algorithms.BAI_algorithms import BAIAlgorithmBase, set_parameters_for_agent
 import litellm
+from opto.trainer.regressor import Regressor
 
 DOMAIN_CONTEXT = """## Problem Context and Domain Knowledge
 You are a score prediction model for tau-bench agent configurations. You are optimizing agents for tool-agent-user interaction in real-world domains (airline and retail environments).
@@ -57,6 +58,8 @@ class ScorePrediction(BAIAlgorithmBase):
         self.raw_data = []
         # Initial buffer construction.
         self.buffer = deque(maxlen=100)
+        # Use the new regressor to predict scores.
+        self.regressor = Regressor(model_name="gemini/gemini-2.0-flash", temperature=0.0, buffer=self.buffer, max_candidates_per_prompt=50, max_candidates_to_predict=20, num_repetitions=5, num_threads=num_threads)
         for i, update_dict in enumerate(self.update_dicts):   
             # Evaluate one candidate and update the buffer statistics.
             set_parameters_for_agent(self.agent, update_dict)
@@ -64,7 +67,7 @@ class ScorePrediction(BAIAlgorithmBase):
             self.buffer.append(candidate_entry)
         print_color(f"Constructed the buffer with {len(self.buffer)} candidates.", "green")
 
-    def predict_scores(self, buffer, verbose: bool = False, temperature: float = 0.0):
+    def old_predict_scores(self, buffer, verbose: bool = False, temperature: float = 0.0):
         """
         Predict scores for all candidates in the buffer.
         
@@ -96,109 +99,109 @@ class ScorePrediction(BAIAlgorithmBase):
 
         # Create the score prediction prompt (function approximation and denoising)
         example_format = '''{{
-  "pattern_analysis": "[Provide detailed analysis of what patterns you discovered across all candidates. Analyze parameter characteristics, identify similarities and differences, examine how observed scores relate to parameter features. Discuss your reasoning process for identifying correlations and your confidence in different patterns.]",
-  "function_mapping": {{
-    "discovered_patterns": ["[List any parameter-performance patterns you identified]"],
-    "similarity_groups": ["[Group similar candidates and explain why they are similar]"],
-    "uncertainty_notes": "[Discuss what patterns are unclear or uncertain]"
-  }},
-  "score_estimates": {{
-    "0": {{"reasoning": "[Provide thorough analysis: examine parameters in detail, compare to other candidates, explain how you arrived at prediction, discuss confidence level, explain any denoising logic]", "predicted_score": 0.XX}},
-    "1": {{"reasoning": "[Detailed reasoning for this candidate...]", "predicted_score": 0.XX}},
-    "[...continue for all candidates...]": {{"reasoning": "[Always provide extensive reasoning explaining your analysis process]", "predicted_score": 0.XX}}
-  }}
-}}'''
+        "pattern_analysis": "[Provide detailed analysis of what patterns you discovered across all candidates. Analyze parameter characteristics, identify similarities and differences, examine how observed scores relate to parameter features. Discuss your reasoning process for identifying correlations and your confidence in different patterns.]",
+        "function_mapping": {{
+            "discovered_patterns": ["[List any parameter-performance patterns you identified]"],
+            "similarity_groups": ["[Group similar candidates and explain why they are similar]"],
+            "uncertainty_notes": "[Discuss what patterns are unclear or uncertain]"
+        }},
+        "score_estimates": {{
+            "0": {{"reasoning": "[Provide thorough analysis: examine parameters in detail, compare to other candidates, explain how you arrived at prediction, discuss confidence level, explain any denoising logic]", "predicted_score": 0.XX}},
+            "1": {{"reasoning": "[Detailed reasoning for this candidate...]", "predicted_score": 0.XX}},
+            "[...continue for all candidates...]": {{"reasoning": "[Always provide extensive reasoning explaining your analysis process]", "predicted_score": 0.XX}}
+        }}
+        }}'''
 
         prompt_messages = [
             {
                 "role": "system",
                 "content": f"""
-{self.domain_context}
+            {self.domain_context}
 
-## Function Approximation Objective
-You are a **parameter-to-score function approximator**. Your goal is to learn the underlying mapping from candidate parameters to their true performance scores, using observed data to build this mapping and apply it to all candidates.
+            ## Function Approximation Objective
+            You are a **parameter-to-score function approximator**. Your goal is to learn the underlying mapping from candidate parameters to their true performance scores, using observed data to build this mapping and apply it to all candidates.
 
-## Core Capabilities
-1. **Pattern Learning**: Extract parameter-performance correlations from observed data
-2. **Function Mapping**: Build a parameter → score mapping function from patterns
-3. **Noise Reduction**: Use cross-candidate patterns to denoise observed scores
-4. **Score Prediction**: Apply learned function to predict scores for all candidates (observed and unobserved)
+            ## Core Capabilities
+            1. **Pattern Learning**: Extract parameter-performance correlations from observed data
+            2. **Function Mapping**: Build a parameter → score mapping function from patterns
+            3. **Noise Reduction**: Use cross-candidate patterns to denoise observed scores
+            4. **Score Prediction**: Apply learned function to predict scores for all candidates (observed and unobserved)
 
-## Key Insights for Function Approximation
-- **Observed scores contain noise**: Raw scores may not reflect true performance due to evaluation variance
-- **Parameters reveal true performance**: Similar parameters should yield similar scores
-- **Cross-candidate learning**: Information from one candidate can improve predictions for others
-- **Pattern-based denoising**: Use parameter similarities to correct noisy observations
+            ## Key Insights for Function Approximation
+            - **Observed scores contain noise**: Raw scores may not reflect true performance due to evaluation variance
+            - **Parameters reveal true performance**: Similar parameters should yield similar scores
+            - **Cross-candidate learning**: Information from one candidate can improve predictions for others
+            - **Pattern-based denoising**: Use parameter similarities to correct noisy observations
 
-## Analysis Approach
+            ## Analysis Approach
 
-### Step 1: Deep Data Examination
-**Thoroughly analyze** all available data:
-- **Parameter inspection**: Carefully examine each candidate's parameters in detail
-- **Score relationships**: Look for any relationships between parameters and observed scores
-- **Cross-candidate comparison**: Compare similar and different candidates
-- **Pattern exploration**: Look for potential patterns, but don't force them if unclear
+            ### Step 1: Deep Data Examination
+            **Thoroughly analyze** all available data:
+            - **Parameter inspection**: Carefully examine each candidate's parameters in detail
+            - **Score relationships**: Look for any relationships between parameters and observed scores
+            - **Cross-candidate comparison**: Compare similar and different candidates
+            - **Pattern exploration**: Look for potential patterns, but don't force them if unclear
 
-### Step 2: Reasoning-Based Prediction
-**Focus on comprehensive reasoning** rather than rigid rules:
-- **Detailed analysis**: For each candidate, provide extensive reasoning about parameter quality
-- **Similarity assessment**: Compare candidates and explain similarities/differences
-- **Uncertainty acknowledgment**: Be honest about what is unclear or uncertain
-- **Evidence-based prediction**: Base predictions on thorough analysis, not assumed patterns
+            ### Step 2: Reasoning-Based Prediction
+            **Focus on comprehensive reasoning** rather than rigid rules:
+            - **Detailed analysis**: For each candidate, provide extensive reasoning about parameter quality
+            - **Similarity assessment**: Compare candidates and explain similarities/differences
+            - **Uncertainty acknowledgment**: Be honest about what is unclear or uncertain
+            - **Evidence-based prediction**: Base predictions on thorough analysis, not assumed patterns
 
-### Step 3: Thorough Documentation
-**Provide extensive reasoning** for all predictions:
-- **Analysis process**: Explain how you examined the parameters
-- **Comparison logic**: Describe how you compared candidates
-- **Prediction rationale**: Justify your score predictions with detailed reasoning
-- **Confidence assessment**: Discuss your confidence level and any uncertainties
+            ### Step 3: Thorough Documentation
+            **Provide extensive reasoning** for all predictions:
+            - **Analysis process**: Explain how you examined the parameters
+            - **Comparison logic**: Describe how you compared candidates
+            - **Prediction rationale**: Justify your score predictions with detailed reasoning
+            - **Confidence assessment**: Discuss your confidence level and any uncertainties
 
-## Prediction Methodology
-1. **For observed candidates**: Use parameter patterns to denoise raw scores
-   - If raw score seems inconsistent with parameter quality, adjust based on similar candidates
-   - Consider evaluation count (higher count = more reliable, but still may need correction)
-2. **For unobserved candidates**: Use parameter-based function approximation
-   - Find candidates with similar parameter profiles
-   - Apply learned parameter-performance mappings
-   - Predict score based on parameter quality indicators
+            ## Prediction Methodology
+            1. **For observed candidates**: Use parameter patterns to denoise raw scores
+            - If raw score seems inconsistent with parameter quality, adjust based on similar candidates
+            - Consider evaluation count (higher count = more reliable, but still may need correction)
+            2. **For unobserved candidates**: Use parameter-based function approximation
+            - Find candidates with similar parameter profiles
+            - Apply learned parameter-performance mappings
+            - Predict score based on parameter quality indicators
 
-## Output Requirements
-Return ONLY a JSON object with these fields:
-- "pattern_analysis": **Provide extensive analysis** of what you observe in the data. Examine parameter characteristics across candidates, discuss how observed scores relate to parameters, explain your reasoning process. Be thorough and detailed in your analysis.
-- "function_mapping": Document any patterns you discovered (even if uncertain), group similar candidates, and note areas of uncertainty. Don't force patterns if they're not clear.
-- "score_estimates": For each candidate, provide **detailed reasoning** explaining your analysis process, parameter evaluation, cross-candidate comparisons, and how you arrived at your prediction. Reasoning should be comprehensive and thorough.
+            ## Output Requirements
+            Return ONLY a JSON object with these fields:
+            - "pattern_analysis": **Provide extensive analysis** of what you observe in the data. Examine parameter characteristics across candidates, discuss how observed scores relate to parameters, explain your reasoning process. Be thorough and detailed in your analysis.
+            - "function_mapping": Document any patterns you discovered (even if uncertain), group similar candidates, and note areas of uncertainty. Don't force patterns if they're not clear.
+            - "score_estimates": For each candidate, provide **detailed reasoning** explaining your analysis process, parameter evaluation, cross-candidate comparisons, and how you arrived at your prediction. Reasoning should be comprehensive and thorough.
 
-## Example Output Format
-{example_format}
-""",
-            },
-            {
-                "role": "user", 
-                "content": f"""
-## Candidate Data
-{candidate_summaries_json}
+            ## Example Output Format
+            {example_format}
+            """,
+                        },
+                        {
+                            "role": "user", 
+                            "content": f"""
+            ## Candidate Data
+            {candidate_summaries_json}
 
-## Parameter Schema
-{example_param_schema_json}
+            ## Parameter Schema
+            {example_param_schema_json}
 
-## Task
-**Function Approximation Challenge**: Analyze the relationship between parameters and performance, then predict scores for ALL candidates through detailed reasoning.
+            ## Task
+            **Function Approximation Challenge**: Analyze the relationship between parameters and performance, then predict scores for ALL candidates through detailed reasoning.
 
-**Your Mission**:
-1. **Thoroughly examine** all candidate parameters and any available score data
-2. **Provide extensive reasoning** for each prediction based on your detailed analysis
-3. **Compare candidates** to identify similarities and differences that might inform predictions
-4. **Consider noise** in observed scores and use cross-candidate insights where helpful
-5. **Focus on reasoning quality** over discovering specific patterns - be thorough in your analysis
+            **Your Mission**:
+            1. **Thoroughly examine** all candidate parameters and any available score data
+            2. **Provide extensive reasoning** for each prediction based on your detailed analysis
+            3. **Compare candidates** to identify similarities and differences that might inform predictions
+            4. **Consider noise** in observed scores and use cross-candidate insights where helpful
+            5. **Focus on reasoning quality** over discovering specific patterns - be thorough in your analysis
 
-**Key Approach**: Provide comprehensive, detailed reasoning for each prediction. Don't force patterns if they're not clear - focus on thorough analysis and honest assessment of what you observe.
+            **Key Approach**: Provide comprehensive, detailed reasoning for each prediction. Don't force patterns if they're not clear - focus on thorough analysis and honest assessment of what you observe.
 
-**Critical**: Each candidate's reasoning should be extensive and detailed. Quality of reasoning is more important than finding specific patterns.
+            **Critical**: Each candidate's reasoning should be extensive and detailed. Quality of reasoning is more important than finding specific patterns.
 
-Return ONLY the JSON object with your detailed analysis and thoroughly reasoned score predictions.
-""",
-            },
-        ]
+            Return ONLY the JSON object with your detailed analysis and thoroughly reasoned score predictions.
+            """,
+                        },
+                    ]
         
         response_format = {"type": "json_object"}
         
@@ -279,6 +282,18 @@ Return ONLY the JSON object with your detailed analysis and thoroughly reasoned 
             print_color(f"Ground truth scores: {self.ground_truth_scores}", "blue")
             
         return predicted_scores_array
+    
+    def predict_scores(self, buffer, verbose: bool = False, temperature: float = 0.0):
+        """
+        Predict scores for all candidates in the buffer.
+        """
+        default_scores = np.array([c.get('mean_score', 0.0) for c in buffer])
+        predicted_scores = self.regressor.predict_scores()
+        if verbose:
+            print_color(f"Predicted scores: {predicted_scores}", "green")
+            print_color(f"Mean scores (fallback): {default_scores}", "yellow")
+            print_color(f"Ground truth scores: {self.ground_truth_scores}", "blue")
+        return predicted_scores
     
     def train(self, guide, validate_dataset, test_dataset,num_threads,num_epochs, eval_frequency,temperature=0.0,validate_batch_size=None, *args, **kwargs):
         """A general training method. In each epoch collect some data by evaluating agents. Then calculate the prediction error by comparing the predicted scores and ground truth scores."""
