@@ -424,4 +424,6 @@ class Regressor:
         # For each candidate in the batch, add the predicted score to the buffer.
         for candidate, predicted_score in zip(batch, avg_predicted_scores):
             candidate['predicted_score'] = predicted_score
+        # Return the average predicted scores.
+        return avg_predicted_scores
 
