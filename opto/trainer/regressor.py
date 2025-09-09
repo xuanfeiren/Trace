@@ -96,7 +96,9 @@ class Regressor:
             # Sequential processing
             for batch in batches:
                 self.predict_scores_for_batch(batch)
-        return 
+        # Return the predicted scores for the buffer.
+        predicted_scores_for_the_buffer = [candidate['predicted_score'] for candidate in buffer_list]
+        return np.array(predicted_scores_for_the_buffer)
     
     def sample_minibatch(self):
         """Sample a subset of candidates with statistics to construct the prompt."""
