@@ -122,6 +122,8 @@ class Regressor:
         # Update scores for subset_with_statistics
         for candidate_entry in shuffled_subset:
             candidate_entry['mean_score'] = candidate_entry['score_sum'] / (candidate_entry['eval_count'] or 1E-9)
+            candidate_entry['squared_score_sum'] = candidate_entry['score_sum']
+            candidate_entry['score_variance'] = candidate_entry['squared_score_sum'] / (candidate_entry['eval_count'] or 1E-9) - candidate_entry['mean_score']**2
         
         # Default fallback: return zeros for all candidates to predict
         default_scores = np.zeros(len(batch_to_predict))
@@ -140,6 +142,7 @@ class Regressor:
                     "parameters": {k.py_name if hasattr(k, 'py_name') else str(k): v for k, v in cand_entry['params'].items()},
                     "eval_count": cand_entry['eval_count'],
                     "mean_score": cand_entry['mean_score'],
+                    "score_variance": cand_entry['score_variance'],
                 }
                 serializable_training_summaries.append(summary)
             
@@ -149,6 +152,7 @@ class Regressor:
                 training_candidates_xml += f"  <candidate index='{summary['index']}'>\n"
                 training_candidates_xml += f"    <eval_count>{summary['eval_count']}</eval_count>\n"
                 training_candidates_xml += f"    <mean_score>{summary['mean_score']}</mean_score>\n"
+                training_candidates_xml += f"    <score_variance>{summary['score_variance']}</score_variance>\n"
                 training_candidates_xml += "    <parameters>\n"
                 for param_name, param_value in summary['parameters'].items():
                     # Escape XML special characters
@@ -173,6 +177,7 @@ class Regressor:
                 "parameters": {k.py_name if hasattr(k, 'py_name') else str(k): v for k, v in cand_entry['params'].items()},
                 "eval_count": cand_entry.get('eval_count', 0),
                 "mean_score": cand_entry.get('mean_score', 0.0),
+                "score_variance": cand_entry.get('score_variance', 0.0),
             }
             serializable_prediction_summaries.append(summary)
         
@@ -182,6 +187,7 @@ class Regressor:
             prediction_candidates_xml += f"  <candidate index='{summary['index']}'>\n"
             prediction_candidates_xml += f"    <eval_count>{summary['eval_count']}</eval_count>\n"
             prediction_candidates_xml += f"    <mean_score>{summary['mean_score']}</mean_score>\n"
+            prediction_candidates_xml += f"    <score_variance>{summary['score_variance']}</score_variance>\n"
             prediction_candidates_xml += "    <parameters>\n"
             for param_name, param_value in summary['parameters'].items():
                 # Escape XML special characters
