@@ -971,6 +971,9 @@ class llm_search(MinibatchAlgorithm):
             self.total_samples += len(xs)
             
             # update_dicts is always a list now. update dicts may be empty if all optimizer steps failed.
+            # construct a temporary buffer to store the new candidates, with the current one. Totally there are num_multiple_generations + 1 candidates. After the generation, select the one with the highest predicted score, to generate the next candidates.
+            temporary_batch = []
+            temporary_batch.append(current_entry)
             for i, new_update_dict in enumerate(update_dicts):
                 # The new update dict may only contain part of the parameters, we need to merge it with the current update dict
                 for p in current_update_dict:
@@ -988,13 +991,19 @@ class llm_search(MinibatchAlgorithm):
                     'num_validation': 0
                 }
                 self.buffer.append(new_candidate_entry)
-                # Update current_entry to the first one for next iteration
-                if i == 0:
-                    current_entry = new_candidate_entry
-                    # update the agent with the first update_dict
-                    self.optimizer.update(new_update_dict)
+                temporary_batch.append(new_candidate_entry)
+                # # Update current_entry to the first one for next iteration
+                # if i == 0:
+                #     current_entry = new_candidate_entry
+                #     # update the agent with the first update_dict
+                #     self.optimizer.update(new_update_dict)
 
-            
+            # select the one with the highest predicted score, to generate the next candidates.
+            temporary_batch_predicted_scores = self.regressor.predict_scores(temporary_batch)
+            selected_candidate_entry = temporary_batch[np.argmax(temporary_batch_predicted_scores)]
+            self.optimizer.update(selected_candidate_entry['params'])
+            current_entry = selected_candidate_entry    
+
         self.total_proposals += num_steps*self.num_multiple_generations
         return 
     
