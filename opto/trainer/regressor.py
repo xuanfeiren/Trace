@@ -156,9 +156,16 @@ class Regressor:
                 training_candidates_xml += "  </candidate>\n"
             training_candidates_xml += "</training_candidates>"
         
-        # Prepare serializable prediction candidate summaries
+        # Randomly shuffle batch_to_predict and keep track of original order
+        shuffled_prediction_with_original_idx = [(i, entry) for i, entry in enumerate(batch_to_predict)]
+        random.shuffle(shuffled_prediction_with_original_idx)
+        shuffled_prediction_batch = [entry for _, entry in shuffled_prediction_with_original_idx]
+        # Create mapping from shuffled index to original index
+        shuffled_to_original_idx = {shuffled_idx: original_idx for shuffled_idx, (original_idx, _) in enumerate(shuffled_prediction_with_original_idx)}
+        
+        # Prepare serializable prediction candidate summaries using shuffled order
         serializable_prediction_summaries = []
-        for idx, cand_entry in enumerate(batch_to_predict):
+        for idx, cand_entry in enumerate(shuffled_prediction_batch):
             summary = {
                 "index": idx,
                 "parameters": {k.py_name if hasattr(k, 'py_name') else str(k): v for k, v in cand_entry['params'].items()},
@@ -366,17 +373,22 @@ class Regressor:
             print_color(f"WARNING: Failed to parse regressor XML output: {e}. Using default scores.", "red")
             return default_scores
 
-        # Extract predicted scores in the order they appear in the batch
+        # Extract predicted scores in original batch order
         predicted_scores = []
-        for idx in range(len(batch_to_predict)):
+        for idx in range(len(shuffled_prediction_batch)):
             candidate_key = str(idx)
+            original_idx = shuffled_to_original_idx[idx]
             
             if candidate_key in score_estimates:
                 predicted_score = score_estimates[candidate_key]
             else:
                 predicted_score = 0.0
             
-            predicted_scores.append(predicted_score)
+            predicted_scores.append((original_idx, predicted_score))
+        
+        # Sort by original index to maintain order
+        predicted_scores.sort(key=lambda x: x[0])
+        predicted_scores = [score for _, score in predicted_scores]
         
         return np.array(predicted_scores)
         
