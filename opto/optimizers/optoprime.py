@@ -492,7 +492,7 @@ class OptoPrime(Optimizer):
         return text
 
     def _step(
-        self, verbose=False, mask=None, *args, **kwargs
+        self, verbose=False, mask=None, temperature=None, *args, **kwargs
     ) -> Dict[ParameterNode, Any]:
         assert isinstance(self.propagator, GraphPropagator)
         summary = self.summarize()
@@ -506,6 +506,7 @@ class OptoPrime(Optimizer):
             user_prompt=user_prompt,
             verbose=verbose,
             max_tokens=self.max_tokens,
+            temperature=temperature,
         )
 
         if "TERMINATE" in response:
@@ -609,6 +610,7 @@ class OptoPrime(Optimizer):
         user_prompt: str,
         verbose: Union[bool, str] = False,
         max_tokens: int = 4096,
+        temperature: float = None,
     ):
         """Call the LLM with a prompt and return the response."""
         if verbose not in (False, "output"):
@@ -620,10 +622,23 @@ class OptoPrime(Optimizer):
         ]
     
         response_format =  {"type": "json_object"} if self.use_json_object_format else None
-        try:  # Try tp force it to be a json object
-            response = self.llm(messages=messages, max_tokens=max_tokens, response_format=response_format)
+        
+        # Build kwargs for LLM call
+        llm_kwargs = {
+            "messages": messages,
+            "max_tokens": max_tokens
+        }
+        if response_format is not None:
+            llm_kwargs["response_format"] = response_format
+        if temperature is not None:
+            llm_kwargs["temperature"] = temperature
+            
+        try:  # Try to force it to be a json object
+            response = self.llm(**llm_kwargs)
         except Exception:
-            response = self.llm(messages=messages, max_tokens=max_tokens)
+            # Fallback without response_format if it fails
+            fallback_kwargs = {k: v for k, v in llm_kwargs.items() if k != "response_format"}
+            response = self.llm(**fallback_kwargs)
         
         response = response.choices[0].message.content
 
