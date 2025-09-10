@@ -1105,6 +1105,7 @@ class llm_search(MinibatchAlgorithm):
             else:
                 starting_point_entry = max(self.buffer, key=lambda x: x.get('mean_score', 0.0))
             self.logger.log('Selected candidate mean score at each round', starting_point_entry.get('mean_score', 0.0), epoch+1, color='blue')
+            self.logger.log('Selected candidate eval count at each round', starting_point_entry.get('eval_count', 0), epoch+1, color='blue')
             self.print_buffer_statistics()
             self.generate_new_candidates(starting_point_entry, train_batch_size=batch_size, num_steps=num_generation_steps)
 
