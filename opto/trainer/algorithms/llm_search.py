@@ -913,8 +913,21 @@ class llm_search(MinibatchAlgorithm):
                 print(f"Optimizer step failed after retries: {e}. Returning None.")
                 return None
         
-        # Create list of functions for async_run (works for both single and multiple generations)
-        runs = [single_optimizer_step_with_retry] * self.num_multiple_generations
+        def single_optimizer_step_with_temperature():
+            def optimizer_step_func():
+                return self.optimizer.step(**step_kwargs, temperature=0.7)
+            try:
+                return retry_with_exponential_backoff(
+                    optimizer_step_func, 
+                    operation_name="Optimizer step"
+                )
+            except Exception as e:
+                print(f"Optimizer step failed after retries: {e}. Returning None.")
+                return None
+        
+        # Create list of functions: first uses default, others use temperature=0.7
+        runs = [single_optimizer_step_with_retry]  # First call with default
+        runs.extend([single_optimizer_step_with_temperature] * (self.num_multiple_generations - 1))  # Others with temperature=0.7
         
         # Run optimizer steps asynchronously (or sequentially if num_multiple_generations=1)
         try:
