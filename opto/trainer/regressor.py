@@ -328,7 +328,7 @@ class Regressor:
         
         llm_response_str = getattr(getattr(llm_response, 'choices', [{}])[0], 'message', None)
         llm_response_str = getattr(llm_response_str, 'content', None)
-        # print_color(llm_response_str, "green")
+        print_color(llm_response_str, "green")
         if not llm_response_str:
             print_color("WARNING: Regressor LLM returned empty response. Using default scores.", "red")
             return default_scores
