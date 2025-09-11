@@ -185,9 +185,9 @@ class Regressor:
         prediction_candidates_xml = "<prediction_candidates>\n"
         for summary in serializable_prediction_summaries:
             prediction_candidates_xml += f"  <candidate index='{summary['index']}'>\n"
-            prediction_candidates_xml += f"    <eval_count>{summary['eval_count']}</eval_count>\n"
-            prediction_candidates_xml += f"    <mean_score>{summary['mean_score']}</mean_score>\n"
-            prediction_candidates_xml += f"    <score_variance>{summary['score_variance']}</score_variance>\n"
+            # prediction_candidates_xml += f"    <eval_count>{summary['eval_count']}</eval_count>\n"
+            # prediction_candidates_xml += f"    <mean_score>{summary['mean_score']}</mean_score>\n"
+            # prediction_candidates_xml += f"    <score_variance>{summary['score_variance']}</score_variance>\n"
             prediction_candidates_xml += "    <parameters>\n"
             for param_name, param_value in summary['parameters'].items():
                 # Escape XML special characters
@@ -213,21 +213,12 @@ class Regressor:
 
         # Create the score prediction prompt using XML format
         example_format = '''<prediction_result>
-        <pattern_analysis>
-            [Analyze the training candidates to identify patterns between parameters and observed scores.]
-        </pattern_analysis>
-        <function_mapping>
-            <discovered_patterns>
-            <pattern>[List parameter-performance patterns discovered from training data]</pattern>
-            </discovered_patterns>
-            <similarity_groups>
-            <group>[Group similar training candidates and explain relationships]</group>
-            </similarity_groups>
-            <uncertainty_notes>[Discuss what patterns are unclear or uncertain]</uncertainty_notes>
-        </function_mapping>
+        <Deep Data Examination>
+            [Comprehensive analysis of ALL training data - examine all training candidates' parameters and scores, identify parameter-performance relationships, understand what makes parameters effective or ineffective, compare similar and different candidates to understand patterns, build overall understanding that will inform all predictions]
+        </Deep Data Examination>
         <score_estimates>
             <candidate index="0">
-            <reasoning>[Provide thorough analysis and prediction reasoning]</reasoning>
+            <reasoning>[Detailed reasoning for this specific candidate - analyze the parameters thoroughly, compare to similar training examples from your analysis above, explain your logic for the predicted score, discuss confidence level and any uncertainty]</reasoning>
             <predicted_score>0.XX</predicted_score>
             </candidate>
         </score_estimates>
@@ -257,40 +248,33 @@ class Regressor:
         ## Analysis Approach
 
         ### Step 1: Deep Data Examination
-        **Thoroughly analyze** all available data:
-        - **Parameter inspection**: Carefully examine each candidate's parameters in detail
-        - **Score relationships**: Look for any relationships between parameters and observed scores
-        - **Cross-candidate comparison**: Compare similar and different candidates
-        - **Pattern exploration**: Look for potential patterns, but don't force them if unclear
+        **First, thoroughly analyze ALL available training data:**
+        - Examine all training candidates' parameters and their observed scores
+        - Look for relationships between parameter characteristics and performance
+        - Identify what makes parameters effective or ineffective
+        - Compare similar and different candidates to understand patterns
+        - Build overall understanding of the parameter-performance relationship
 
-        ### Step 2: Reasoning-Based Prediction
-        **Focus on comprehensive reasoning** rather than rigid rules:
-        - **Detailed analysis**: For each candidate, provide extensive reasoning about parameter quality
-        - **Similarity assessment**: Compare candidates and explain similarities/differences
-        - **Uncertainty acknowledgment**: Be honest about what is unclear or uncertain
-        - **Evidence-based prediction**: Base predictions on thorough analysis, not assumed patterns
-
-        ### Step 3: Thorough Documentation
-        **Provide extensive reasoning** for all predictions:
-        - **Analysis process**: Explain how you examined the parameters
-        - **Comparison logic**: Describe how you compared candidates
-        - **Prediction rationale**: Justify your score predictions with detailed reasoning
-        - **Confidence assessment**: Discuss your confidence level and any uncertainties
+        ### Step 2: Individual Candidate Reasoning
+        **Then, for each prediction candidate, provide detailed reasoning:**
+        - Analyze the candidate's specific parameters thoroughly
+        - Compare to similar training examples from your analysis
+        - Explain your reasoning for the predicted score
+        - Be honest about uncertainty and confidence level
 
         ## Prediction Methodology
         1. **For training candidates**: Use parameter patterns to denoise raw scores
         - If raw score seems inconsistent with parameter quality, adjust based on similar candidates
-        - Consider evaluation count (higher count = more reliable, but still may need correction)
+        - Consider eval_count (higher count = more reliable, but still may need correction. The mean_score is the empirical success rate on eval_count tasks. So if eval_count is very small, the mean_score may not be reliable.)
         2. **For prediction candidates**: Use parameter-based function approximation
         - Find candidates with similar parameter profiles from training data
         - Apply learned parameter-performance mappings
         - Predict score based on parameter quality indicators
 
         ## Output Requirements
-        Return ONLY an XML structure with these elements:
-        - <pattern_analysis>: **Provide extensive analysis** of what you observe in the data. Examine parameter characteristics across candidates, discuss how observed scores relate to parameters, explain your reasoning process. Be thorough and detailed in your analysis.
-        - <function_mapping>: Document any patterns you discovered (even if uncertain), group similar candidates, and note areas of uncertainty. Don't force patterns if they're not clear.
-        - <score_estimates>: For each prediction candidate, provide **detailed reasoning** explaining your analysis process, parameter evaluation, cross-candidate comparisons, and how you arrived at your prediction. Reasoning should be comprehensive and thorough.
+        Return ONLY an XML structure with these two elements:
+        - <Deep Data Examination>: **Comprehensive analysis of ALL training data** - Examine all training candidates' parameters and scores, identify parameter-performance relationships, understand what makes parameters effective, and build foundational insights for predictions.
+        - <score_estimates>: **For each prediction candidate, provide detailed reasoning** - Analyze the specific parameters, compare to training examples, explain prediction logic, and assess confidence level. Each candidate needs thorough reasoning.
 
         ## Example Output Format
         {example_format}
@@ -311,20 +295,18 @@ class Regressor:
         {example_param_schema_xml}
 
         ## Task
-        **Function Approximation Challenge**: Analyze the relationship between parameters and performance, then predict scores for ALL prediction candidates through detailed reasoning.
+        **Your Mission**: Learn from training data to predict scores for all prediction candidates.
 
-        **Your Mission**:
-        1. **Thoroughly examine** all training candidate parameters and any available score data
-        2. **Provide extensive reasoning** for each prediction based on your detailed analysis
-        3. **Compare candidates** to identify similarities and differences that might inform predictions
-        4. **Consider noise** in observed scores and use cross-candidate insights where helpful
-        5. **Focus on reasoning quality** over discovering specific patterns - be thorough in your analysis
+        **Simple Process**:
+        1. **Deep Data Examination**: First, thoroughly analyze ALL training data - examine all candidates' parameters and scores, understand what makes parameters effective, identify patterns and relationships.
+        2. **Individual Reasoning**: Then, for each prediction candidate, provide detailed reasoning - analyze the specific parameters, compare to training examples, explain your prediction logic.
 
-        **Key Approach**: Provide comprehensive, detailed reasoning for each prediction. Don't force patterns if they're not clear - focus on thorough analysis and honest assessment of what you observe.
+        **Key Points**: 
+        - Start with comprehensive analysis of all training data
+        - Provide thorough reasoning for each individual prediction
+        - Be honest about uncertainty and confidence levels
 
-        **Critical**: Each candidate's reasoning should be extensive and detailed. Quality of reasoning is more important than finding specific patterns.
-
-        Return ONLY the XML structure with your detailed analysis and thoroughly reasoned score predictions for the prediction candidates.
+        Return ONLY the XML structure with your analysis and reasoned score predictions.
         """,
         },
         ]
