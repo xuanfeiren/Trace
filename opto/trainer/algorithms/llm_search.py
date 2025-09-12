@@ -20,7 +20,7 @@ import math
 from opto.trainer.utils import retry_with_exponential_backoff, sample_minibatch
 from opto.trainer.algorithms.baselines import MinibatchAlgorithm , batchify
 from opto.trainer.utils import evaluate_agent
-from opto.trainer.regressor import Regressor
+from opto.trainer.regressor import Regressor, EmbeddingRegressor
 
 DOMAIN_CONTEXT = """## Problem Context and Domain Knowledge
 You are a score prediction model for tau-bench agent configurations. You are optimizing agents for tool-agent-user interaction in real-world domains (airline and retail environments).
@@ -60,7 +60,7 @@ class llm_search(MinibatchAlgorithm):
     def __init__(self, agent, optimizer, num_threads: int = None, logger=None,select_arm_by_predicted_score: bool = True, num_multiple_generations: int = 1, do_validation: bool = True, *args, **kwargs):
         super().__init__(agent, optimizer, num_threads=num_threads, logger=logger, *args, **kwargs)
         self.buffer = deque(maxlen=500)
-        self.regressor = Regressor(model_name="gemini/gemini-2.0-flash", temperature=0.0, buffer=self.buffer, max_candidates_per_prompt=50, max_candidates_to_predict=20, num_repetitions=5, num_threads=num_threads)
+        
         
         self.llm_model = "gemini/gemini-2.0-flash"
         self.llm = LLM(model=self.llm_model)
@@ -77,6 +77,10 @@ class llm_search(MinibatchAlgorithm):
             'num_validation':0,
         }
         self.buffer.append(initial_candidate_entry)
+        # Initialize the regressor after the buffer is initialized.
+        # self.regressor = Regressor(model_name="gemini/gemini-2.0-flash", temperature=0.0, buffer=self.buffer, max_candidates_per_prompt=50, max_candidates_to_predict=20, num_repetitions=5, num_threads=num_threads)
+        self.regressor = EmbeddingRegressor(buffer=self.buffer, embedding_model="gemini/text-embedding-004", num_threads=num_threads, learning_rate=0.2, regularization_strength=1e-4, max_iterations=20000, tolerance=5e-3)
+        
         self.total_samples = 0
         self.total_proposals = 0
         self.domain_context = DOMAIN_CONTEXT
