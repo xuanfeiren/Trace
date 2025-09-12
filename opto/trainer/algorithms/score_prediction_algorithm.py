@@ -11,7 +11,7 @@ from opto.optimizers.utils import print_color
 from opto.trainer.utils import retry_with_exponential_backoff, evaluate_agent
 from opto.trainer.algorithms.BAI_algorithms import BAIAlgorithmBase, set_parameters_for_agent
 import litellm
-from opto.trainer.regressor import Regressor
+from opto.trainer.regressor import Regressor, EmbeddingRegressor
 
 DOMAIN_CONTEXT = """## Problem Context and Domain Knowledge
 You are a score prediction model for tau-bench agent configurations. You are optimizing agents for tool-agent-user interaction in real-world domains (airline and retail environments).
@@ -59,7 +59,8 @@ class ScorePrediction(BAIAlgorithmBase):
         # Initial buffer construction.
         self.buffer = deque(maxlen=100)
         # Use the new regressor to predict scores.
-        self.regressor = Regressor(model_name="gemini/gemini-2.0-flash", temperature=0.0, buffer=self.buffer, max_candidates_per_prompt=50, max_candidates_to_predict=20, num_repetitions=5, num_threads=num_threads)
+        # self.regressor = Regressor(model_name="gemini/gemini-2.0-flash", temperature=0.0, buffer=self.buffer, max_candidates_per_prompt=50, max_candidates_to_predict=20, num_repetitions=5, num_threads=num_threads)
+        self.regressor = EmbeddingRegressor(buffer=self.buffer, num_threads=num_threads,embedding_model="gemini/text-embedding-004", learning_rate=0.01)
         for i, update_dict in enumerate(self.update_dicts):   
             # Evaluate one candidate and update the buffer statistics.
             set_parameters_for_agent(self.agent, update_dict)
