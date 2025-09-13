@@ -212,7 +212,7 @@ class Minibatch(AlgorithmBase):
         best_params = {p: copy.deepcopy(p.data) for p in self.optimizer.parameters}
         params_values = list(best_params.values())
         self.logger.log('Final parameter 1', params_values[0], self.n_iters, color='magenta')
-        self.logger.log('Final parameter 2', params_values[1], self.n_iters, color='magenta')
+        # self.logger.log('Final parameter 2', params_values[1], self.n_iters, color='magenta')
         return train_scores, test_score
 
     def evaluate(self, agent, guide, xs, infos, min_score=None, num_samples=1, num_threads=None, description=None):
