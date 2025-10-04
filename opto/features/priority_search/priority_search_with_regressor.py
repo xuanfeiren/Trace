@@ -1,8 +1,18 @@
 import numpy as np
 import copy
+import sys
+import os
 from typing import Union, List, Tuple, Dict, Any, Optional
 from opto.features.priority_search.search_template import Samples, SearchTemplate, BatchRollout
 from opto.features.priority_search.regressor import LogisticRegressor, LinearRegressor, LinearUCBRegressor, LLMRegressor
+
+# Add the project root to Python path to enable imports from my_processing_agents
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.join(current_dir, '../../../..')  # Go up 4 levels to reach tau-bench root
+project_root = os.path.abspath(project_root)  # Resolve the absolute path
+sys.path.insert(0, project_root)
+
+from my_processing_agents.pretained_regressor import PretrainedLinearRegressor
 from opto.features.priority_search.priority_search import PrioritySearch, ModuleCandidate, HeapMemory
 import heapq
 
@@ -115,6 +125,24 @@ class PrioritySearch_with_Regressor(PrioritySearch):
                 regularization_strength=regressor_regularization_strength,
                 transformation_exploration_factor=regressor_transformation_exploration_factor,
                 linear_dim=regressor_projection_dim
+            )
+        elif regressor_type == 'pretrained_linear':
+            # Set default paths to the regressor model files if not provided
+            regressor_weights_path = os.path.join(project_root, 'regressor_models', 'linear_reg_dim768_reg0.0001_weights.npy')
+            regressor_bias_path = os.path.join(project_root, 'regressor_models', 'linear_reg_dim768_reg0.0001_bias.npy')
+            
+            # Debug: print paths to verify they're correct
+            print(f"Project root: {project_root}")
+            print(f"Weights path: {regressor_weights_path}")
+            print(f"Bias path: {regressor_bias_path}")
+            print(f"Weights file exists: {os.path.exists(regressor_weights_path)}")
+            print(f"Bias file exists: {os.path.exists(regressor_bias_path)}")
+            
+            self.regressor = PretrainedLinearRegressor(
+                weights_path=regressor_weights_path,
+                bias_path=regressor_bias_path,
+                embedding_model=regressor_embedding_model,
+                num_threads=num_threads
             )
         elif regressor_type == 'linear_ucb':
             self.regressor = LinearUCBRegressor(

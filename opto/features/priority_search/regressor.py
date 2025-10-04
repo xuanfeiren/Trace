@@ -497,7 +497,7 @@ class LinearRegressor(RegressorTemplate):
         os.makedirs(models_dir, exist_ok=True)
         
         # Save the weights and bias to npy with descriptive names
-        model_name = f"linear_reg_dim{self.linear_dim}_reg{self.regularization_strength}"
+        model_name = f"linear_reg_dim{self.linear_dim}_reg{self.regularization_strength}_Oct3"
         weights_path = os.path.join(models_dir, f"{model_name}_weights.npy")
         bias_path = os.path.join(models_dir, f"{model_name}_bias.npy")
         
