@@ -323,6 +323,20 @@ class LogisticRegressor(RegressorTemplate):
         end_time = time.time()
         elapsed_time = end_time - start_time
         print_color(f"Regressor update completed in {elapsed_time:.4f} seconds", "cyan")
+        # Create regressor_models directory if it doesn't exist
+        import os
+        models_dir = "regressor_models"
+        os.makedirs(models_dir, exist_ok=True)
+        
+        # Save the weights and bias to npy with descriptive names
+        model_name = f"logistic_reg_Oct4"
+        weights_path = os.path.join(models_dir, f"{model_name}_weights.npy")
+        bias_path = os.path.join(models_dir, f"{model_name}_bias.npy")
+        
+        np.save(weights_path, self.weights)
+        np.save(bias_path, self.bias)
+        
+        print_color(f"Saved regressor model to {weights_path} and {bias_path}", "cyan")
     
     def predict_scores(self,memory):
         """Predict scores for all candidates in the memory."""
