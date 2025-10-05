@@ -128,8 +128,8 @@ class PrioritySearch_with_Regressor(PrioritySearch):
             )
         elif regressor_type == 'pretrained_linear':
             # Set default paths to the regressor model files if not provided
-            regressor_weights_path = os.path.join(project_root, 'regressor_models', 'linear_reg_dim768_reg0.0001_weights.npy')
-            regressor_bias_path = os.path.join(project_root, 'regressor_models', 'linear_reg_dim768_reg0.0001_bias.npy')
+            regressor_weights_path = os.path.join(project_root, 'regressor_models', 'linear_reg_dim768_reg0.0001_Oct3_weights.npy')
+            regressor_bias_path = os.path.join(project_root, 'regressor_models', 'linear_reg_dim768_reg0.0001_Oct3_bias.npy')
             
             # Debug: print paths to verify they're correct
             print(f"Project root: {project_root}")
