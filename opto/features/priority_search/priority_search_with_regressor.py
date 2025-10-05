@@ -5,6 +5,8 @@ import os
 from typing import Union, List, Tuple, Dict, Any, Optional
 from opto.features.priority_search.search_template import Samples, SearchTemplate, BatchRollout
 from opto.features.priority_search.regressor import LogisticRegressor, LinearRegressor, LinearUCBRegressor, LLMRegressor
+# import pretrained regressors
+from my_processing_agents.pretained_regressor import PretrainedLinearRegressor, PretrainedLogisticRegressor
 
 # Add the project root to Python path to enable imports from my_processing_agents
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -12,7 +14,6 @@ project_root = os.path.join(current_dir, '../../../..')  # Go up 4 levels to rea
 project_root = os.path.abspath(project_root)  # Resolve the absolute path
 sys.path.insert(0, project_root)
 
-from my_processing_agents.pretained_regressor import PretrainedLinearRegressor
 from opto.features.priority_search.priority_search import PrioritySearch, ModuleCandidate, HeapMemory
 import heapq
 
@@ -139,6 +140,16 @@ class PrioritySearch_with_Regressor(PrioritySearch):
             print(f"Bias file exists: {os.path.exists(regressor_bias_path)}")
             
             self.regressor = PretrainedLinearRegressor(
+                weights_path=regressor_weights_path,
+                bias_path=regressor_bias_path,
+                embedding_model=regressor_embedding_model,
+                num_threads=num_threads
+            )
+        elif regressor_type == 'pretrained_logistic':
+            regressor_weights_path = os.path.join(project_root, 'regressor_models', 'logistic_reg_Oct4_weights.npy')
+            regressor_bias_path = os.path.join(project_root, 'regressor_models', 'logistic_reg_Oct4_bias.npy')
+            
+            self.regressor = PretrainedLogisticRegressor(
                 weights_path=regressor_weights_path,
                 bias_path=regressor_bias_path,
                 embedding_model=regressor_embedding_model,
