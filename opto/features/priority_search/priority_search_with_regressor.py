@@ -329,3 +329,49 @@ class PrioritySearch_with_Regressor(PrioritySearch):
             return candidate.mean_prediction
         else:
             return candidate.predicted_score
+
+from opto.features.priority_search.generator import LLMCandidateGenerator
+
+class PrioritySearch_with_Regressor_and_Generator(PrioritySearch_with_Regressor):
+    """
+    A subclass of PrioritySearch_with_Regressor that uses a generator to propose new candidates.
+    """
+
+    def __init__(self, 
+                 generator_model_name: str = 'gemini/gemini-2.0-flash',
+                 generator_temperature: float = 0.0,
+                 generator_verbose: bool = False,
+                 **kwargs):
+        super().__init__(**kwargs)
+        # Initialize the generator
+        self.generator = LLMCandidateGenerator(
+            model_name=generator_model_name,
+            temperature=generator_temperature,
+            verbose=generator_verbose
+        )
+    
+    def train(self,
+              *args,
+              generator_frequency: int = 5,  # frequency of generating new candidates
+              num_generator_candidates: int = 5,  # number of candidates to generate
+              **kwargs
+              ):
+        self.generator_frequency = generator_frequency
+        self.num_generator_candidates = num_generator_candidates
+        super().train(*args,**kwargs)
+
+    def propose(self,
+                samples : Samples,
+                verbose : bool = False,
+                **kwargs):
+        candidates = super().propose(samples, verbose=verbose, **kwargs)
+        if self.n_iters % self.generator_frequency == 0:
+            new_candidates = self.generator.generate_candidates(
+                base_module=self.agent,
+                optimizer=self.optimizer,
+                memory=self.memory,
+                num_candidates=self.num_generator_candidates
+            )
+            candidates.extend(new_candidates)
+        print(f"Generated {len(candidates)} new candidates in total.")
+        return candidates
