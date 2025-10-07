@@ -81,12 +81,13 @@ class RegressorTemplate:
     Subclasses should implement update() and predict_scores() methods.
     """
     
-    def __init__(self, embedding_model="gemini/text-embedding-004", num_threads=None, regularization_strength=1, linear_dim=None):
+    def __init__(self, embedding_model="gemini/text-embedding-004", num_threads=None, regularization_strength=1, linear_dim=None, rich_text=True):
         # In the regressor, no need for calling LLM to make the prediction. So we could predict the entire memory at once.
         self.max_candidates_to_predict = 500
         self.embedding_model = embedding_model
         self.num_threads = num_threads
         self.regularization_strength = regularization_strength  # L2 regularization strength (lambda)
+        self.rich_text = rich_text
         
         # Default original embedding dimension (from text-embedding-004)
         self.original_embedding_dim = 768
@@ -114,7 +115,28 @@ class RegressorTemplate:
         assert hasattr(candidate, 'update_dict'), "ModuleCandidate must have an update_dict"
         # Convert parameter nodes to readable names for deterministic embedding
         params_with_names = {k.py_name: v for k, v in candidate.update_dict.items()}
-        return str(params_with_names)
+        
+        if self.rich_text:
+            # Create rich text representation with problem definition and rating question
+            rich_text_parts = []
+            
+            # Add problem definition
+            rich_text_parts.append(f"Problem Definition: {DOMAIN_CONTEXT.strip()}")
+            rich_text_parts.append("")  # Empty line for separation
+            
+            # Add parameter configuration
+            rich_text_parts.append("Parameter Configuration:")
+            for param_name, param_value in params_with_names.items():
+                rich_text_parts.append(f"{param_name}: {param_value}")
+            rich_text_parts.append("")  # Empty line for separation
+            
+            # Add rating question
+            rich_text_parts.append("Question: Based on the problem context above and this parameter configuration, how do you rate this parameter?")
+            
+            return "\n".join(rich_text_parts)
+        else:
+            return str(params_with_names)
+    
 
     def _get_embedding(self, candidate):
         """Get the embedding for a ModuleCandidate."""
@@ -188,8 +210,8 @@ class LogisticRegressor(RegressorTemplate):
     predict_scores has no parameters, it could return predicted scores for all candidates in the memory. 
     predict_scores_for_batch has one parameter, a batch of candidates, it could return predicted scores for the batch of candidates."""
     
-    def __init__(self, embedding_model="gemini/text-embedding-004", num_threads=None, learning_rate=0.001, regularization_strength=1, max_iterations=20000, tolerance=5e-3, linear_dim=None):
-        super().__init__(embedding_model, num_threads, regularization_strength,linear_dim)
+    def __init__(self, embedding_model="gemini/text-embedding-004", num_threads=None, learning_rate=0.001, regularization_strength=1, max_iterations=20000, tolerance=5e-3, linear_dim=None, rich_text=True):
+        super().__init__(embedding_model, num_threads, regularization_strength, linear_dim, rich_text)
         # Logistic regression specific parameters
         self.learning_rate = learning_rate
         self.initial_learning_rate = learning_rate
@@ -372,8 +394,8 @@ class LogisticRegressor(RegressorTemplate):
 class LinearRegressor(RegressorTemplate):
     """Use closed-form solution for regularized linear regression."""
     
-    def __init__(self, embedding_model="gemini/text-embedding-004", num_threads=None, regularization_strength=1, transformation_exploration_factor=0.0, linear_dim=None):
-        super().__init__(embedding_model, num_threads, regularization_strength, linear_dim)
+    def __init__(self, embedding_model="gemini/text-embedding-004", num_threads=None, regularization_strength=1, transformation_exploration_factor=0.0, linear_dim=None, rich_text=True):
+        super().__init__(embedding_model, num_threads, regularization_strength, linear_dim, rich_text)
         # The transformation exploration factor should lie in [0,1]
         assert 0 <= transformation_exploration_factor <= 1, "Transformation exploration factor must be between 0 and 1"
         self.transformation_exploration_factor = transformation_exploration_factor  # 0: [0,1] -> [0,1], 1: [0,1] -> [-1,0]
@@ -556,8 +578,8 @@ class LinearRegressor(RegressorTemplate):
 class LinearUCBRegressor(LinearRegressor):
     """Linear UCB regressor that uses Upper Confidence Bound scores for exploration-exploitation balance."""
     
-    def __init__(self, embedding_model="gemini/text-embedding-004", num_threads=None, regularization_strength=1, alpha=0.3, transformation_exploration_factor=0.0, linear_dim=None):
-        super().__init__(embedding_model, num_threads, regularization_strength, transformation_exploration_factor, linear_dim)
+    def __init__(self, embedding_model="gemini/text-embedding-004", num_threads=None, regularization_strength=1, alpha=0.3, transformation_exploration_factor=0.0, linear_dim=None, rich_text=True):
+        super().__init__(embedding_model, num_threads, regularization_strength, transformation_exploration_factor, linear_dim, rich_text)
         self.alpha = alpha  # UCB exploration parameter
         self.cov = None     # Will be set during update()
     

@@ -67,6 +67,7 @@ class PrioritySearch_with_Regressor(PrioritySearch):
               regressor_alpha: float = 1.0,  # UCB exploration parameter for the regressor
               regressor_transformation_exploration_factor: float = 0.0,  # transformation exploration factor for linear regressors (0: no transformation, 1: maximum exploration)
               regressor_projection_dim: int = None,  # projection dimension for the regressor
+              regressor_rich_text: bool = True,  # whether to use rich text with problem definition for embeddings
               use_validation = False, # whether to validate new proposals with the validation set
               # Additional keyword arguments
               **kwargs
@@ -88,6 +89,7 @@ class PrioritySearch_with_Regressor(PrioritySearch):
             regressor_alpha (float, optional): UCB exploration parameter for the regressor. Defaults to 1.0.
             regressor_transformation_exploration_factor (float, optional): Transformation exploration factor for linear regressors. 0 means no transformation ([0,1] -> [0,1]), 1 means maximum exploration ([0,1] -> [-1,0]). Defaults to 0.0.
             regressor_projection_dim (int, optional): Projection dimension for the regressor. Defaults to None.
+            regressor_rich_text (bool, optional): Whether to use rich text with problem definition for embeddings. Defaults to True.
             use_validation (bool, optional): Whether to validate new proposals with the validation set. Defaults to False.
         """
 
@@ -117,7 +119,8 @@ class PrioritySearch_with_Regressor(PrioritySearch):
             regularization_strength=regressor_regularization_strength,
             max_iterations=regressor_max_iterations,
             tolerance=regressor_tolerance,
-            linear_dim=regressor_projection_dim
+            linear_dim=regressor_projection_dim,
+            rich_text=regressor_rich_text
         )
         elif regressor_type == 'linear':
             self.regressor = LinearRegressor(
@@ -125,7 +128,8 @@ class PrioritySearch_with_Regressor(PrioritySearch):
                 num_threads=num_threads,
                 regularization_strength=regressor_regularization_strength,
                 transformation_exploration_factor=regressor_transformation_exploration_factor,
-                linear_dim=regressor_projection_dim
+                linear_dim=regressor_projection_dim,
+                rich_text=regressor_rich_text
             )
         elif regressor_type == 'pretrained_linear':
             # Set default paths to the regressor model files if not provided
@@ -143,7 +147,8 @@ class PrioritySearch_with_Regressor(PrioritySearch):
                 weights_path=regressor_weights_path,
                 bias_path=regressor_bias_path,
                 embedding_model=regressor_embedding_model,
-                num_threads=num_threads
+                num_threads=num_threads,
+                rich_text=regressor_rich_text
             )
         elif regressor_type == 'pretrained_logistic':
             regressor_weights_path = os.path.join(project_root, 'regressor_models', 'logistic_reg_Oct4_weights.npy')
@@ -153,7 +158,8 @@ class PrioritySearch_with_Regressor(PrioritySearch):
                 weights_path=regressor_weights_path,
                 bias_path=regressor_bias_path,
                 embedding_model=regressor_embedding_model,
-                num_threads=num_threads
+                num_threads=num_threads,
+                rich_text=regressor_rich_text
             )
         elif regressor_type == 'linear_ucb':
             self.regressor = LinearUCBRegressor(
@@ -162,7 +168,8 @@ class PrioritySearch_with_Regressor(PrioritySearch):
                 regularization_strength=regressor_regularization_strength,
                 alpha=regressor_alpha,
                 transformation_exploration_factor=regressor_transformation_exploration_factor,
-                linear_dim=regressor_projection_dim
+                linear_dim=regressor_projection_dim,
+                rich_text=regressor_rich_text
             )
         elif regressor_type == 'llm':
             self.regressor = LLMRegressor(
