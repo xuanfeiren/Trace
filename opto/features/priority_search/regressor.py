@@ -533,14 +533,14 @@ class LinearRegressor(RegressorTemplate):
         os.makedirs(models_dir, exist_ok=True)
         
         # Save the weights and bias to npy with descriptive names
-        model_name = f"linear_reg_dim{self.linear_dim}_reg{self.regularization_strength}_Oct3"
-        weights_path = os.path.join(models_dir, f"{model_name}_weights.npy")
-        bias_path = os.path.join(models_dir, f"{model_name}_bias.npy")
+        # model_name = f"linear_reg_dim{self.linear_dim}_reg{self.regularization_strength}_Oct3"
+        # weights_path = os.path.join(models_dir, f"{model_name}_weights.npy")
+        # bias_path = os.path.join(models_dir, f"{model_name}_bias.npy")
         
-        np.save(weights_path, self.weights)
-        np.save(bias_path, self.bias)
+        # np.save(weights_path, self.weights)
+        # np.save(bias_path, self.bias)
         
-        print_color(f"Saved regressor model to {weights_path} and {bias_path}", "cyan")
+        # print_color(f"Saved regressor model to {weights_path} and {bias_path}", "cyan")
         
 
     def predict_scores(self, memory: List[Tuple[float, ModuleCandidate]]):

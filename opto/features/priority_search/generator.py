@@ -12,19 +12,26 @@ def get_parameter_text(candidate):
 class LLMCandidateGenerator:
     """Generate new candidates using LLM with OptoPrimeV2-style prompts."""
     
-    def __init__(self, model_name="gemini/gemini-2.0-flash", temperature=0.0, verbose=False):
+    def __init__(self, model_name="gemini/gemini-2.0-flash", temperature=0.0, verbose=False, max_candidates_in_prompt=20):
         self.llm = LLM(model=model_name)
         self.temperature = temperature
         # In priority search we store negative scores in the memory
         self.negative_score = True
         self.verbose = verbose
+        self.max_candidates_in_prompt = max_candidates_in_prompt
+        if verbose:
+            print(f"LLMCandidateGenerator initialized with model {model_name} and temperature {temperature}")
     
     def generate_candidates(self, base_module, optimizer, memory, num_candidates=5):
         """Generate new candidates using LLM based on memory of past candidates."""
-        
+        if self.verbose:
+            print(f"Generating {num_candidates} candidates using LLM generator.")
         # Create prompt based on OptoPrimeV2 structure
+        # NOTE a heuristic for now
+        memory_subset = memory[:self.max_candidates_in_prompt]
+        # Use the max_candidates_in_prompt to limit the number of candidates in the prompt
         system_prompt = self._create_system_prompt()
-        user_prompt = self._create_user_prompt(base_module, memory, num_candidates)
+        user_prompt = self._create_user_prompt(base_module, memory_subset, num_candidates)
         
         messages = [
             {"role": "system", "content": system_prompt},
@@ -66,7 +73,8 @@ You will receive information about previous parameter configurations and their p
             sorted_memory = sorted(memory, key=lambda x: x[0], reverse=True)
             
             for i, (score, candidate) in enumerate(sorted_memory[:10]):  # Show top 10
-                memory_text += f"### Configuration {i+1} (Score: {-score:.3f if self.negative_score else score:.3f})\n"
+                display_score = -score if self.negative_score else score
+                memory_text += f"### Configuration {i+1} (Score: {display_score:.3f})\n"
                 # Format parameters with proper names
                 params_display = get_parameter_text(candidate)
                 memory_text += f"Parameters: {params_display}\n\n"

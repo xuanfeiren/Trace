@@ -365,13 +365,22 @@ class PrioritySearch_with_Regressor_and_Generator(PrioritySearch_with_Regressor)
                 verbose : bool = False,
                 **kwargs):
         candidates = super().propose(samples, verbose=verbose, **kwargs)
+        # print('Iter: ', self.n_iters, 'Generator frequency: ', self.generator_frequency, 'Iters % generator frequency: ', self.n_iters % self.generator_frequency)
         if self.n_iters % self.generator_frequency == 0:
+            highest_predicted_score = -self.memory.memory[0][0]
+            print('Highest predicted score: ', highest_predicted_score)
             new_candidates = self.generator.generate_candidates(
                 base_module=self.agent,
                 optimizer=self.optimizer,
-                memory=self.memory,
+                memory=self.memory.memory,
                 num_candidates=self.num_generator_candidates
             )
+            # predict scores for the new candidates
+            temporary_memory = [(0, candidate) for candidate in new_candidates]
+            self.regressor.predict_scores(temporary_memory)
+            # only keep the candidates with predicted scores higher than the highest predicted score
+            new_candidates = [candidate for candidate in new_candidates if candidate.predicted_score > highest_predicted_score]
             candidates.extend(new_candidates)
+            print(f"{len(new_candidates)}/{self.num_generator_candidates} new candidates with predicted scores higher than the current highest predicted score: {highest_predicted_score}")
         print(f"Generated {len(candidates)} new candidates in total.")
         return candidates
