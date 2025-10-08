@@ -110,6 +110,8 @@ class PrioritySearch_with_Regressor(PrioritySearch):
         self._enforce_using_data_collecting_candidates = False
         self.use_validation = use_validation
         self.regressor_type = regressor_type
+        self.highest_predicted_score = 0
+        
         # Initialize the regressor with the long-term memory and custom parameters - this is the only difference from parent class
         if regressor_type == 'logistic':
             self.regressor = LogisticRegressor(
@@ -298,6 +300,8 @@ class PrioritySearch_with_Regressor(PrioritySearch):
         # Predict the scores for the long-term memory and the short-term memory
         self.regressor.predict_scores(self.long_term_memory.memory)
         self.regressor.predict_scores(self.short_term_memory.memory)
+        # update the highest predicted score
+        self.highest_predicted_score = max(self.highest_predicted_score, max([candidate.predicted_score for _, candidate in self.long_term_memory.memory+self.short_term_memory.memory]))
         # Reorder both long_term_memory and short_term_memory according to the predicted scores
         # Extract candidates from long_term_memory tuples and reorder by predicted scores
         long_term_candidates_with_scores = [(-candidate.predicted_score, candidate) for _, candidate in self.long_term_memory.memory]
@@ -367,7 +371,8 @@ class PrioritySearch_with_Regressor_and_Generator(PrioritySearch_with_Regressor)
         candidates = super().propose(samples, verbose=verbose, **kwargs)
         # print('Iter: ', self.n_iters, 'Generator frequency: ', self.generator_frequency, 'Iters % generator frequency: ', self.n_iters % self.generator_frequency)
         if self.n_iters % self.generator_frequency == 0:
-            highest_predicted_score = -self.memory.memory[0][0]
+            # highest_predicted_score = -self.memory.memory[0][0]
+            highest_predicted_score = self.highest_predicted_score
             print('Highest predicted score: ', highest_predicted_score)
             new_candidates = self.generator.generate_candidates(
                 base_module=self.agent,
