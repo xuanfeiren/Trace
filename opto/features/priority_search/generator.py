@@ -12,24 +12,59 @@ def get_parameter_text(candidate):
 class LLMCandidateGenerator:
     """Generate new candidates using LLM with OptoPrimeV2-style prompts."""
     
-    def __init__(self, model_name="gemini/gemini-2.0-flash", temperature=0.0, verbose=False, max_candidates_in_prompt=20):
+    def __init__(self, model_name="gemini/gemini-2.0-flash", temperature=0.0, verbose=False,num_threads=None, max_candidates_in_prompt=20):
         self.llm = LLM(model=model_name)
         self.temperature = temperature
         # In priority search we store negative scores in the memory
         self.negative_score = True
         self.verbose = verbose
+        self.num_threads = num_threads
         self.max_candidates_in_prompt = max_candidates_in_prompt
         if verbose:
             print(f"LLMCandidateGenerator initialized with model {model_name} and temperature {temperature}")
     
     def generate_candidates(self, base_module, optimizer, memory, num_candidates=5):
         """Generate new candidates using LLM based on memory of past candidates."""
+
+        
+        # Generate 1 candidate per batch for maximum reliability
         if self.verbose:
-            print(f"Generating {num_candidates} candidates using LLM generator.")
-        # Create prompt based on OptoPrimeV2 structure
-        # NOTE a heuristic for now
+            print(f"Generating {num_candidates} candidates, 1 candidate per batch")
+        
+        # Create memory subset for prompts
         memory_subset = memory[:self.max_candidates_in_prompt]
-        # Use the max_candidates_in_prompt to limit the number of candidates in the prompt
+        
+        # Create a single generation function and replicate it
+        def generate_single_candidate():
+            return self._generate_single_batch(base_module, optimizer, memory_subset, 1)
+        
+        generation_functions = [generate_single_candidate] * num_candidates
+        
+        # Use async_run if num_threads > 1, otherwise run sequentially
+        if self.num_threads and self.num_threads > 1:
+            from opto.trainer.utils import async_run
+            batch_results = async_run(
+                generation_functions,
+                max_workers=self.num_threads,
+                description=f"Generating {num_candidates} candidates (1 per batch)"
+            )
+        else:
+            # Sequential execution
+            batch_results = [func() for func in generation_functions]
+        
+        # Flatten all candidates from all batches
+        all_candidates = []
+        for batch_candidates in batch_results:
+            if batch_candidates:  # Handle None/empty results
+                all_candidates.extend(batch_candidates)
+        
+        if self.verbose:
+            print(f"Successfully generated {len(all_candidates)} candidates total using the generator")
+        
+        return all_candidates
+    
+    def _generate_single_batch(self, base_module, optimizer, memory_subset, num_candidates):
+        """Generate a single batch of candidates."""
         system_prompt = self._create_system_prompt()
         user_prompt = self._create_user_prompt(base_module, memory_subset, num_candidates)
         
@@ -37,21 +72,21 @@ class LLMCandidateGenerator:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
         ]
-        # print("system_prompt: ", system_prompt)
-        # print("user_prompt: ", user_prompt)
-        if self.verbose:
-            print("Prompt: ", messages)
+        
+        # if self.verbose:
+        #     print(f"Generating batch with {num_candidates} candidates")
+        
         try:
-            response = self.llm(messages=messages, temperature=self.temperature, max_tokens=4000)
+            response = self.llm(messages=messages, temperature=self.temperature, max_tokens=8192)
             response_text = response.choices[0].message.content
             if self.verbose:
-                print("Response: ", response_text)
+                print(f"Response text: {response_text}")
             # Parse candidates from response
             candidates = self._parse_candidates(response_text, base_module, optimizer)
             return candidates
             
         except Exception as e:
-            print(f"Error generating candidates: {e}")
+            print(f"Error generating batch: {e}")
             return []
     
     def _create_system_prompt(self):
@@ -104,26 +139,26 @@ Provide your response in the following XML format:
 [Your analysis of what makes configurations successful and your strategy for improvement]
 </reasoning>
 
-<candidates>
-<candidate index="1">
+<candidates>"""
+
+        # Add candidate examples based on the number requested
+        for i in range(min(num_candidates, 2)):  # Show at most 2 examples
+            prompt += f"""
+<candidate index="{i+1}">
 <reasoning>
 [Brief explanation of why this configuration should perform well]
 </reasoning>
 <parameters>
 [Complete parameter dictionary for this candidate]
 </parameters>
-</candidate>
+</candidate>"""
+        
+        if num_candidates > 2:
+            prompt += f"""
 
-<candidate index="2">
-<reasoning>
-[Brief explanation of why this configuration should perform well]
-</reasoning>
-<parameters>
-[Complete parameter dictionary for this candidate]
-</parameters>
-</candidate>
-
-... (continue for all {num_candidates} candidates)
+... (continue for all {num_candidates} candidates)"""
+        
+        prompt += """
 </candidates>
 
 Generate diverse candidates that explore different promising directions while building on successful patterns."""   

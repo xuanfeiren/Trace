@@ -7,6 +7,7 @@ from opto.features.priority_search.search_template import Samples, SearchTemplat
 from opto.features.priority_search.regressor import LogisticRegressor, LinearRegressor, LinearUCBRegressor, LLMRegressor
 # import pretrained regressors
 from my_processing_agents.pretained_regressor import PretrainedLinearRegressor, PretrainedLogisticRegressor
+from opto.optimizers.utils import print_color
 
 # Add the project root to Python path to enable imports from my_processing_agents
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -301,7 +302,7 @@ class PrioritySearch_with_Regressor(PrioritySearch):
         self.regressor.predict_scores(self.long_term_memory.memory)
         self.regressor.predict_scores(self.short_term_memory.memory)
         # update the highest predicted score
-        self.highest_predicted_score = max(self.highest_predicted_score, max([candidate.predicted_score for _, candidate in self.long_term_memory.memory+self.short_term_memory.memory]))
+        self.highest_predicted_score = max(0, max([candidate.predicted_score for _, candidate in self.long_term_memory.memory+self.short_term_memory.memory]))
         # Reorder both long_term_memory and short_term_memory according to the predicted scores
         # Extract candidates from long_term_memory tuples and reorder by predicted scores
         long_term_candidates_with_scores = [(-candidate.predicted_score, candidate) for _, candidate in self.long_term_memory.memory]
@@ -351,7 +352,9 @@ class PrioritySearch_with_Regressor_and_Generator(PrioritySearch_with_Regressor)
         self.generator = LLMCandidateGenerator(
             model_name=generator_model_name,
             temperature=generator_temperature,
-            verbose=generator_verbose
+            verbose=generator_verbose,
+            max_candidates_in_prompt=20,
+            num_threads=self.num_threads
         )
     
     def train(self,
@@ -383,6 +386,10 @@ class PrioritySearch_with_Regressor_and_Generator(PrioritySearch_with_Regressor)
             # predict scores for the new candidates
             temporary_memory = [(0, candidate) for candidate in new_candidates]
             self.regressor.predict_scores(temporary_memory)
+            generator_mean_predicted_score = np.mean([candidate.predicted_score for candidate in new_candidates])
+            # For debugging, assert the generator mean predicted score is not None.
+            assert generator_mean_predicted_score is not None, "Generator mean predicted score is None"
+            print_color(f"Generator mean predicted score: {generator_mean_predicted_score}", "green")
             # only keep the candidates with predicted scores higher than the highest predicted score
             new_candidates = [candidate for candidate in new_candidates if candidate.predicted_score > highest_predicted_score]
             candidates.extend(new_candidates)
