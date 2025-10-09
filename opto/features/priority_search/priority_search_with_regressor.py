@@ -419,7 +419,6 @@ class PrioritySearch_with_Regressor_and_Generator(PrioritySearch_with_Regressor)
             print_color(f"Mean predicted score of new candidates from the generator: {good_candidates_mean_predicted_score}", "green")
             # Combine original candidates with good generated candidates
             candidates.extend(candidates_from_generator)
-            breakpoint()
         
         return candidates
 
