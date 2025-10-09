@@ -423,10 +423,14 @@ class PrioritySearch_with_Regressor_and_Generator(PrioritySearch_with_Regressor)
             candidates_from_generator = sorted_candidates_from_generator[:self.num_generator_candidates]
             
             # Combine original candidates with good generated candidates. 
-            print_color(f"Added {len(candidates_from_generator)} new candidates from the generator.", "green")
-            mean_predicted_score = np.mean([candidate.predicted_score for candidate in candidates_from_generator])
-            print_color(f"Mean predicted score of new candidates from the generator: {mean_predicted_score}", "green")
-            candidates.extend(candidates_from_generator)
+            
+            if len(candidates_from_generator) > 0:
+                print_color(f"Added {len(candidates_from_generator)} new candidates from the generator.", "green")
+                mean_predicted_score = np.mean([candidate.predicted_score for candidate in candidates_from_generator])
+                print_color(f"Mean predicted score of new candidates from the generator: {mean_predicted_score}", "green")
+                candidates.extend(candidates_from_generator)
+            else:
+                print_color("No new candidates were generated that exceed the current best score.", "yellow")
             # breakpoint()
         
         return candidates
