@@ -64,7 +64,7 @@ class PrioritySearch_with_Regressor(PrioritySearch):
               regressor_learning_rate: float = 0.2,  # learning rate for the regressor
               regressor_regularization_strength: float = 1,  # L2 regularization strength for the regressor
               regressor_max_iterations: int = 20000,  # maximum iterations for regressor training
-              regressor_tolerance: float = 5e-3,  # convergence tolerance for the regressor
+              regressor_tolerance: float = 1e-4,  # convergence tolerance for the regressor
               regressor_alpha: float = 1.0,  # UCB exploration parameter for the regressor
               regressor_transformation_exploration_factor: float = 0.0,  # transformation exploration factor for linear regressors (0: no transformation, 1: maximum exploration)
               regressor_projection_dim: int = None,  # projection dimension for the regressor
@@ -363,12 +363,14 @@ class PrioritySearch_with_Regressor_and_Generator(PrioritySearch_with_Regressor)
               generator_attempts: int = 50,  # number of attempts to generate new candidates
               generator_patience: int = 3,  # number of attempts to generate new candidates
               num_generator_candidates: int = 5,  # number of candidates to generate
+              score_improvement_threshold: float = 1e-3,  # minimum improvement in predicted score to reset patience
               **kwargs
               ):
         self.generator_frequency = generator_frequency
         self.num_generator_candidates = num_generator_candidates
         self.generator_attempts = generator_attempts
         self.generator_patience = generator_patience
+        self.score_improvement_threshold = score_improvement_threshold
         super().train(*args,**kwargs)
 
     def propose(self,
@@ -402,7 +404,7 @@ class PrioritySearch_with_Regressor_and_Generator(PrioritySearch_with_Regressor)
                 self.regressor.predict_scores(memory_to_predict)
                 predicted_scores = [candidate.predicted_score for candidate in new_candidates]
                 highest_predicted_score_attempt = max(predicted_scores)
-                if highest_predicted_score_attempt > highest_predicted_score:
+                if highest_predicted_score_attempt > highest_predicted_score + self.score_improvement_threshold:
                     patience = 0
                     print_color(f"New highest predicted score: {highest_predicted_score_attempt}", "green")
                     # Add the promising candidates from this attempt. Only add those with higher predicted scores than the current best.
@@ -414,12 +416,16 @@ class PrioritySearch_with_Regressor_and_Generator(PrioritySearch_with_Regressor)
                 if patience > self.generator_patience:
                     break
             print_color(f"Generator attempted {attempt+1} times, highest predicted score: {highest_predicted_score}", "green")
+            print_color(f"The generator generated {len(candidates_from_generator)} candidates which have predicted scores higher than the current best.", "green")
             # Filter candidates that are better than current best
+            # Put parts of new candidates from the generator that are better than the current best into the candidates list. Only add the top self.num_generator_candidates candidates.
+            sorted_candidates_from_generator = sorted(candidates_from_generator, key=lambda x: x.predicted_score, reverse=True)
+            candidates_from_generator = sorted_candidates_from_generator[:self.num_generator_candidates]
             
+            # Combine original candidates with good generated candidates. 
             print_color(f"Added {len(candidates_from_generator)} new candidates from the generator.", "green")
-            good_candidates_mean_predicted_score = np.mean([candidate.predicted_score for candidate in candidates_from_generator])
-            print_color(f"Mean predicted score of new candidates from the generator: {good_candidates_mean_predicted_score}", "green")
-            # Combine original candidates with good generated candidates
+            mean_predicted_score = np.mean([candidate.predicted_score for candidate in candidates_from_generator])
+            print_color(f"Mean predicted score of new candidates from the generator: {mean_predicted_score}", "green")
             candidates.extend(candidates_from_generator)
             # breakpoint()
         

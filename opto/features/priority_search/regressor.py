@@ -210,14 +210,16 @@ class LogisticRegressor(RegressorTemplate):
     predict_scores has no parameters, it could return predicted scores for all candidates in the memory. 
     predict_scores_for_batch has one parameter, a batch of candidates, it could return predicted scores for the batch of candidates."""
     
-    def __init__(self, embedding_model="gemini/text-embedding-004", num_threads=None, learning_rate=0.001, regularization_strength=1, max_iterations=20000, tolerance=5e-3, linear_dim=None, rich_text=True):
+    def __init__(self, embedding_model="gemini/text-embedding-004", num_threads=None, learning_rate=0.001, regularization_strength=1, max_iterations=20000, tolerance=5e-3, gradient_tolerance=5e-3, linear_dim=None, rich_text=True):
         super().__init__(embedding_model, num_threads, regularization_strength, linear_dim, rich_text)
         # Logistic regression specific parameters
         self.learning_rate = learning_rate
         self.initial_learning_rate = learning_rate
         self.max_iterations = max_iterations
         self.tolerance = tolerance
-        self.patience = 20  # Early stopping patience
+        self.gradient_tolerance = gradient_tolerance
+        self.patience = 50  # Early stopping patience
+        self.lr_decay_factor = 0.8   # Learning rate decay factor
         
         # Convert weights and bias to PyTorch tensors
         self.weights_tensor = torch.tensor(self.weights, dtype=torch.float32, requires_grad=True)
@@ -284,6 +286,12 @@ class LogisticRegressor(RegressorTemplate):
                                    lr=self.learning_rate, 
                                    weight_decay=self.regularization_strength)
         
+        # Initialize learning rate scheduler
+        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, 
+                                                             mode='min', 
+                                                             factor=self.lr_decay_factor, 
+                                                             patience=5)
+        
         # Training loop with PyTorch and Adam optimizer
         prev_loss = float('inf')
         best_loss = float('inf')
@@ -303,11 +311,23 @@ class LogisticRegressor(RegressorTemplate):
             # Compute binary cross-entropy loss (PyTorch handles regularization via weight_decay)
             loss = nn.functional.binary_cross_entropy(predictions, y)
             
-            # Backward pass and optimization
+            # Backward pass
             loss.backward()
+            
+            # Compute gradient norm before optimizer step
+            grad_norm = 0.0
+            for param in [self.weights_tensor, self.bias_tensor]:
+                if param.grad is not None:
+                    grad_norm += param.grad.data.norm(2).item() ** 2
+            grad_norm = grad_norm ** 0.5
+            
+            # Optimization step
             self.optimizer.step()
             
             current_loss = loss.item()
+            
+            # Update learning rate scheduler
+            self.scheduler.step(current_loss)
             
             # Check for improvement and early stopping
             loss_change = abs(prev_loss - current_loss)
@@ -317,10 +337,10 @@ class LogisticRegressor(RegressorTemplate):
             else:
                 patience_counter += 1
             
-            # Check convergence criteria
-            if loss_change < self.tolerance:
+            # Check convergence criteria - both loss change and gradient norm must be small
+            if loss_change < self.tolerance and grad_norm < self.gradient_tolerance:
                 converged = True
-                print_color(f"Converged at iteration {iteration + 1}: loss change {loss_change:.10f}", "green")
+                print_color(f"Converged at iteration {iteration + 1}: loss change {loss_change:.10f}, gradient norm {grad_norm:.10f}", "green")
                 break
             
             # Early stopping if no improvement
@@ -336,10 +356,11 @@ class LogisticRegressor(RegressorTemplate):
         
         # Final status
         final_loss = loss.item()
+        final_lr = self.optimizer.param_groups[0]['lr']
         if converged:
-            print_color(f"PyTorch logistic regression converged after {iteration + 1} iterations. Final loss: {final_loss:.6f}, bias: {self.bias:.6f}", "green")
+            print_color(f"PyTorch logistic regression converged after {iteration + 1} iterations. Final loss: {final_loss:.6f}, bias: {self.bias:.6f}, final LR: {final_lr:.8f}", "green")
         else:
-            print_color(f"PyTorch logistic regression reached max iterations ({self.max_iterations}). Final loss: {final_loss:.6f}, bias: {self.bias:.6f}", "yellow")
+            print_color(f"PyTorch logistic regression reached max iterations ({self.max_iterations}), or early stopping. Final loss: {final_loss:.6f}, bias: {self.bias:.6f}, final LR: {final_lr:.8f}", "yellow")
         
         # Print timing information
         end_time = time.time()
