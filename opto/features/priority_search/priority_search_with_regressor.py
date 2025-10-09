@@ -360,13 +360,15 @@ class PrioritySearch_with_Regressor_and_Generator(PrioritySearch_with_Regressor)
     def train(self,
               *args,
               generator_frequency: int = 5,  # frequency of generating new candidates
+              generator_attempts: int = 50,  # number of attempts to generate new candidates
+              generator_patience: int = 3,  # number of attempts to generate new candidates
               num_generator_candidates: int = 5,  # number of candidates to generate
               **kwargs
               ):
         self.generator_frequency = generator_frequency
         self.num_generator_candidates = num_generator_candidates
-        self.generator_attempts = 50
-        self.generator_patience = 3
+        self.generator_attempts = generator_attempts
+        self.generator_patience = generator_patience
         super().train(*args,**kwargs)
 
     def propose(self,
@@ -419,6 +421,7 @@ class PrioritySearch_with_Regressor_and_Generator(PrioritySearch_with_Regressor)
             print_color(f"Mean predicted score of new candidates from the generator: {good_candidates_mean_predicted_score}", "green")
             # Combine original candidates with good generated candidates
             candidates.extend(candidates_from_generator)
+            # breakpoint()
         
         return candidates
 

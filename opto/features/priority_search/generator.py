@@ -1,6 +1,8 @@
 from opto.utils.llm import LLM
 from opto.features.priority_search.priority_search import ModuleCandidate
 from opto.optimizers.utils import print_color
+import ast
+import re
 
 def get_parameter_text(candidate):
         """Get the parameter text for a ModuleCandidate."""
@@ -150,8 +152,12 @@ Provide your response in the following XML format:
 <reasoning>
 [Brief explanation of why this configuration should perform well]
 </reasoning>
-<parameters>
-[Complete parameter dictionary for this candidate]
+<parameters>"""
+            # Add example parameter format
+            for param_name in base_params.keys():
+                prompt += f"""
+  <parameter name='{param_name}'><![CDATA[new_value_for_{param_name}]]></parameter>"""
+            prompt += """
 </parameters>
 </candidate>"""
         
@@ -173,7 +179,6 @@ Generate diverse candidates that explore different promising directions while bu
         
         try:
             # Extract candidates section
-            import re
             candidates_match = re.search(r'<candidates>(.*?)</candidates>', response_text, re.DOTALL)
             if not candidates_match:
                 print_color("No candidates section found in response", "red")
@@ -188,14 +193,40 @@ Generate diverse candidates that explore different promising directions while bu
             for match in candidate_matches:
                 candidate_content = match.group(2)
                 
-                # Extract parameters
+                # Extract parameters using XML format
                 params_match = re.search(r'<parameters>(.*?)</parameters>', candidate_content, re.DOTALL)
                 if params_match:
-                    params_text = params_match.group(1).strip()
+                    params_section = params_match.group(1).strip()
                     
                     try:
-                        # Try to evaluate as Python dict with string keys
-                        params_dict = eval(params_text)
+                        # Parse XML parameters similar to regressor.py
+                        params_dict = {}
+                        
+                        # Extract individual parameter elements
+                        param_pattern = r'<parameter\s+name=["\']([^"\']+)["\'][^>]*>(.*?)</parameter>'
+                        param_matches = re.finditer(param_pattern, params_section, re.DOTALL)
+                        
+                        for param_match in param_matches:
+                            param_name = param_match.group(1)
+                            param_content = param_match.group(2).strip()
+                            
+                            # Handle CDATA sections
+                            cdata_match = re.search(r'<!\[CDATA\[(.*?)\]\]>', param_content, re.DOTALL)
+                            if cdata_match:
+                                param_value = cdata_match.group(1)
+                            else:
+                                # Handle regular text content, unescaping XML entities
+                                param_value = param_content.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>').replace('&quot;', '"').replace('&apos;', "'")
+                            
+                            # Try to convert to appropriate Python type
+                            try:
+                                # Try to evaluate as Python literal (safer than eval)
+                                param_value = ast.literal_eval(param_value)
+                            except (ValueError, SyntaxError):
+                                # Keep as string if not a valid Python literal
+                                pass
+                            
+                            params_dict[param_name] = param_value
                         
                         # Map string parameter names back to ParameterNode objects
                         update_dict = {}
@@ -217,6 +248,10 @@ Generate diverse candidates that explore different promising directions while bu
                         
                     except Exception as e:
                         print_color(f"Error parsing candidate parameters: {e}", "red")
+                        # if self.verbose:
+                        #     print("response_text: ", response_text)
+                            # print("params_section: ", params_section)
+
                         continue
         
         except Exception as e:
