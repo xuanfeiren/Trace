@@ -365,6 +365,8 @@ class PrioritySearch_with_Regressor_and_Generator(PrioritySearch_with_Regressor)
               ):
         self.generator_frequency = generator_frequency
         self.num_generator_candidates = num_generator_candidates
+        self.generator_attempts = 50
+        self.generator_patience = 3
         super().train(*args,**kwargs)
 
     def propose(self,
@@ -372,27 +374,53 @@ class PrioritySearch_with_Regressor_and_Generator(PrioritySearch_with_Regressor)
                 verbose : bool = False,
                 **kwargs):
         candidates = super().propose(samples, verbose=verbose, **kwargs)
-        # print('Iter: ', self.n_iters, 'Generator frequency: ', self.generator_frequency, 'Iters % generator frequency: ', self.n_iters % self.generator_frequency)
+        # After generating OptoPrime candidates, start to propose candidates using the generator.
+        # Always use the exploration candidates as memory to write the prompt for the generator. Ask the generator to propose candidates with higher predicted scores. At each step, generate self.num_generator_candidates candidates, predict scores using regressor, then put them 
         if self.n_iters % self.generator_frequency == 0:
-            # highest_predicted_score = -self.memory.memory[0][0]
-            highest_predicted_score = self.highest_predicted_score
-            print('Highest predicted score: ', highest_predicted_score)
-            new_candidates = self.generator.generate_candidates(
-                base_module=self.agent,
-                optimizer=self.optimizer,
-                memory=self.memory.memory,
-                num_candidates=self.num_generator_candidates
-            )
-            # predict scores for the new candidates
-            temporary_memory = [(0, candidate) for candidate in new_candidates]
-            self.regressor.predict_scores(temporary_memory)
-            generator_mean_predicted_score = np.mean([candidate.predicted_score for candidate in new_candidates])
-            # For debugging, assert the generator mean predicted score is not None.
-            assert generator_mean_predicted_score is not None, "Generator mean predicted score is None"
-            print_color(f"Generator mean predicted score: {generator_mean_predicted_score}", "green")
-            # only keep the candidates with predicted scores higher than the highest predicted score
-            new_candidates = [candidate for candidate in new_candidates if candidate.predicted_score > highest_predicted_score]
-            candidates.extend(new_candidates)
-            print(f"{len(new_candidates)}/{self.num_generator_candidates} new candidates with predicted scores higher than the current highest predicted score: {highest_predicted_score}")
-        print(f"Generated {len(candidates)} new candidates in total.")
+            candidates_from_generator = []
+            highest_predicted_score = self._best_candidate_priority
+            print_color(f"Highest predicted score at the beginning: {highest_predicted_score}", "green")
+            patience = 0
+            for attempt in range(self.generator_attempts):
+                print_color(f"[{attempt+1}/{self.generator_attempts}] Generating candidates...", "green")
+                new_candidates = self.generator.generate_candidates(
+                    base_module=self.agent,
+                    optimizer=self.optimizer,
+                    memory=self._exploration_candidates+candidates_from_generator,
+                    num_candidates=self.num_generator_candidates
+                )
+                # Skip this attempt if no candidates were generated
+                if not new_candidates:
+                    print_color(f"No candidates generated in attempt {attempt+1}, skipping...", "yellow")
+                    patience += 1
+                    continue
+                    
+                memory_to_predict = [(0, candidate) for candidate in new_candidates]
+                # Predict scores for the new candidates
+                self.regressor.predict_scores(memory_to_predict)
+                predicted_scores = [candidate.predicted_score for candidate in new_candidates]
+                highest_predicted_score_attempt = max(predicted_scores)
+                if highest_predicted_score_attempt > highest_predicted_score:
+                    patience = 0
+                    print_color(f"New highest predicted score: {highest_predicted_score_attempt}", "green")
+                    # Add the promising candidates from this attempt. Only add those with higher predicted scores than the current best.
+                    good_candidates_attempt = [candidate for candidate in new_candidates if candidate.predicted_score > highest_predicted_score]
+                    candidates_from_generator.extend(good_candidates_attempt)
+                    highest_predicted_score = highest_predicted_score_attempt
+                else:
+                    patience += 1
+                if patience > self.generator_patience:
+                    break
+            print_color(f"Generator attempted {attempt+1} times, highest predicted score: {highest_predicted_score}", "green")
+            # Filter candidates that are better than current best
+            
+            print_color(f"Added {len(candidates_from_generator)} new candidates from the generator.", "green")
+            good_candidates_mean_predicted_score = np.mean([candidate.predicted_score for candidate in candidates_from_generator])
+            print_color(f"Mean predicted score of new candidates from the generator: {good_candidates_mean_predicted_score}", "green")
+            # Combine original candidates with good generated candidates
+            candidates.extend(candidates_from_generator)
+            breakpoint()
+        
         return candidates
+
+           

@@ -1,5 +1,6 @@
 from opto.utils.llm import LLM
 from opto.features.priority_search.priority_search import ModuleCandidate
+from opto.optimizers.utils import print_color
 
 def get_parameter_text(candidate):
         """Get the parameter text for a ModuleCandidate."""
@@ -24,24 +25,25 @@ class LLMCandidateGenerator:
             print(f"LLMCandidateGenerator initialized with model {model_name} and temperature {temperature}")
     
     def generate_candidates(self, base_module, optimizer, memory, num_candidates=5):
-        """Generate new candidates using LLM based on memory of past candidates."""
-
+        """Generate new candidates using LLM based on memory of past candidates.
+        memory: a list of candidate
+        """
         
         # Generate 1 candidate per batch for maximum reliability
         if self.verbose:
             print(f"Generating {num_candidates} candidates, 1 candidate per batch")
         
         # Create memory subset for prompts
-        memory_subset = memory[:self.max_candidates_in_prompt]
+        # memory_subset = memory[:self.max_candidates_in_prompt]
         
         # Create a single generation function and replicate it
         def generate_single_candidate():
-            return self._generate_single_batch(base_module, optimizer, memory_subset, 1)
+            return self._generate_single_batch(base_module, optimizer, memory, 1)
         
         generation_functions = [generate_single_candidate] * num_candidates
         
         # Use async_run if num_threads > 1, otherwise run sequentially
-        if self.num_threads and self.num_threads > 1:
+        if self.num_threads and self.num_threads > 1 and num_candidates > 1:
             from opto.trainer.utils import async_run
             batch_results = async_run(
                 generation_functions,
@@ -73,8 +75,8 @@ class LLMCandidateGenerator:
             {"role": "user", "content": user_prompt}
         ]
         
-        # if self.verbose:
-        #     print(f"Generating batch with {num_candidates} candidates")
+        if self.verbose:
+            print(f"User prompt: {user_prompt}")
         
         try:
             response = self.llm(messages=messages, temperature=self.temperature, max_tokens=8192)
@@ -86,7 +88,7 @@ class LLMCandidateGenerator:
             return candidates
             
         except Exception as e:
-            print(f"Error generating batch: {e}")
+            print_color(f"Error generating batch: {e}", "red")
             return []
     
     def _create_system_prompt(self):
@@ -105,10 +107,10 @@ You will receive information about previous parameter configurations and their p
         if memory:
             memory_text = "## Previous Configurations and Scores\n\n"
             # Sort memory by score (descending)
-            sorted_memory = sorted(memory, key=lambda x: x[0], reverse=True)
+            sorted_memory = sorted(memory, key=lambda x: x.predicted_score, reverse=True)
             
-            for i, (score, candidate) in enumerate(sorted_memory[:10]):  # Show top 10
-                display_score = -score if self.negative_score else score
+            for i, candidate in enumerate(sorted_memory[:10]):  # Show top 10
+                display_score = candidate.predicted_score
                 memory_text += f"### Configuration {i+1} (Score: {display_score:.3f})\n"
                 # Format parameters with proper names
                 params_display = get_parameter_text(candidate)
@@ -174,7 +176,7 @@ Generate diverse candidates that explore different promising directions while bu
             import re
             candidates_match = re.search(r'<candidates>(.*?)</candidates>', response_text, re.DOTALL)
             if not candidates_match:
-                print("No candidates section found in response")
+                print_color("No candidates section found in response", "red")
                 return candidates
             
             candidates_section = candidates_match.group(1)
@@ -203,7 +205,7 @@ Generate diverse candidates that explore different promising directions while bu
                             if param_name in param_name_to_node:
                                 update_dict[param_name_to_node[param_name]] = value
                             else:
-                                print(f"Warning: Parameter '{param_name}' not found in base module parameters")
+                                print_color(f"Warning: Parameter '{param_name}' not found in base module parameters", "red")
                         
                         # Create ModuleCandidate with ParameterNode keys
                         candidate = ModuleCandidate(
@@ -214,10 +216,10 @@ Generate diverse candidates that explore different promising directions while bu
                         candidates.append(candidate)
                         
                     except Exception as e:
-                        print(f"Error parsing candidate parameters: {e}")
+                        print_color(f"Error parsing candidate parameters: {e}", "red")
                         continue
         
         except Exception as e:
-            print(f"Error parsing candidates: {e}")
+            print_color(f"Error parsing candidates: {e}", "red")
         
         return candidates
