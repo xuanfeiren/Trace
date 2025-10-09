@@ -294,6 +294,7 @@ class PrioritySearch_with_Regressor(PrioritySearch):
 
     def update_memory_with_regressor(self, verbose: bool = False, **kwargs):
         """ Update the priority queue with the regressor results.
+        This function does not add new candidates to the memory. It only updates the predicted scores of the existing candidates. Then reorder the memory according to the predicted scores.
         """
         print("--- Updating memory with regressor results...") if verbose else None
         # Use all data to update the regressor
