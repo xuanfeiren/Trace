@@ -319,11 +319,15 @@ class PrioritySearch_with_Regressor(PrioritySearch):
         # For debugging, print all candidates: number, mean_score(), num_rollouts, predicted_score. It is better to see an increasing trend in the predicted scores.
         print("--- Printing memory stats...")
         print("Long-term memory:")
+        # If len(self.long_term_memory.memory)>40, only print the first 20 and the last 20 candidates
         for i, (neg_predicted_score, candidate) in enumerate(self.long_term_memory.memory):
-            print(f"Candidate {i}, Mean Score: {candidate.mean_score()}, Num Rollouts: {candidate.num_rollouts}, Predicted Score: {-neg_predicted_score}")
-        print("Short-term memory:")
-        for i, (neg_predicted_score, candidate) in enumerate(self.short_term_memory.memory):
-            print(f"Candidate {i}, Mean Score: {candidate.mean_score()}, Num Rollouts: {candidate.num_rollouts}, Predicted Score: {-neg_predicted_score}")
+            if len(self.long_term_memory.memory) <= 40 or i < 20 or i >= len(self.long_term_memory.memory) - 20:
+                mean_score = candidate.mean_score()
+                mean_score_str = f"{mean_score:.4g}" if mean_score is not None else "None"
+                print(f"Candidate {i}, Mean Score: {mean_score_str}, Num Rollouts: {candidate.num_rollouts}, Predicted Score: {-neg_predicted_score}")
+        # print("Short-term memory:")
+        # for i, (neg_predicted_score, candidate) in enumerate(self.short_term_memory.memory):
+        #     print(f"Candidate {i}, Mean Score: {candidate.mean_score()}, Num Rollouts: {candidate.num_rollouts}, Predicted Score: {-neg_predicted_score}")
 
     # TODO refactor below to reuse scoring
     def compute_exploitation_priority(self, candidate) -> float:
