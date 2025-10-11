@@ -112,6 +112,8 @@ class PrioritySearch_with_Regressor(PrioritySearch):
         self.use_validation = use_validation
         self.regressor_type = regressor_type
         self.highest_predicted_score = 0
+        self.base_agent_ModuleCandidate = None
+        self.base_agent_predicted_score = None
         
         # Initialize the regressor with the long-term memory and custom parameters - this is the only difference from parent class
         if regressor_type == 'logistic':
@@ -216,11 +218,12 @@ class PrioritySearch_with_Regressor(PrioritySearch):
             # 3. Update the priority queue with the validation results
             self.update_memory(validate_results, verbose=verbose, **kwargs)  # samples are provided here in case candidates do not capture full information
         else:  # The first iteration.
+            self.base_agent_ModuleCandidate = ModuleCandidate(self.agent, optimizer=self.optimizer)
             max_mem_size = self.memory.size if self.memory.size is not None else float('inf')
             while len(self.memory) < min(max_mem_size, self.num_candidates):
                 self.memory.push(self.max_score, ModuleCandidate(self.agent, optimizer=self.optimizer))  # Push the base agent as the first candidate (This gives the initialization of the priority queue)
 
-
+        
         self.update_memory_with_regressor(verbose=verbose, **kwargs)
         self.print_memory_stats()
         # TODO Log information about the update
@@ -299,6 +302,9 @@ class PrioritySearch_with_Regressor(PrioritySearch):
         print("--- Updating memory with regressor results...") if verbose else None
         # Use all data to update the regressor
         self.regressor.update(self.long_term_memory.memory+self.short_term_memory.memory)
+        # Always keep track of the predicted score of the base agent. Ideally this number should converge to the true score of the base agent, when we have more and more data.
+        self.regressor.predict_scores([(0, self.base_agent_ModuleCandidate)])
+        self.base_agent_predicted_score = self.base_agent_ModuleCandidate.predicted_score
         # Predict the scores for the long-term memory and the short-term memory
         self.regressor.predict_scores(self.long_term_memory.memory)
         self.regressor.predict_scores(self.short_term_memory.memory)
@@ -382,6 +388,7 @@ class PrioritySearch_with_Regressor_and_Generator(PrioritySearch_with_Regressor)
                 samples : Samples,
                 verbose : bool = False,
                 **kwargs):
+        """self.num_generator_candidates is the maximum number of candidates to add to the memory. """
         candidates = super().propose(samples, verbose=verbose, **kwargs)
         # After generating OptoPrime candidates, start to propose candidates using the generator.
         # Always use the exploration candidates as memory to write the prompt for the generator. Ask the generator to propose candidates with higher predicted scores. At each step, generate self.num_generator_candidates candidates, predict scores using regressor, then put them 
@@ -394,9 +401,11 @@ class PrioritySearch_with_Regressor_and_Generator(PrioritySearch_with_Regressor)
                 print_color(f"[{attempt+1}/{self.generator_attempts}] Generating candidates...", "green")
                 new_candidates = self.generator.generate_candidates(
                     base_module=self.agent,
+                    base_score=self.base_agent_predicted_score,
                     optimizer=self.optimizer,
                     memory=self._exploration_candidates+candidates_from_generator,
-                    num_candidates=self.num_generator_candidates
+                    # use the default number of candidates. 
+                    # num_candidates=self.num_generator_candidates
                 )
                 # Skip this attempt if no candidates were generated
                 if not new_candidates:
@@ -426,13 +435,18 @@ class PrioritySearch_with_Regressor_and_Generator(PrioritySearch_with_Regressor)
             # Put parts of new candidates from the generator that are better than the current best into the candidates list. Only add the top self.num_generator_candidates candidates.
             sorted_candidates_from_generator = sorted(candidates_from_generator, key=lambda x: x.predicted_score, reverse=True)
             candidates_from_generator = sorted_candidates_from_generator[:self.num_generator_candidates]
+
+            # Log generator results
             
-            # Combine original candidates with good generated candidates. 
-            
+            self.logger.log('Generator/num_candidates', len(candidates_from_generator), self.n_iters, color='blue')
             if len(candidates_from_generator) > 0:
                 print_color(f"Added {len(candidates_from_generator)} new candidates from the generator.", "green")
+                self.logger.log('Generator/Base_agent_priority', self.base_agent_predicted_score, self.n_iters, color='blue')
+                self.logger.log('Generator/Best_priority_before', self._best_candidate_priority, self.n_iters, color='blue')
+                self.logger.log('Generator/Highest_predicted_score_after',highest_predicted_score,self.n_iters, color='blue')
                 mean_predicted_score = np.mean([candidate.predicted_score for candidate in candidates_from_generator])
-                print_color(f"Mean predicted score of new candidates from the generator: {mean_predicted_score}", "green")
+                self.logger.log('Generator/mean_predicted_score', mean_predicted_score, self.n_iters, color='blue')
+                # Combine original candidates with good generated candidates. 
                 candidates.extend(candidates_from_generator)
             else:
                 print_color("No new candidates were generated that exceed the current best score.", "yellow")

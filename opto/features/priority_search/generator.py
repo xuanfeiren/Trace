@@ -23,14 +23,16 @@ class LLMCandidateGenerator:
         self.verbose = verbose
         self.num_threads = num_threads
         self.max_candidates_in_prompt = max_candidates_in_prompt
+        self.base_score = None
         if verbose:
             print(f"LLMCandidateGenerator initialized with model {model_name} and temperature {temperature}")
     
-    def generate_candidates(self, base_module, optimizer, memory, num_candidates=5):
+    def generate_candidates(self, base_module, base_score, optimizer, memory, num_candidates=20):
         """Generate new candidates using LLM based on memory of past candidates.
         memory: a list of candidate
         """
-        
+        # update the predicted score of the base agent
+        self.base_score = base_score
         # Generate 1 candidate per batch for maximum reliability
         if self.verbose:
             print(f"Generating {num_candidates} candidates, 1 candidate per batch")
@@ -110,7 +112,7 @@ You will receive information about previous parameter configurations and their p
             memory_text = "## Previous Configurations and Scores\n\n"
             # Sort memory by score (descending)
             sorted_memory = sorted(memory, key=lambda x: x.predicted_score, reverse=True)
-            
+            # TODO: find the right way to construct the user prompt. First try: use the candidates with top 10 predicted scores.
             for i, candidate in enumerate(sorted_memory[:10]):  # Show top 10
                 display_score = candidate.predicted_score
                 memory_text += f"### Configuration {i+1} (Score: {display_score:.3f})\n"
@@ -126,6 +128,9 @@ Generate {num_candidates} new parameter configurations to improve system perform
 
 ## Base Configuration
 {base_params}
+
+## Base Configuration Score
+{self.base_score}
 
 {memory_text}
 
