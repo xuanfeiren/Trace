@@ -31,6 +31,8 @@ class LLMCandidateGenerator:
         """Generate new candidates using LLM based on memory of past candidates.
         memory: a list of candidate
         """
+        if num_candidates == 0:
+            return []
         # update the predicted score of the base agent
         self.base_score = base_score
         # Generate 1 candidate per batch for maximum reliability
@@ -51,7 +53,7 @@ class LLMCandidateGenerator:
             from opto.trainer.utils import async_run
             batch_results = async_run(
                 generation_functions,
-                max_workers=self.num_threads,
+                max_workers=50,
                 description=f"Generating {num_candidates} candidates (1 per batch)"
             )
         else:
