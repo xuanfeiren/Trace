@@ -454,4 +454,79 @@ class PrioritySearch_with_Regressor_and_Generator(PrioritySearch_with_Regressor)
         
         return candidates
 
+class PrioritySearch_RG_RejectionSampling(PrioritySearch_with_Regressor_and_Generator):
+    """
+    A very simple idea. In the propose function, we use
+     1. OptoPrime as usual to propose candidates. Make the num_proposals large.
+     2. Use the generator to propose a large number of candidates.
+     3. Reject the candidates that are not better than the current best.
+    """
+    def propose_attempt2(self,
+                samples : Samples,
+                verbose : bool = False,
+                **kwargs):
+        """Propose candidates with OptoPrime and generator with rejection sampling. """
+        # Keep track of the current best predicted score
+        current_best_score = self._best_candidate_priority
+        # generate candidates with OptoPrime
+        candidates_optoprime = PrioritySearch.propose(self, samples, verbose=verbose, **kwargs)
+        self.regressor.predict_scores([(0, candidate) for candidate in candidates_optoprime])
+        # generate candidates with generator, with the base agent and exploration candidates
+        candidates_generator = self.generator.generate_candidates(
+                    base_module=self.agent,
+                    base_score=self.base_agent_predicted_score,
+                    optimizer=self.optimizer,
+                    memory=self._exploration_candidates,
+                    num_candidates=self.num_generator_candidates
+                )
+        self.regressor.predict_scores([(0, candidate) for candidate in candidates_generator])
+        new_raw_candidates = candidates_optoprime + candidates_generator
+        assert len(new_raw_candidates) > 0, "No candidates were generated."
+        # Assert that all candidates have predicted scores
+        assert all(candidate.predicted_score is not None for candidate in new_raw_candidates), "predicted score must be set for all candidates."
+        # rejection sampling
+        new_candidates = [candidate for candidate in new_raw_candidates if candidate.predicted_score > current_best_score]
+        # Log results
+        self.logger.log("Propose/Best score before", current_best_score, self.n_iters, color='blue')
+        self.logger.log("Propose/Num of new candidates", len(new_candidates), self.n_iters, color='blue')
+        self.logger.log("Propose/Base agent predicted score", self.base_agent_predicted_score, self.n_iters, color='blue')
+        if len(candidates_optoprime) > 0:
+            highest_predicted_score_optoprime = max([candidate.predicted_score for candidate in candidates_optoprime])
+            self.logger.log("Propose/Highest predicted score from OptoPrime", highest_predicted_score_optoprime, self.n_iters, color='blue')
+        if len(candidates_generator) > 0:
+            highest_predicted_score_generator = max([candidate.predicted_score for candidate in candidates_generator])
+            self.logger.log("Propose/Highest predicted score from Generator", highest_predicted_score_generator, self.n_iters, color='blue')
+        if len(new_candidates) > 0:
+            self.logger.log("Propose/Avg predicted score of new candidates", np.mean([candidate.predicted_score for candidate in new_candidates]), self.n_iters, color='blue')
+        return new_candidates
+
+    # propose_attempt3: regressor with rejection sampling
+    def propose(self,
+                samples : Samples,
+                verbose : bool = False,
+                **kwargs):
+        """Propose candidates with OptoPrime and generator with rejection sampling. """
+        # generate candidates with OptoPrime
+        candidates_optoprime = PrioritySearch.propose(self, samples, verbose=verbose, **kwargs)
+        predicted_scores = self.regressor.predict_scores([(0, candidate) for candidate in candidates_optoprime])
+        # log statistics of the predicted scores
+        self.logger.log("Propose/Best score before", self._best_candidate_priority, self.n_iters, color='blue')
+        self.logger.log("Propose/Highest predicted score from OptoPrime", max(predicted_scores), self.n_iters, color='blue')
+        self.logger.log("Propose/Lowest predicted score from OptoPrime", min(predicted_scores), self.n_iters, color='blue')
+        self.logger.log("Propose/Base agent predicted score", self.base_agent_predicted_score, self.n_iters, color='blue')
+        self.logger.log("Propose/Avg predicted score from OptoPrime", np.mean(predicted_scores), self.n_iters, color='blue')
+        self.logger.log("Propose/Num of candidates from OptoPrime", len(candidates_optoprime), self.n_iters, color='blue')
+        # in this process we generate num_proposals*num_candidates candidates. We do rejection sampling for the best num_candidates candidates.
+        
+        # sort the candidates by predicted scores
+        candidates_optoprime.sort(key=lambda x: x.predicted_score, reverse=True)
+        # do rejection sampling for the best num_candidates candidates
+        candidates_optoprime = candidates_optoprime[:self.num_candidates]
+        # log mean predicted scores after rejection sampling
+        self.logger.log("Propose/Avg predicted score after rejection sampling", np.mean([candidate.predicted_score for candidate in candidates_optoprime]), self.n_iters, color='blue')
+        self.logger.log("Propose/Num of candidates after rejection sampling", len(candidates_optoprime), self.n_iters, color='blue')
+        return candidates_optoprime
+
+
+
            
