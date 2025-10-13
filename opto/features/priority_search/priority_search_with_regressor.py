@@ -543,7 +543,6 @@ class PrioritySearch_RG_RejectionSampling(PrioritySearch_with_Regressor_and_Gene
         self.logger.log("Propose/Avg predicted score from OptoPrime", np.mean(predicted_scores), self.n_iters, color='blue')
         self.logger.log("Propose/Num of candidates from OptoPrime", len(candidates_optoprime), self.n_iters, color='blue')
         # in this process we generate num_proposals*num_candidates candidates. We do rejection sampling for the best num_candidates candidates.
-        
         # sort the candidates by predicted scores
         candidates_optoprime.sort(key=lambda x: x.predicted_score, reverse=True)
         # do rejection sampling for the best num_candidates candidates
@@ -561,6 +560,8 @@ class PrioritySearch_RG_RejectionSampling(PrioritySearch_with_Regressor_and_Gene
         predicted_scores_generator = [candidate.predicted_score for candidate in candidates_generator]
         # log statistics of the predicted scores
         self.logger.log("Propose/Avg predicted score from Generator", np.mean(predicted_scores_generator), self.n_iters, color='blue')
+        self.logger.log("Propose/Highest predicted score from Generator", max(predicted_scores_generator), self.n_iters, color='blue')
+        self.logger.log("Propose/Lowest predicted score from Generator", min(predicted_scores_generator), self.n_iters, color='blue')
         self.logger.log("Propose/Num of candidates from Generator", len(candidates_generator), self.n_iters, color='blue')
 
         # log mean predicted scores after rejection sampling
