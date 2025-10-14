@@ -542,7 +542,7 @@ class PrioritySearch_RG_RejectionSampling(PrioritySearch_with_Regressor_and_Gene
         candidates_optoprime = PrioritySearch.propose(self, samples, verbose=verbose, **kwargs)
         predicted_scores = self.regressor.predict_scores([(0, candidate) for candidate in candidates_optoprime])
         # log statistics of the predicted scores
-        self.logger.log("Propose/Best score before", self._best_candidate_priority, self.n_iters, color='blue')
+        self.logger.log("Propose/Best score before", self.highest_predicted_score, self.n_iters, color='blue')
         self.logger.log("Propose/Highest predicted score from OptoPrime", max(predicted_scores), self.n_iters, color='blue')
         self.logger.log("Propose/Lowest predicted score from OptoPrime", min(predicted_scores), self.n_iters, color='blue')
         self.logger.log("Propose/Base agent predicted score", self.base_agent_predicted_score, self.n_iters, color='blue')
