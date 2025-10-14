@@ -360,6 +360,14 @@ class PrioritySearch_with_Regressor(PrioritySearch):
                 mean_score = candidate.mean_score()
                 mean_score_str = f"{mean_score:.4g}" if mean_score is not None else "None"
                 print(f"Candidate {i}, Mean Score: {mean_score_str}, Num Rollouts: {candidate.num_rollouts}, Predicted Score: {candidate.predicted_score}")
+                # def get_parameter_text(candidate):
+                #     """Get the parameter text for a ModuleCandidate."""
+                #     if not candidate.update_dict:
+                #         return "base_module_parameters"
+                #     # Convert parameter nodes to readable names for deterministic embedding
+                #     params_with_names = {k.py_name: v for k, v in candidate.update_dict.items()}
+                #     return str(params_with_names)
+                # print(f"Parameters: {get_parameter_text(candidate)}")
         # print("Short-term memory:")
         # for i, (neg_predicted_score, candidate) in enumerate(self.short_term_memory.memory):
         #     print(f"Candidate {i}, Mean Score: {candidate.mean_score()}, Num Rollouts: {candidate.num_rollouts}, Predicted Score: {-neg_predicted_score}")
