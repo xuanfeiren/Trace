@@ -211,7 +211,9 @@ class PrioritySearch_with_Regressor(PrioritySearch):
 
         # samples is None in the first iteration
         if samples is not None:
-            # 1. Propose new parameters based on running LLM optimizers on the collected samples
+            # 0. Update the regressor right after collecting samples. We need to first update popped candidates with their new samples. After this update, all candidates in the memory have new predicted scores and the memory is sorted by the predicted scores. All exploration candidates get predicted scores, but they are not added to the memory yet.
+            self.update_regressor_with_samples(samples)
+            # 1. Propose new parameters based on running LLM optimizers on the collected samples. It doesn't matter whether we do this before or after updating the regressor.
             candidates = self.propose(samples, verbose=verbose, **kwargs)  # List of ModuleCandidates
             # 2. Validate the proposed parameters
             validate_results = self.validate(candidates, samples, verbose=verbose, **kwargs)  # this updates the priority queue
@@ -222,8 +224,6 @@ class PrioritySearch_with_Regressor(PrioritySearch):
             max_mem_size = self.memory.size if self.memory.size is not None else float('inf')
             while len(self.memory) < min(max_mem_size, self.num_candidates):
                 self.memory.push(self.max_score, ModuleCandidate(self.agent, optimizer=self.optimizer))  # Push the base agent as the first candidate (This gives the initialization of the priority queue)
-
-        
         self.update_memory_with_regressor(verbose=verbose, **kwargs)
         self.print_memory_stats()
         # TODO Log information about the update
@@ -244,6 +244,32 @@ class PrioritySearch_with_Regressor(PrioritySearch):
         info_log.update(info_explore)  # add the info from the explore step
         return self._best_candidate.update_dict, [c.get_module() for c in self._exploration_candidates], info_log
 
+    def update_regressor_with_samples(self,samples: Samples):
+        """ Update the regressor with the samples. """
+        matched_exploration_candidates_and_samples = self.match_candidates_and_samples(self._exploration_candidates, samples.samples)
+        exploration_results = {}  # dict of ModuleCandidate id: (ModuleCandidate, list of rollouts)
+        for c, rollouts in matched_exploration_candidates_and_samples.items():  # rollouts is a list of BatchRollouts
+            exploration_results[c] = [ r for rr in rollouts for r in rr.to_list()]
+        for candidate, rollouts in exploration_results.items():
+            candidate.add_rollouts(rollouts)  # add the rollouts to the candidate
+        exploration_memory = [(0, candidate) for candidate in self._exploration_candidates]
+        self.regressor.update(self.long_term_memory.memory+self.short_term_memory.memory+exploration_memory)
+        # update the predicted scores for all candidates with data
+        predicted_scores = self.regressor.predict_scores(self.long_term_memory.memory+self.short_term_memory.memory+exploration_memory)
+        self.highest_predicted_score = max(predicted_scores)
+
+        self.regressor.predict_scores([(0, self.base_agent_ModuleCandidate)])
+        self.base_agent_predicted_score = self.base_agent_ModuleCandidate.predicted_score
+        # heapify the memory
+        self.heapify_memory(self.long_term_memory.memory)
+        self.heapify_memory(self.short_term_memory.memory)
+    
+    def heapify_memory(self,memory):
+        """ Heapify the memory, based on the predicted scores. Input could be something like self.long_term_memory.memory."""
+        long_term_candidates_with_scores = [(-candidate.predicted_score, candidate) for _, candidate in memory]
+        memory[:] = long_term_candidates_with_scores  # Slice assignment modifies original
+        heapq.heapify(memory)
+
     def validate(self,
                  candidates: List[ModuleCandidate],
                  samples: Samples,
@@ -253,6 +279,8 @@ class PrioritySearch_with_Regressor(PrioritySearch):
         Override the validate method. 
         In this version, if use_validation is False, we can only use training data to update arm statistics. No validation is performed.
         If use_validation is True, we use the validation set to update arm statistics. The same as the parent class.
+
+        Updated on Oct 14, 2025: I added exploration samples before this function. So only care about validation samples here. The current logic is, all exploration candidates have already been added exploration samples. Here we may have exploration candidates, new candidates with probably validation samples.
         """
         print("--- Validating candidates...") if verbose else None
         assert isinstance(samples, Samples), "samples must be an instance of Samples."
@@ -260,7 +288,8 @@ class PrioritySearch_with_Regressor(PrioritySearch):
         assert self._exploration_candidates is not None, "exploration_candidates must be set before calling validate."
 
         # The current batch of samples can be used to validate the exploration candidates
-        validate_samples = copy.copy(samples)
+        # validate_samples = copy.copy(samples)
+        validate_samples = Samples([], {'inputs': [], 'infos': []})
         if self.use_validation:
         # Validate newly proposed candidates
             use_prev_batch = self.use_prev_batch  # when True, self.validate_sampler == self.train_sampler, and the current batch is used for validation
@@ -278,6 +307,7 @@ class PrioritySearch_with_Regressor(PrioritySearch):
                     validate_samples.add_samples(exploration_samples)  # append the exploration samples to the validate_samples 
         # Here we should set self._enforce_using_data_collecting_candidates to False
         matched_candidates_and_samples = self.match_candidates_and_samples(exploration_candidates+candidates, validate_samples.samples)
+        
         # # Append new candidates with out rollouts to matched_candidates_and_samples
         # matched_candidates_and_samples.update({c: [] for c in candidates })
         results = {}  # dict of ModuleCandidate id: (ModuleCandidate, list of rollouts)
@@ -291,46 +321,45 @@ class PrioritySearch_with_Regressor(PrioritySearch):
         """
         print("--- Updating memory with validation results...") if verbose else None
         for candidate, rollouts in validate_results.items():
+            # If self.use_validation is False, we do not need to add the rollouts to the candidate. assert there are no rollouts here.
+            if not self.use_validation:
+                assert len(rollouts) == 0, "No validation, there should be no rollouts here."
             candidate.add_rollouts(rollouts)  # add the rollouts to the
             placeholder_priority = self.max_score
             self.memory.push(placeholder_priority, candidate)
 
     def update_memory_with_regressor(self, verbose: bool = False, **kwargs):
-        """ Update the priority queue with the regressor results.
+        """ 
+        Update the priority queue with the regressor results.
         This function does not add new candidates to the memory. It only updates the predicted scores of the existing candidates. Then reorder the memory according to the predicted scores.
         """
         print("--- Updating memory with regressor results...") if verbose else None
         # Use all data to update the regressor
-        self.regressor.update(self.long_term_memory.memory+self.short_term_memory.memory)
-        # Always keep track of the predicted score of the base agent. Ideally this number should converge to the true score of the base agent, when we have more and more data.
-        self.regressor.predict_scores([(0, self.base_agent_ModuleCandidate)])
-        self.base_agent_predicted_score = self.base_agent_ModuleCandidate.predicted_score
+        # only update the memory when self.use_validation is True. Otherwise we have done this before.
+        if self.use_validation or self.n_iters == 0:
+            self.regressor.update(self.long_term_memory.memory+self.short_term_memory.memory)
+            # Always keep track of the predicted score of the base agent. Ideally this number should converge to the true score of the base agent, when we have more and more data.
+            self.regressor.predict_scores([(0, self.base_agent_ModuleCandidate)])
+            self.base_agent_predicted_score = self.base_agent_ModuleCandidate.predicted_score
         # Predict the scores for the long-term memory and the short-term memory
         self.regressor.predict_scores(self.long_term_memory.memory)
         self.regressor.predict_scores(self.short_term_memory.memory)
         # update the highest predicted score
         self.highest_predicted_score = max(0, max([candidate.predicted_score for _, candidate in self.long_term_memory.memory+self.short_term_memory.memory]))
         # Reorder both long_term_memory and short_term_memory according to the predicted scores
-        # Extract candidates from long_term_memory tuples and reorder by predicted scores
-        long_term_candidates_with_scores = [(-candidate.predicted_score, candidate) for _, candidate in self.long_term_memory.memory]
-        self.long_term_memory.memory = long_term_candidates_with_scores  # Update the internal list of HeapMemory
-        heapq.heapify(self.long_term_memory.memory)  # Heapify based on -score (first element of tuple)
+        self.heapify_memory(self.long_term_memory.memory)
+        self.heapify_memory(self.short_term_memory.memory)
         
-        # Extract candidates from short_term_memory tuples and reorder by predicted scores
-        short_term_candidates_with_scores = [(-candidate.predicted_score, candidate) for _, candidate in self.short_term_memory.memory]
-        self.short_term_memory.memory = short_term_candidates_with_scores  # Update the internal list of HeapMemory
-        heapq.heapify(self.short_term_memory.memory)  # Heapify based on -score (first element of tuple)
-
     def print_memory_stats(self):
         # For debugging, print all candidates: number, mean_score(), num_rollouts, predicted_score. It is better to see an increasing trend in the predicted scores.
         print("--- Printing memory stats...")
         print("Long-term memory:")
         # If len(self.long_term_memory.memory)>40, only print the first 20 and the last 20 candidates
-        for i, (neg_predicted_score, candidate) in enumerate(self.long_term_memory.memory):
+        for i, (_, candidate) in enumerate(self.long_term_memory.memory):
             if len(self.long_term_memory.memory) <= 40 or i < 20 or i >= len(self.long_term_memory.memory) - 20:
                 mean_score = candidate.mean_score()
                 mean_score_str = f"{mean_score:.4g}" if mean_score is not None else "None"
-                print(f"Candidate {i}, Mean Score: {mean_score_str}, Num Rollouts: {candidate.num_rollouts}, Predicted Score: {-neg_predicted_score}")
+                print(f"Candidate {i}, Mean Score: {mean_score_str}, Num Rollouts: {candidate.num_rollouts}, Predicted Score: {candidate.predicted_score}")
         # print("Short-term memory:")
         # for i, (neg_predicted_score, candidate) in enumerate(self.short_term_memory.memory):
         #     print(f"Candidate {i}, Mean Score: {candidate.mean_score()}, Num Rollouts: {candidate.num_rollouts}, Predicted Score: {-neg_predicted_score}")
@@ -461,13 +490,14 @@ class PrioritySearch_RG_RejectionSampling(PrioritySearch_with_Regressor_and_Gene
      2. Use the generator to propose a large number of candidates.
      3. Reject the candidates that are not better than the current best.
     """
+    # propose_attempt2: regressor with rejection sampling
     def propose_attempt2(self,
                 samples : Samples,
                 verbose : bool = False,
                 **kwargs):
         """Propose candidates with OptoPrime and generator with rejection sampling. """
         # Keep track of the current best predicted score
-        current_best_score = self._best_candidate_priority
+        current_best_score = self.highest_predicted_score
         # generate candidates with OptoPrime
         candidates_optoprime = PrioritySearch.propose(self, samples, verbose=verbose, **kwargs)
         self.regressor.predict_scores([(0, candidate) for candidate in candidates_optoprime])
@@ -489,6 +519,8 @@ class PrioritySearch_RG_RejectionSampling(PrioritySearch_with_Regressor_and_Gene
         # Log results
         self.logger.log("Propose/Best score before", current_best_score, self.n_iters, color='blue')
         self.logger.log("Propose/Num of new candidates", len(new_candidates), self.n_iters, color='blue')
+        self.logger.log("Propose/Num of new candidates from OptoPrime", len([candidate for candidate in candidates_optoprime if candidate.predicted_score > current_best_score]), self.n_iters)
+        self.logger.log("Propose/Num of new candidates from Generator", len([candidate for candidate in candidates_generator if candidate.predicted_score > current_best_score]), self.n_iters)
         self.logger.log("Propose/Base agent predicted score", self.base_agent_predicted_score, self.n_iters, color='blue')
         if len(candidates_optoprime) > 0:
             highest_predicted_score_optoprime = max([candidate.predicted_score for candidate in candidates_optoprime])
@@ -497,11 +529,11 @@ class PrioritySearch_RG_RejectionSampling(PrioritySearch_with_Regressor_and_Gene
             highest_predicted_score_generator = max([candidate.predicted_score for candidate in candidates_generator])
             self.logger.log("Propose/Highest predicted score from Generator", highest_predicted_score_generator, self.n_iters, color='blue')
         if len(new_candidates) > 0:
-            self.logger.log("Propose/Avg predicted score of new candidates", np.mean([candidate.predicted_score for candidate in new_candidates]), self.n_iters, color='blue')
+            self.logger.log("Propose/Avg predicted score of new candidates", np.mean([candidate.predicted_score for candidate in new_candidates]), self.n_iters)
         return new_candidates
 
     # propose_attempt3: regressor with rejection sampling
-    def propose_attempt3(self,
+    def propose(self,
                 samples : Samples,
                 verbose : bool = False,
                 **kwargs):
@@ -527,7 +559,7 @@ class PrioritySearch_RG_RejectionSampling(PrioritySearch_with_Regressor_and_Gene
         self.logger.log("Propose/Num of candidates after rejection sampling", len(candidates_optoprime), self.n_iters, color='blue')
         return candidates_optoprime
     # propose_attempt4: attempt3 + generator
-    def propose(self,
+    def propose_attempt4(self,
                 samples : Samples,
                 verbose : bool = False,
                 **kwargs):
