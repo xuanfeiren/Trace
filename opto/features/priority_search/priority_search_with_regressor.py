@@ -8,6 +8,7 @@ from opto.features.priority_search.regressor import LogisticRegressor, LinearReg
 # import pretrained regressors
 from my_processing_agents.pretained_regressor import PretrainedLinearRegressor, PretrainedLogisticRegressor
 from opto.optimizers.utils import print_color
+from opto.trainer.utils import safe_mean
 
 # Add the project root to Python path to enable imports from my_processing_agents
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -608,6 +609,53 @@ class PrioritySearch_RG_RejectionSampling(PrioritySearch_with_Regressor_and_Gene
         self.logger.log("Propose/Avg predicted score after rejection sampling", np.mean([candidate.predicted_score for candidate in candidates_optoprime+candidates_generator]), self.n_iters, color='blue')
         self.logger.log("Propose/Num of candidates after rejection sampling", len(candidates_optoprime+candidates_generator), self.n_iters, color='blue')
         return candidates_optoprime+candidates_generator
+    
+    # Override the explore method. In this version, we pop some candidates with high priority, some candidates with high bonus terms.
+
+    def explore(self, verbose: bool = False, **kwargs):
+        """ 
+        Override the explore method. Pop some candidates with high priority, and some with high bonus terms.
+        """
+        print_color(f"Using new exploration method...", "green")
+        # pop top self.num_candidates candidates from the priority queue
+        # self._best_candidate is the exploited candidate from the previous iteration
+        top_candidates = [] 
+        priorities = [] 
+        # only pop half candiadtes with high priority, and half with high bonus terms.
+        num_high_priority_candidates = self.num_candidates//2
+        num_high_bonus_candidates = self.num_candidates - num_high_priority_candidates
+        while len(top_candidates) < num_high_priority_candidates and len(self.memory) > 0:
+            neg_priority, candidate = self.memory.pop()  # pop the top candidate from the priority queue
+            priority = - neg_priority  # remember that we stored negative scores in the priority queue
+            priorities.append(priority)  # store the priority of the candidate
+            top_candidates.append(candidate)  # add the candidate to the top candidates
+        # assert all candidates have bonus terms. 
+        assert all(hasattr(candidate, 'bonus') and candidate.bonus is not None for _ , candidate in self.memory.memory), "All candidates should have bonus terms."
+        # Now the memory has all candidates except some candidates with high priority. We need to pop some candidates with high bonus terms. We need to pop out num_high_bonus_candidates candidates with high bonus terms.
+        
+        # Sort remaining memory by bonus terms (highest first) and extract top num_high_bonus_candidates
+        self.memory.memory.sort(key=lambda x: x[1].bonus, reverse=True)  # Sort by bonus (descending)
+        # Extract candidates with highest bonus terms
+        high_bonus_items = self.memory.memory[:num_high_bonus_candidates]
+        # update the top_candidates and priorities with the high bonus candidates
+        for neg_priority, candidate in high_bonus_items:
+            priority = -neg_priority
+            priorities.append(priority)
+            top_candidates.append(candidate)
+        self.memory.memory = self.memory.memory[num_high_bonus_candidates:]
+        heapq.heapify(self.memory.memory)
+
+        # NOTE some top_candidates can be duplicates
+        mean_scores = [c.mean_score() for c in top_candidates]
+        mean_scores = [s for s in mean_scores if s is not None]  # filter out None scores
+        info_dict = {
+            'num_exploration_candidates': len(top_candidates),
+            'exploration_candidates_mean_priority': safe_mean(priorities),  # list of priorities of the exploration candidates
+            'exploration_candidates_mean_score': safe_mean(mean_scores),  # list of mean scores of the exploration candidates
+            'exploration_candidates_average_num_rollouts': safe_mean([c.num_rollouts for c in top_candidates]),
+        }
+
+        return top_candidates, priorities, info_dict
     
     
 

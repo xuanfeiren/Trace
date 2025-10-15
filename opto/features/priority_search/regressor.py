@@ -227,6 +227,11 @@ class LogisticRegressor(RegressorTemplate):
         
         # Initialize Adam optimizer (will be reinitialized when dimensions change)
         self.optimizer = None
+
+        # Initialize a covariance matrix
+        self.calculate_bonus = True
+        self.cov = np.eye(self.linear_dim)
+
         
     def _sigmoid(self, z):
         """Sigmoid activation function for logistic regression."""
@@ -255,6 +260,8 @@ class LogisticRegressor(RegressorTemplate):
         # Extract raw binary training data from each candidate
         X_list = []
         y_list = []
+        # Initialize as identity matrix
+        self.cov = np.eye(self.linear_dim)
         
         for candidate in training_candidates:
             embedding = candidate.embedding
@@ -265,6 +272,7 @@ class LogisticRegressor(RegressorTemplate):
                 else:
                     X_list.append(embedding)
                     y_list.append(score)
+                    self.cov += np.outer(embedding, embedding)
                 
         
         if len(X_list) == 0:
@@ -406,9 +414,23 @@ class LogisticRegressor(RegressorTemplate):
         z = X_batch @ self.weights + self.bias
         predicted_scores = self._sigmoid(z)
         
-        # Update each candidate with predicted score as attribute
-        for candidate, predicted_score in zip(batch, predicted_scores):
-            candidate.predicted_score = predicted_score
+        if self.calculate_bonus: # calculate bonus term for each candidate, by x^T * Cov^{-1} * x
+            # Compute Cov^{-1} * X_batch^T efficiently
+            # X_batch is (n_candidates, feature_dim), we want (feature_dim, n_candidates)
+            cov_inv_X_T = np.linalg.solve(self.cov, X_batch.T)  # (feature_dim, n_candidates)
+            
+            # Compute x^T * Cov^{-1} * x for each candidate using element-wise operations
+            # This gives us the diagonal of X_batch @ Cov^{-1} @ X_batch^T
+            bonus_terms = np.sum(X_batch * cov_inv_X_T.T, axis=1)  # (n_candidates,)
+            
+            # Update each candidate with predicted score and bonus as separate attributes
+            for candidate, predicted_score, bonus in zip(batch, predicted_scores, bonus_terms):
+                candidate.predicted_score = predicted_score
+                candidate.bonus = float(bonus)
+        else:
+            # Update each candidate with predicted score as attribute (no bonus)
+            for candidate, predicted_score in zip(batch, predicted_scores):
+                candidate.predicted_score = predicted_score
             
         return predicted_scores
 
