@@ -421,7 +421,9 @@ class LogisticRegressor(RegressorTemplate):
             
             # Compute x^T * Cov^{-1} * x for each candidate using element-wise operations
             # This gives us the diagonal of X_batch @ Cov^{-1} @ X_batch^T
-            bonus_terms = np.sum(X_batch * cov_inv_X_T.T, axis=1)  # (n_candidates,)
+            # also apply a square root to the bonus terms
+            bonus_terms = np.sqrt(np.sum(X_batch * cov_inv_X_T.T, axis=1))  # (n_candidates,)
+
             
             # Update each candidate with predicted score and bonus as separate attributes
             for candidate, predicted_score, bonus in zip(batch, predicted_scores, bonus_terms):
