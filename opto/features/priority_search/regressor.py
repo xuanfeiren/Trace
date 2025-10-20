@@ -438,6 +438,76 @@ class LogisticRegressor(RegressorTemplate):
                     candidate.predicted_score = predicted_score
                 candidate.bonus = float(bonus)
         return predicted_scores
+    
+    def select_k_exploration_candidates(self, memory: List[Tuple[float, ModuleCandidate]], k: int=1):
+        """
+        Select k exploration candidates from the memory based on the bonus terms. The theory for this is pure exploration algorithms in linear bandits: do ucb and set scores to be 0, only with bonus terms.
+
+        The algorithm is as follows: 
+            1. keep a temporary covariance matrix, initialized as self.cov. 
+            2. calculate the bonus terms for each remaining candidate, and select the candidate with the highest bonus term. 
+            3. update the temporary covariance matrix with the selected candidate feature.
+            4. remove the selected candidate from consideration.
+            5. repeat the process until k candidates are selected or no more candidates remain.
+
+        Each candidate can only be selected once.
+
+        Input:
+            memory: a list of (neg_score, candidate) tuples.
+            k: the number of exploration candidates to select.
+        Output:
+            a list of indices of selected exploration candidates in the original memory list.
+        
+        """
+
+        assert k <= len(memory), "k must be less than or equal to the number of candidates in the memory"
+        
+        if len(memory) == 0:
+            return []
+        
+        batch = [candidate for _, candidate in memory]
+
+        # assert all candidates have embeddings
+        assert all(hasattr(candidate, 'embedding') and candidate.embedding is not None for candidate in batch), "All candidates should have embeddings"
+
+        embeddings = []
+        for candidate in batch:
+            if candidate.embedding:
+                embeddings.append(candidate.embedding)
+            else:
+                candidate.embedding = self._get_embedding(candidate)
+                embeddings.append(candidate.embedding)
+        
+        # Keep track of available candidates and their indices
+        available_indices = list(range(len(batch)))
+        available_embeddings = embeddings.copy()
+        
+        exploration_indices = []
+        temporary_cov = self.cov.copy()
+
+        while len(exploration_indices) < k and len(available_indices) > 0:
+            # calculate the bonus terms for all remaining candidates.
+            X_available = np.array(available_embeddings)
+            cov_inv_X_T = np.linalg.solve(temporary_cov, X_available.T)
+            bonus_terms = np.sqrt(np.sum(X_available * cov_inv_X_T.T, axis=1))
+            
+            # select the candidate with the highest bonus term.
+            max_bonus_local_index = np.argmax(bonus_terms)
+            selected_original_index = available_indices[max_bonus_local_index]
+            selected_embedding = available_embeddings[max_bonus_local_index]
+            
+            exploration_indices.append(selected_original_index)
+            
+            # update the temporary covariance matrix with the selected candidate feature.
+            temporary_cov += np.outer(selected_embedding, selected_embedding)
+            
+            # remove the selected candidate from available candidates
+            available_indices.pop(max_bonus_local_index)
+            available_embeddings.pop(max_bonus_local_index)
+
+        return exploration_indices
+
+
 
 class LinearRegressor(RegressorTemplate):
     """Use closed-form solution for regularized linear regression."""

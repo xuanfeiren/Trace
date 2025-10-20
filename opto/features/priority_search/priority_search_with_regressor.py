@@ -403,6 +403,65 @@ class PrioritySearch_with_Regressor(PrioritySearch):
             return candidate.mean_prediction
         else:
             return candidate.predicted_score
+            
+    def explore(self, verbose: bool = False, **kwargs):
+        """ 
+        Override the explore method. Pop some candidates with high priority, and some with high bonus terms.
+        """
+        print_color(f"Using new exploration method...", "green")
+        # pop top self.num_candidates candidates from the priority queue
+        # self._best_candidate is the exploited candidate from the previous iteration
+        top_candidates = [] 
+        priorities = [] 
+        # only pop half candiadtes with high priority, and half with high bonus terms.
+        num_high_priority_candidates = self.num_candidates//2
+        num_high_bonus_candidates = self.num_candidates - num_high_priority_candidates
+        while len(top_candidates) < num_high_priority_candidates and len(self.memory) > 0:
+            neg_priority, candidate = self.memory.pop()  # pop the top candidate from the priority queue
+            priority = - neg_priority  # remember that we stored negative scores in the priority queue
+            priorities.append(priority)  # store the priority of the candidate
+            top_candidates.append(candidate)  # add the candidate to the top candidates
+        # assert all candidates have bonus terms. 
+        assert all(hasattr(candidate, 'bonus') and candidate.bonus is not None for _ , candidate in self.memory.memory), "All candidates should have bonus terms."
+        # Now the memory has all candidates except some candidates with high priority. We need to pop some candidates with high bonus terms. We need to pop out num_high_bonus_candidates candidates with high bonus terms.
+
+        exploration_indices = self.regressor.select_k_exploration_candidates(self.memory.memory, num_high_bonus_candidates)
+        
+        # ensure exploration indices are unique (defensive programming)
+        exploration_indices_set = set(exploration_indices)
+        if len(exploration_indices_set) != len(exploration_indices):
+            print(f"Warning: Found duplicate exploration indices. Original: {len(exploration_indices)}, Unique: {len(exploration_indices_set)}")
+        
+        # pop out the candidates with high bonus terms
+        high_bonus_items = [self.memory.memory[i] for i in exploration_indices_set]
+        
+        # remove those items from the memory by creating a new list without the selected indices
+        remaining_memory = []
+        for i, item in enumerate(self.memory.memory):
+            if i not in exploration_indices_set:
+                remaining_memory.append(item)
+        
+        # update the memory with remaining items and heapify
+        self.memory.memory = remaining_memory
+        heapq.heapify(self.memory.memory)
+        
+        # update the top_candidates and priorities with the high bonus candidates
+        for neg_priority, candidate in high_bonus_items:
+            priority = -neg_priority
+            priorities.append(priority)
+            top_candidates.append(candidate)
+
+        # NOTE some top_candidates can be duplicates
+        mean_scores = [c.mean_score() for c in top_candidates]
+        mean_scores = [s for s in mean_scores if s is not None]  # filter out None scores
+        info_dict = {
+            'num_exploration_candidates': len(top_candidates),
+            'exploration_candidates_mean_priority': safe_mean(priorities),  # list of priorities of the exploration candidates
+            'exploration_candidates_mean_score': safe_mean(mean_scores),  # list of mean scores of the exploration candidates
+            'exploration_candidates_average_num_rollouts': safe_mean([c.num_rollouts for c in top_candidates]),
+        }
+
+        return top_candidates, priorities, info_dict
 
 from opto.features.priority_search.generator import LLMCandidateGenerator
 
@@ -561,7 +620,7 @@ class PrioritySearch_RG_RejectionSampling(PrioritySearch_with_Regressor_and_Gene
         return new_candidates
 
     # propose_attempt3: regressor with rejection sampling
-    def propose(self,
+    def propose_attempt3(self,
                 samples : Samples,
                 verbose : bool = False,
                 **kwargs):
@@ -631,50 +690,7 @@ class PrioritySearch_RG_RejectionSampling(PrioritySearch_with_Regressor_and_Gene
     
     # Override the explore method. In this version, we pop some candidates with high priority, some candidates with high bonus terms.
 
-    def explore(self, verbose: bool = False, **kwargs):
-        """ 
-        Override the explore method. Pop some candidates with high priority, and some with high bonus terms.
-        """
-        print_color(f"Using new exploration method...", "green")
-        # pop top self.num_candidates candidates from the priority queue
-        # self._best_candidate is the exploited candidate from the previous iteration
-        top_candidates = [] 
-        priorities = [] 
-        # only pop half candiadtes with high priority, and half with high bonus terms.
-        num_high_priority_candidates = self.num_candidates//2
-        num_high_bonus_candidates = self.num_candidates - num_high_priority_candidates
-        while len(top_candidates) < num_high_priority_candidates and len(self.memory) > 0:
-            neg_priority, candidate = self.memory.pop()  # pop the top candidate from the priority queue
-            priority = - neg_priority  # remember that we stored negative scores in the priority queue
-            priorities.append(priority)  # store the priority of the candidate
-            top_candidates.append(candidate)  # add the candidate to the top candidates
-        # assert all candidates have bonus terms. 
-        assert all(hasattr(candidate, 'bonus') and candidate.bonus is not None for _ , candidate in self.memory.memory), "All candidates should have bonus terms."
-        # Now the memory has all candidates except some candidates with high priority. We need to pop some candidates with high bonus terms. We need to pop out num_high_bonus_candidates candidates with high bonus terms.
-        
-        # Sort remaining memory by bonus terms (highest first) and extract top num_high_bonus_candidates
-        self.memory.memory.sort(key=lambda x: x[1].bonus, reverse=True)  # Sort by bonus (descending)
-        # Extract candidates with highest bonus terms
-        high_bonus_items = self.memory.memory[:num_high_bonus_candidates]
-        # update the top_candidates and priorities with the high bonus candidates
-        for neg_priority, candidate in high_bonus_items:
-            priority = -neg_priority
-            priorities.append(priority)
-            top_candidates.append(candidate)
-        self.memory.memory = self.memory.memory[num_high_bonus_candidates:]
-        heapq.heapify(self.memory.memory)
-
-        # NOTE some top_candidates can be duplicates
-        mean_scores = [c.mean_score() for c in top_candidates]
-        mean_scores = [s for s in mean_scores if s is not None]  # filter out None scores
-        info_dict = {
-            'num_exploration_candidates': len(top_candidates),
-            'exploration_candidates_mean_priority': safe_mean(priorities),  # list of priorities of the exploration candidates
-            'exploration_candidates_mean_score': safe_mean(mean_scores),  # list of mean scores of the exploration candidates
-            'exploration_candidates_average_num_rollouts': safe_mean([c.num_rollouts for c in top_candidates]),
-        }
-
-        return top_candidates, priorities, info_dict
+    
     
     
 
