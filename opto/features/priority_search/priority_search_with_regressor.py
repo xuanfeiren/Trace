@@ -128,6 +128,17 @@ class PrioritySearch_with_Regressor(PrioritySearch):
             linear_dim=regressor_projection_dim,
             rich_text=regressor_rich_text
         )
+            self.children_regressor = LogisticRegressor(
+            embedding_model=regressor_embedding_model, 
+            num_threads=num_threads,
+            learning_rate=regressor_learning_rate,
+            regularization_strength=regressor_regularization_strength,
+            max_iterations=regressor_max_iterations,
+            tolerance=regressor_tolerance,
+            linear_dim=regressor_projection_dim,
+            rich_text=regressor_rich_text,
+            use_children_data=True
+            )
         elif regressor_type == 'linear':
             self.regressor = LinearRegressor(
                 embedding_model=regressor_embedding_model,
@@ -209,7 +220,7 @@ class PrioritySearch_with_Regressor(PrioritySearch):
                **kwargs): #-> Tuple[Dict[ParameterNode, Any], List[trace.Module], Dict[str, Any]]:
         """ Update the agent using the collected samples.
         """
-
+        print_color(f"Updating the agent using the collected samples... Iteration:{self.n_iters} ",  "blue")
         # samples is None in the first iteration
         if samples is not None:
             # 0. Update the regressor right after collecting samples. We need to first update popped candidates with their new samples. After this update, all candidates in the memory have new predicted scores and the memory is sorted by the predicted scores. All exploration candidates get predicted scores, but they are not added to the memory yet.
@@ -254,12 +265,16 @@ class PrioritySearch_with_Regressor(PrioritySearch):
         for candidate, rollouts in exploration_results.items():
             candidate.add_rollouts(rollouts)  # add the rollouts to the candidate
         exploration_memory = [(0, candidate) for candidate in self._exploration_candidates]
+        # print_color(f'len of long_term_memory: {len(self.long_term_memory.memory)},  len of exploration_memory: {len(exploration_memory)}',  "red")
         self.regressor.update(self.long_term_memory.memory+self.short_term_memory.memory+exploration_memory)
+        self.children_regressor.update(self.long_term_memory.memory+self.short_term_memory.memory+exploration_memory)
         # update the predicted scores for all candidates with data
         predicted_scores = self.regressor.predict_scores(self.long_term_memory.memory+self.short_term_memory.memory+exploration_memory)
+        self.children_regressor.predict_scores(self.long_term_memory.memory+self.short_term_memory.memory+exploration_memory)
         self.highest_predicted_score = max(predicted_scores)
 
         self.regressor.predict_scores([(0, self.base_agent_ModuleCandidate)])
+        self.children_regressor.predict_scores([(0, self.base_agent_ModuleCandidate)])
         self.base_agent_predicted_score = self.base_agent_ModuleCandidate.predicted_score
         # heapify the memory
         self.heapify_memory(self.long_term_memory.memory)
@@ -328,6 +343,7 @@ class PrioritySearch_with_Regressor(PrioritySearch):
             candidate.add_rollouts(rollouts)  # add the rollouts to the
             placeholder_priority = self.max_score
             self.memory.push(placeholder_priority, candidate)
+        print_color(f"Number of candidates in update_memory: {len(self.memory)}",  "green")
 
     def update_memory_with_regressor(self, verbose: bool = False, **kwargs):
         """ 
@@ -339,12 +355,16 @@ class PrioritySearch_with_Regressor(PrioritySearch):
         # only update the memory when self.use_validation is True. Otherwise we have done this before.
         if self.use_validation or self.n_iters == 0:
             self.regressor.update(self.long_term_memory.memory+self.short_term_memory.memory)
+            self.children_regressor.update(self.long_term_memory.memory+self.short_term_memory.memory)
             # Always keep track of the predicted score of the base agent. Ideally this number should converge to the true score of the base agent, when we have more and more data.
             self.regressor.predict_scores([(0, self.base_agent_ModuleCandidate)])
+            self.children_regressor.predict_scores([(0, self.base_agent_ModuleCandidate)])
             self.base_agent_predicted_score = self.base_agent_ModuleCandidate.predicted_score
         # Predict the scores for the long-term memory and the short-term memory
         self.regressor.predict_scores(self.long_term_memory.memory)
+        self.children_regressor.predict_scores(self.long_term_memory.memory)
         self.regressor.predict_scores(self.short_term_memory.memory)
+        self.children_regressor.predict_scores(self.short_term_memory.memory)
         # update the highest predicted score
         self.highest_predicted_score = max(0, max([candidate.predicted_score for _, candidate in self.long_term_memory.memory+self.short_term_memory.memory]))
         # Reorder both long_term_memory and short_term_memory according to the predicted scores
@@ -488,7 +508,6 @@ class PrioritySearch_with_Regressor_and_Generator(PrioritySearch_with_Regressor)
                 candidates.extend(candidates_from_generator)
             else:
                 print_color("No new candidates were generated that exceed the current best score.", "yellow")
-            # breakpoint()
         
         return candidates
 

@@ -210,7 +210,7 @@ class LogisticRegressor(RegressorTemplate):
     predict_scores has no parameters, it could return predicted scores for all candidates in the memory. 
     predict_scores_for_batch has one parameter, a batch of candidates, it could return predicted scores for the batch of candidates."""
     
-    def __init__(self, embedding_model="gemini/text-embedding-004", num_threads=None, learning_rate=0.001, regularization_strength=1, max_iterations=20000, tolerance=5e-3, gradient_tolerance=5e-3, linear_dim=None, rich_text=True):
+    def __init__(self, embedding_model="gemini/text-embedding-004", num_threads=None, learning_rate=0.001, regularization_strength=1, max_iterations=20000, tolerance=5e-3, gradient_tolerance=5e-3, linear_dim=None, rich_text=True,use_children_data=False):
         super().__init__(embedding_model, num_threads, regularization_strength, linear_dim, rich_text)
         # Logistic regression specific parameters
         self.learning_rate = learning_rate
@@ -231,6 +231,8 @@ class LogisticRegressor(RegressorTemplate):
         # Initialize a covariance matrix
         self.calculate_bonus = True
         self.cov = np.eye(self.linear_dim)
+
+        self.use_children_data = use_children_data
 
         
     def _sigmoid(self, z):
@@ -265,7 +267,10 @@ class LogisticRegressor(RegressorTemplate):
         
         for candidate in training_candidates:
             embedding = candidate.embedding
-            scores = [r['score'] for r in candidate.rollouts]
+            if self.use_children_data:
+                scores = [r['score'] for r in candidate.children_rollouts()]
+            else:
+                scores = [r['score'] for r in candidate.rollouts]
             for score in scores:
                 if score is None:
                     continue
@@ -427,13 +432,11 @@ class LogisticRegressor(RegressorTemplate):
             
             # Update each candidate with predicted score and bonus as separate attributes
             for candidate, predicted_score, bonus in zip(batch, predicted_scores, bonus_terms):
-                candidate.predicted_score = predicted_score
+                if self.use_children_data:
+                    candidate.predicted_children_score = predicted_score
+                else:
+                    candidate.predicted_score = predicted_score
                 candidate.bonus = float(bonus)
-        else:
-            # Update each candidate with predicted score as attribute (no bonus)
-            for candidate, predicted_score in zip(batch, predicted_scores):
-                candidate.predicted_score = predicted_score
-            
         return predicted_scores
 
 class LinearRegressor(RegressorTemplate):

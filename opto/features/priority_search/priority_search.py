@@ -39,6 +39,7 @@ class ModuleCandidate:
         self.update_dict = remap_update_dict(self.base_module, self.update_dict)
         self.rollouts = []  # list of dicts containing the rollout information (not BatchRollout, but a list of dicts)
         self.created_time = time.time()
+        self.children = []  # list of ModuleCandidate objects that are children of this candidate
 
     def get_module(self):
         """ Apply the update_dict to the base_module and return the updated module.
@@ -84,6 +85,24 @@ class ModuleCandidate:
         if not self.rollouts:
             return None
         return safe_mean([r['score'] for r in self.rollouts])
+    # Add children statistics
+    def children_rollouts(self):
+        """ Compute the rollouts of the children of the candidate. """
+        if not self.children:
+            return []
+        return [rollout for child in self.children for rollout in child.rollouts]
+    
+    def children_num_rollouts(self):
+        """ Compute the number of rollouts of the children of the candidate. """
+        if not self.children:
+            return 0
+        return sum([len(child.rollouts) for child in self.children])
+    
+    def children_mean_score(self):
+        """ Compute the mean score of the children of the candidate. """
+        if not self.children:
+            return None
+        return safe_mean([r['score'] for r in self.children_rollouts()])
 
     def compute_score_confidence(self, min_score, max_score, scaling_constant=1.0, total_trials=1):
         """Compute the UCB, mean, LCB score for the candidate. After queried, the number of confidence queries is incremented.
@@ -704,7 +723,7 @@ class PrioritySearch(SearchTemplate):
         top_candidates = [self._best_candidate] if self.use_best_candidate_to_explore else []
         priorities = [self._best_candidate_priority] if self.use_best_candidate_to_explore else []  # to store the priorities of the candidates for logging
         while len(top_candidates) < self.num_candidates and len(self.memory) > 0:
-            neg_priority, candidate = self.memory.pop()  # pop the top candidate from the priority queue
+            neg_priority, candidate = self.memory.pop()  # pop the top candidate from te priority queue
             priority = - neg_priority  # remember that we stored negative scores in the priority queue
             if self.use_best_candidate_to_explore:
                 if candidate is self._best_candidate:  # skip if it is already in the top candidates
