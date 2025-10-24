@@ -340,6 +340,8 @@ class PrioritySearch(SearchTemplate):
         )
 
         self._enforce_using_data_collecting_candidates = True
+        self.num_epochs = num_epochs
+        
         # enforce only data collecting candidates are used in in calling match_candidates_and_samples
         # this attribute is purposefully designed to be only modified by subclasses, not through input arguments.
 

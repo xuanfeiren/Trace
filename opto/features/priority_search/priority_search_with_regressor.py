@@ -115,6 +115,7 @@ class PrioritySearch_with_Regressor(PrioritySearch):
         self.highest_predicted_score = 0
         self.base_agent_ModuleCandidate = None
         self.base_agent_predicted_score = None
+        self.log_frequency = log_frequency
         
         # Initialize the regressor with the long-term memory and custom parameters - this is the only difference from parent class
         if regressor_type == 'logistic':

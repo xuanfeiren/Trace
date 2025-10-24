@@ -166,7 +166,11 @@ class RegressorTemplate:
         except Exception as e:
             print_color(f"ERROR: Embedding API call failed after retries: {e}", "red")
             return None
-    
+
+    def add_embeddings_to_candidates(self, candidates: List[ModuleCandidate]):
+        """Add embeddings to a list of candidates. This function could be used outside."""
+        self._update_memory_embeddings_for_batch(candidates)
+
     def _update_memory_embeddings_for_batch(self, batch):
         """Update the embeddings for a batch of candidates."""
         # Separate candidates that need embeddings from those that already have them
@@ -238,7 +242,7 @@ class LogisticRegressor(RegressorTemplate):
     def _sigmoid(self, z):
         """Sigmoid activation function for logistic regression."""
         return 1.0 / (1.0 + np.exp(-z))
-
+    
     def update(self, memory: List[Tuple[float, ModuleCandidate]]):
         """This function update the regression model parameters using the input batch of candidates.
         Input:
@@ -279,7 +283,6 @@ class LogisticRegressor(RegressorTemplate):
                     y_list.append(score)
                     self.cov += np.outer(embedding, embedding)
                 
-        
         if len(X_list) == 0:
             print_color("Warning: No binary training samples generated.", "yellow")
             end_time = time.time()
