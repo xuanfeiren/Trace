@@ -12,14 +12,30 @@ from opto.features.priority_search.priority_search import PrioritySearch, Module
 from opto.features.priority_search.priority_search_with_regressor import PrioritySearch_with_Regressor
 import heapq
 
+def calculate_distance_to_memory(memory, new_candidate):
+        """For a new candidate, calculate the distance to the current memory. That's the least L2 distance to any candidate in the memory.
+        
+        To use this funciton in PrioritySearch, set memory to be self.memory.memory.
+        """
+        assert new_candidate.num_rollouts == 0, "New candidates should have no rollouts."
+        # assert new candidate and all candidates in the memory have the  embedding.
+        assert hasattr(new_candidate, 'embedding') and all(hasattr(candidate, 'embedding') for _, candidate in memory), "All candidates should have the embedding attribute."
+        # calculate the distance to the current memory. That's the least L2 distance to any candidate in the memory.
+        min_distance = float('inf')
+        for _, candidate in memory:
+            distance = np.linalg.norm(np.array(new_candidate.embedding) - np.array(candidate.embedding))
+            if distance < min_distance:
+                min_distance = distance
+        return min_distance
+
 class ExpansivePrioritySearch(PrioritySearch_with_Regressor):
     """
     A search algorithm that uses a priority queue to explore the parameter space and propose new candidates.
     """
 
     def __init__(self,
-                 max_depth: int = 10,
-                 epsilon: float = 0.1,
+                 max_depth: int = 100,
+                 epsilon: float = 0.3,
                  *args,
                  **kwargs):
         super().__init__(*args, **kwargs)
@@ -32,19 +48,6 @@ class ExpansivePrioritySearch(PrioritySearch_with_Regressor):
         print_color(f"For each candidate, generate {num_batches} children. epsilon = {self.epsilon}", "green")
 
         super().train(num_candidates=num_candidates, batch_size=batch_size, num_batches=num_batches, *args, **kwargs)
-    
-    def calculate_distance_to_memory(self, new_candidate):
-        """For a new candidate, calculate the distance to the current memory. That's the least L2 distance to any candidate in the memory."""
-        assert new_candidate.num_rollouts == 0, "New candidates should have no rollouts."
-        # assert new candidate and all candidates in the memory have the  embedding.
-        assert hasattr(new_candidate, 'embedding') and all(hasattr(candidate, 'embedding') for _, candidate in self.memory.memory), "All candidates should have the embedding attribute."
-        # calculate the distance to the current memory. That's the least L2 distance to any candidate in the memory.
-        min_distance = float('inf')
-        for _, candidate in self.memory.memory:
-            distance = np.linalg.norm(np.array(new_candidate.embedding) - np.array(candidate.embedding))
-            if distance < min_distance:
-                min_distance = distance
-        return min_distance
     
     def update(self,
                samples: Union[Samples, None] = None,
@@ -143,7 +146,6 @@ class ExpansivePrioritySearch(PrioritySearch_with_Regressor):
 
         return results
 
-    # TODO: finish this function.
     def update_memory(self, validate_results, verbose: bool = False, **kwargs):
         """ At each update_memory method, first add all old candidates (num_rollouts > 0) to the memory. Them, for each new candidate, calculate the distance to the memory, if larger than self.epsilon, push it to the memory.
         """
@@ -158,7 +160,7 @@ class ExpansivePrioritySearch(PrioritySearch_with_Regressor):
                 new_candidates.append(candidate)
         count_new_candidates = 0
         for new_candidate in new_candidates:
-            distance = self.calculate_distance_to_memory(new_candidate)
+            distance = calculate_distance_to_memory(self.memory.memory, new_candidate)
             if distance > self.epsilon: # only collect new candidates those are not in the epsilon-neighborhood of the memory.
                 count_new_candidates += 1
                 new_candidate.depth = self.depth + 1 # self.depth is the depth of the last popped candidate.
@@ -186,7 +188,9 @@ class ExpansivePrioritySearch(PrioritySearch_with_Regressor):
         """ Compute the priority for the candidate based on the predicted score. """
         if not isinstance(candidate, ModuleCandidate):
             raise TypeError("candidate must be an instance of ModuleCandidate.")
-        
+        # The generalization ability of the regressor is not good enough, so we won't pick unexplored candidates to exploit.
+        # if candidate.mean_score() is None:
+        #     return 0.0
         return candidate.predicted_score  
 
     def exploit(self, verbose: bool = False, **kwargs) -> Tuple[ModuleCandidate, Dict[str, Any]]:
@@ -210,10 +214,15 @@ class ExpansivePrioritySearch(PrioritySearch_with_Regressor):
         
         while len(top_candidates) < self.num_candidates and len(self.memory) > 0:
             priority, candidate = self.memory.pop()  # pop the top candidate from the priority queue
-            if priority == self.max_depth+1: # all candidates have been explored.
-                self.n_epochs = self.num_epochs+1
-                print_color(f"All candidates have been explored. Setting n_epochs to {self.n_epochs}", "green")
-                return [],[],{'num_exploration_candidates': 0, 'exploration_candidates_mean_priority': None, 'exploration_candidates_mean_score': None, 'exploration_candidates_average_num_rollouts':  None }
+            if priority == self.max_depth+1: 
+                # In this case, all candidates in the search tree have been explored. But we may not reach num_steps. To handle this, we reset the priority queue. Initialize each candidate with the priority to be the depth.
+                print_color(f"All candidates have been explored. Resetting the priority queue.", "magenta")
+                # push back the candidate we just popped.
+                heapq.heappush(self.memory.memory, (candidate.depth, candidate))
+                # Initialize all priorities again.
+                self.memory.memory = [(candidate.depth, candidate) for _, candidate in self.memory.memory]
+                heapq.heapify(self.memory.memory)
+                priority, candidate = self.memory.pop()  # pop the top candidate from the priority queue
             priorities.append(priority)  # store the priority of the candidate
             top_candidates.append(candidate)  # add the candidate to the top candidates
         # only one candidate is popped from the memory, so we can get the depth from the candidate. This is used for adding depth attribute to new candidates.
@@ -230,6 +239,41 @@ class ExpansivePrioritySearch(PrioritySearch_with_Regressor):
         }
 
         return top_candidates, priorities, info_dict
+
+class PS_Regressor_EpsilonCover(PrioritySearch_with_Regressor):
+    """ 
+    A subclass of PrioritySearch_with_Regressor, which keeps an epsilon-cover of memory. Reject new candidates that are in the epsilon-cover of the memory.
+    """
+    def __init__(self,
+                 epsilon: float = 0.1,
+                 *args,
+                 **kwargs):
+        super().__init__(*args, **kwargs)
+        self.epsilon = epsilon
+    
+    def update_memory(self, validate_results, verbose: bool = False, **kwargs):
+        """ 
+        Reject new candidates that are in the epsilon-cover of the memory.
+        """
+        print("--- Updating memory with validation results...") if verbose else None
+        new_candidates= [] # new candidates will be added here.
+        for candidate, rollouts in validate_results.items():
+            if not self.use_validation:
+                assert len(rollouts) == 0, "No validation, there should be no rollouts here."
+            candidate.add_rollouts(rollouts)  # add the rollouts to the
+            if candidate.num_rollouts > 0: # old candidate
+                self.memory.push(self.max_score, candidate)
+            else: # new candidate
+                new_candidates.append(candidate)
+        count_new_candidates = 0
+        for new_candidate in new_candidates:
+            distance = calculate_distance_to_memory(self.memory.memory, new_candidate)
+            if distance > self.epsilon: # only collect new candidates those are not in the epsilon-neighborhood of the memory.
+                count_new_candidates += 1
+                self.memory.push(self.max_score, new_candidate)
+        print_color(f"Proposed {len(new_candidates)} new candidates, {count_new_candidates} of them are added to the memory.", "green")
+
+   
 
         
 

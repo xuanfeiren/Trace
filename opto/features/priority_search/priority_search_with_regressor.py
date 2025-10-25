@@ -258,7 +258,9 @@ class PrioritySearch_with_Regressor(PrioritySearch):
         return self._best_candidate.update_dict, [c.get_module() for c in self._exploration_candidates], info_log
 
     def update_regressor_with_samples(self,samples: Samples):
-        """ Update the regressor with the samples. """
+        """ Update the regressor with the samples. 
+        This function adds new samples to the exploration candidates, then updates the regressor and all predicted scores. It doesn't add new candidates to the memory.
+        """
         matched_exploration_candidates_and_samples = self.match_candidates_and_samples(self._exploration_candidates, samples.samples)
         exploration_results = {}  # dict of ModuleCandidate id: (ModuleCandidate, list of rollouts)
         for c, rollouts in matched_exploration_candidates_and_samples.items():  # rollouts is a list of BatchRollouts
