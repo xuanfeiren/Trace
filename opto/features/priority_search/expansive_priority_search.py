@@ -266,6 +266,7 @@ class PS_Regressor_EpsilonCover(PrioritySearch_with_Regressor):
             else: # new candidate
                 new_candidates.append(candidate)
         count_new_candidates = 0
+        self.regressor.add_embeddings_to_candidates(new_candidates)
         for new_candidate in new_candidates:
             distance = calculate_distance_to_memory(self.memory.memory, new_candidate)
             if distance > self.epsilon: # only collect new candidates those are not in the epsilon-neighborhood of the memory.
