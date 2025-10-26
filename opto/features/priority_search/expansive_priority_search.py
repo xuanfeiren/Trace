@@ -189,8 +189,8 @@ class ExpansivePrioritySearch(PrioritySearch_with_Regressor):
         if not isinstance(candidate, ModuleCandidate):
             raise TypeError("candidate must be an instance of ModuleCandidate.")
         # The generalization ability of the regressor is not good enough, so we won't pick unexplored candidates to exploit.
-        # if candidate.mean_score() is None:
-        #     return 0.0
+        if candidate.mean_score() is None:
+            return 0.0
         return candidate.predicted_score  
 
     def exploit(self, verbose: bool = False, **kwargs) -> Tuple[ModuleCandidate, Dict[str, Any]]:
