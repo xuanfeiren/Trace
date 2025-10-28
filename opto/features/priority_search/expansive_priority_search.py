@@ -35,12 +35,13 @@ class ExpansivePrioritySearch(PrioritySearch_with_Regressor):
 
     def __init__(self,
                  max_depth: int = 100,
-                 epsilon: float = 0.3,
+                 epsilon: float = 0.5,
                  *args,
                  **kwargs):
         super().__init__(*args, **kwargs)
         self.max_depth = max_depth
         self.epsilon = epsilon # epsilon-greedy exploration parameter
+        self.buffer = [] # buffer to store the candidates that are not added to the memory.
 
     def train(self,num_candidates: int = 1,batch_size: int = 2,num_batches: int = 10, *args, **kwargs):
         assert num_candidates == 1, "ExpansivePrioritySearch only supports one candidate at a time."
@@ -81,7 +82,11 @@ class ExpansivePrioritySearch(PrioritySearch_with_Regressor):
                 heapq.heappush(self.memory.memory, (original_candidate.depth, original_candidate))
                 # self.memory.push(original_candidate.depth, original_candidate)  # Push the base agent as the first candidate (This gives the initialization of the priority queue)
         self.regressor.update(self.memory.memory)
-        self.regressor.predict_scores(self.memory.memory)
+        predicted_scores = self.regressor.predict_scores(self.memory.memory)
+
+        if self.n_iters % self.log_frequency == 0:
+            # log the highest predicted score
+            self.logger.log('SearchTree/highest_predicted_score',max(predicted_scores), self.n_iters, color='blue')
 
         self.print_memory_stats()
 
@@ -159,14 +164,18 @@ class ExpansivePrioritySearch(PrioritySearch_with_Regressor):
             else: # new candidate
                 new_candidates.append(candidate)
         count_new_candidates = 0
+        count_buffer = 0
         for new_candidate in new_candidates:
             distance = calculate_distance_to_memory(self.memory.memory, new_candidate)
+            new_candidate.depth = self.depth + 1 # self.depth is the depth of the last popped candidate.
             if distance > self.epsilon: # only collect new candidates those are not in the epsilon-neighborhood of the memory.
                 count_new_candidates += 1
-                new_candidate.depth = self.depth + 1 # self.depth is the depth of the last popped candidate.
                 heapq.heappush(self.memory.memory, (self.depth+1, new_candidate))
                 # self.memory.push(self.depth+1, new_candidate)
-        print_color(f"Proposed {len(new_candidates)} new candidates, {count_new_candidates} of them are added to the memory.", "green")
+            else:
+                self.buffer.append(new_candidate)
+                count_buffer += 1
+        print_color(f"Proposed {len(new_candidates)} new candidates, {count_new_candidates} of them are added to the memory, {count_buffer} of them are added to the temporary buffer. Buffer size: {len(self.buffer)}.", "green")
             
     def print_memory_stats(self):
         # For debugging, print all candidates: number, mean_score(), num_rollouts, predicted_score. It is better to see an increasing trend in the predicted scores.
@@ -205,6 +214,39 @@ class ExpansivePrioritySearch(PrioritySearch_with_Regressor):
             'best_candidate_mean_score': best_candidate.mean_score(),  # mean score of the candidate's rollouts
             'best_candidate_num_rollouts': best_candidate.num_rollouts,  # number of rollouts of the candidate
         }
+
+    # def reset_memory(self):
+    #     """ Reset the priority queue. Initialize each candidate with the priority to be the depth.
+    #     """
+    #     # Initialize all priorities again.
+    #     self.memory.memory = [(candidate.depth, candidate) for _, candidate in self.memory.memory]
+    #     heapq.heapify(self.memory.memory)
+
+    def reset_memory(self, factor: float = 0.9):
+        """
+        Reduce the value of self.epsilon by a factor. Then update the epsilon-cover memory using nodes in buffer.
+        """
+        assert len(self.buffer) > 0, "Buffer is empty. Cannot reset the memory with the temporary buffer."
+        self.epsilon *= factor
+        print_color(f"All candidates have been explored. Resetting the memory. New epsilon: {self.epsilon}.", "green")
+        batch = [(0,candidate) for candidate in self.buffer]
+        self.regressor.predict_scores(batch)
+        # sort the buffer by the predicted scores
+        self.buffer.sort(key=lambda x: x.predicted_score, reverse=True)
+        count_added = 0
+        for candidate in self.buffer:
+            distance = calculate_distance_to_memory(self.memory.memory, candidate)
+            if distance > self.epsilon:
+                heapq.heappush(self.memory.memory, (candidate.depth, candidate))
+                self.buffer.remove(candidate)
+                count_added += 1
+        
+        
+        print_color(f"Added {count_added} candidates to the memory. Buffer size: {len(self.buffer)}.", "green")
+        if count_added > 0:
+            self.print_memory_stats()
+        
+
             
     def explore(self, verbose: bool = False, **kwargs):
        
@@ -212,19 +254,12 @@ class ExpansivePrioritySearch(PrioritySearch_with_Regressor):
         top_candidates = [] 
         priorities = [] 
         
-        while len(top_candidates) < self.num_candidates and len(self.memory) > 0:
-            priority, candidate = self.memory.pop()  # pop the top candidate from the priority queue
-            if priority == self.max_depth+1: 
-                # In this case, all candidates in the search tree have been explored. But we may not reach num_steps. To handle this, we reset the priority queue. Initialize each candidate with the priority to be the depth.
-                print_color(f"All candidates have been explored. Resetting the priority queue.", "magenta")
-                # push back the candidate we just popped.
-                heapq.heappush(self.memory.memory, (candidate.depth, candidate))
-                # Initialize all priorities again.
-                self.memory.memory = [(candidate.depth, candidate) for _, candidate in self.memory.memory]
-                heapq.heapify(self.memory.memory)
-                priority, candidate = self.memory.pop()  # pop the top candidate from the priority queue
-            priorities.append(priority)  # store the priority of the candidate
-            top_candidates.append(candidate)  # add the candidate to the top candidates
+        while min([priority for priority, _ in self.memory.memory]) == self.max_depth+1:            
+            # check if all candidates have been explored
+            self.reset_memory()
+        priority, candidate = self.memory.pop()  # pop the top candidate from the priority queue
+        priorities.append(priority)  # store the priority of the candidate
+        top_candidates.append(candidate)  # add the candidate to the top candidates
         # only one candidate is popped from the memory, so we can get the depth from the candidate. This is used for adding depth attribute to new candidates.
         self.depth = candidate.depth
         
