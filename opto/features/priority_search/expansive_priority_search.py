@@ -73,6 +73,8 @@ class ExpansivePrioritySearch(PrioritySearch_with_Regressor):
                 self.logger.log('SearchTree/num_candidates', len(self.memory), self.n_iters, color='blue')
                 # highest_mean_score = 
                 self.logger.log('SearchTree/highest_mean_score',max([candidate.mean_score() for _, candidate in self.memory.memory if candidate.mean_score() is not None]) , self.n_iters, color='blue')
+                # log epsilon
+                self.logger.log('SearchTree/epsilon', self.epsilon, self.n_iters, color='blue')
         else:  # The first iteration.
             max_mem_size = self.memory.size if self.memory.size is not None else float('inf')
             while len(self.memory) < min(max_mem_size, self.num_candidates):
