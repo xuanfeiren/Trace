@@ -2,6 +2,7 @@ import numpy as np
 import copy
 import sys
 import os
+import math
 from typing import Union, List, Tuple, Dict, Any, Optional
 from opto.features.priority_search.search_template import Samples, SearchTemplate, BatchRollout
 from opto.features.priority_search.regressor import LogisticRegressor, LinearRegressor, LinearUCBRegressor, LLMRegressor
@@ -392,9 +393,9 @@ class PrioritySearch_with_Regressor(PrioritySearch):
                 #     params_with_names = {k.py_name: v for k, v in candidate.update_dict.items()}
                 #     return str(params_with_names)
                 # print(f"Parameters: {get_parameter_text(candidate)}")
-        # print("Short-term memory:")
-        # for i, (neg_predicted_score, candidate) in enumerate(self.short_term_memory.memory):
-        #     print(f"Candidate {i}, Mean Score: {candidate.mean_score()}, Num Rollouts: {candidate.num_rollouts}, Predicted Score: {-neg_predicted_score}")
+        print("Short-term memory:")
+        for i, (neg_predicted_score, candidate) in enumerate(self.short_term_memory.memory):
+            print(f"Candidate {i}, Mean Score: {candidate.mean_score()}, Num Rollouts: {candidate.num_rollouts}, Predicted Score: {-neg_predicted_score}")
 
     # TODO refactor below to reuse scoring
     def compute_exploitation_priority(self, candidate) -> float:
@@ -417,7 +418,7 @@ class PrioritySearch_with_Regressor(PrioritySearch):
         top_candidates = [] 
         priorities = [] 
         # only pop half candiadtes with high priority, and half with high bonus terms.
-        num_high_priority_candidates = self.num_candidates//2
+        num_high_priority_candidates = math.ceil(self.num_candidates/2)
         num_high_bonus_candidates = self.num_candidates - num_high_priority_candidates
         while len(top_candidates) < num_high_priority_candidates and len(self.memory) > 0:
             neg_priority, candidate = self.memory.pop()  # pop the top candidate from the priority queue
