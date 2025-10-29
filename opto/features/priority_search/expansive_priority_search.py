@@ -277,6 +277,197 @@ class ExpansivePrioritySearch(PrioritySearch_with_Regressor):
 
         return top_candidates, priorities, info_dict
 
+class ExpansivePrioritySearch_highscore(ExpansivePrioritySearch):
+    """Choose the candidate with the highest predicted score to explore, rather than the one with the least depth."""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.epsilon = 0.1
+
+    def update(self,
+               samples: Union[Samples, None] = None,
+               verbose: bool = False,
+               **kwargs): #-> Tuple[Dict[ParameterNode, Any], List[trace.Module], Dict[str, Any]]:
+        """ Update the agent using the collected samples.
+        """
+
+        # samples is None in the first iteration
+        if samples is not None:
+            # 1. Propose new parameters based on running LLM optimizers on the collected samples
+            candidates = self.propose(samples, verbose=verbose, **kwargs)  # List of ModuleCandidates
+            # add embedding to the candidates asynchronously
+            self.regressor.add_embeddings_to_candidates(candidates)
+            self.regressor.predict_scores([(0,candidate) for candidate in candidates])
+            # 2. Validate the proposed parameters
+            validate_results = self.validate(candidates, samples, verbose=verbose, **kwargs)  # this updates the priority queue
+            # 3. Update the priority queue with the validation results
+            self.update_memory(validate_results, verbose=verbose, **kwargs)  # samples are provided here in case candidates do not capture full information
+            # Log some statistics about the search tree.
+            if self.n_iters % self.log_frequency == 0:
+                self.logger.log('SearchTree/current_depth', self.depth+1, self.n_iters, color='blue')
+                self.logger.log('SearchTree/max_depth', max([candidate.depth for _, candidate in self.memory.memory]), self.n_iters, color='blue')
+                self.logger.log('SearchTree/num_candidates', len(self.memory), self.n_iters, color='blue')
+                # highest_mean_score = 
+                self.logger.log('SearchTree/highest_mean_score',max([candidate.mean_score() for _, candidate in self.memory.memory if candidate.mean_score() is not None]) , self.n_iters, color='blue')
+                # log epsilon
+                self.logger.log('SearchTree/epsilon', self.epsilon, self.n_iters, color='blue')
+        else:  # The first iteration.
+            max_mem_size = self.memory.size if self.memory.size is not None else float('inf')
+            while len(self.memory) < min(max_mem_size, self.num_candidates):
+                original_candidate = ModuleCandidate(self.agent, optimizer=self.optimizer)
+                self.regressor.add_embeddings_to_candidates([original_candidate])
+                self.regressor.predict_scores([(0, original_candidate)])
+                original_candidate.depth = 1
+                heapq.heappush(self.memory.memory, (-original_candidate.predicted_score, original_candidate))
+                # self.memory.push(original_candidate.depth, original_candidate)  # Push the base agent as the first candidate (This gives the initialization of the priority queue)
+        self.regressor.update(self.memory.memory)
+        predicted_scores = self.regressor.predict_scores(self.memory.memory)
+        self.heapify_memory(self.memory.memory)
+
+
+        if self.n_iters % self.log_frequency == 0:
+            # log the highest predicted score
+            self.logger.log('SearchTree/highest_predicted_score',max(predicted_scores), self.n_iters, color='blue')
+
+        self.print_memory_stats()
+
+        
+
+        # Log information about the update
+        info_log = {
+            'n_iters': self.n_iters,  # number of iterations
+            'short_term_memory_size': len(self.short_term_memory),  # size of the short-term memory
+            'long_term_memory_size': len(self.long_term_memory),  # size of the long-term memory
+            'using_short_term_memory': self.memory is self.short_term_memory,  # whether the current memory is the short-term memory
+            'using_long_term_memory': self.memory is self.long_term_memory,  # whether the current memory is the long-term memory
+        }
+        # Due to some api errors, failed sampling process is not counted in the total samples. If we want to count it, we can calculate total_samples from the parameters of the trainer. In this way, different runs could have same number of total samples, not influenced by the randomness.
+        total_samples = sum([candidate.num_rollouts for _, candidate in self.short_term_memory]) + \
+                        sum([candidate.num_rollouts for _, candidate in self.long_term_memory])
+        info_log.update({'total_samples': total_samples})
+
+        # 4. Explore and exploit the priority queue
+        self._best_candidate, self._best_candidate_priority, info_exploit = self.exploit(verbose=verbose, **kwargs)  # get the best candidate (ModuleCandidate) from the priority queue
+        self._exploration_candidates, self._exploration_candidates_priority, info_explore = self.explore(verbose=verbose, **kwargs)  # List of ModuleCandidates
+        
+
+        info_log.update(info_exploit)  # add the info from the exploit step
+        info_log.update(info_explore)  # add the info from the explore step
+        return self._best_candidate.update_dict, [c.get_module() for c in self._exploration_candidates], info_log
+
+    
+
+    def update_memory(self, validate_results, verbose: bool = False, **kwargs):
+        """ At each update_memory method, first add all old candidates (num_rollouts > 0) to the memory. Them, for each new candidate, calculate the distance to the memory, if larger than self.epsilon, push it to the memory.
+        """
+        print("--- Updating memory with validation results...") if verbose else None
+        new_candidates= [] # new candidates will be added here.
+        for candidate, rollouts in validate_results.items():
+            candidate.add_rollouts(rollouts)  # add the rollouts to the
+            if candidate.num_rollouts > 0: # old candidate
+                heapq.heappush(self.memory.memory, (-candidate.predicted_score, candidate))
+                # self.memory.push(self.max_depth+1, candidate) # after explored, old candidates get a very large priority, make it impossible to be popped again.
+            else: # new candidate
+                new_candidates.append(candidate)
+        count_new_candidates = 0
+        count_buffer = 0
+        for new_candidate in new_candidates:
+            distance = calculate_distance_to_memory(self.memory.memory, new_candidate)
+            new_candidate.depth = self.depth + 1 # self.depth is the depth of the last popped candidate.
+            if distance > self.epsilon: # only collect new candidates those are not in the epsilon-neighborhood of the memory.
+                count_new_candidates += 1
+                heapq.heappush(self.memory.memory, (-new_candidate.predicted_score, new_candidate))
+                # self.memory.push(self.depth+1, new_candidate)
+            else:
+                self.buffer.append(new_candidate)
+                count_buffer += 1
+        print_color(f"Proposed {len(new_candidates)} new candidates, {count_new_candidates} of them are added to the memory, {count_buffer} of them are added to the temporary buffer. Buffer size: {len(self.buffer)}.", "green")
+            
+   
+
+    
+
+   
+
+    # def reset_memory(self):
+    #     """ Reset the priority queue. Initialize each candidate with the priority to be the depth.
+    #     """
+    #     # Initialize all priorities again.
+    #     self.memory.memory = [(candidate.depth, candidate) for _, candidate in self.memory.memory]
+    #     heapq.heapify(self.memory.memory)
+
+    # def reset_memory(self, factor: float = 0.9):
+    #     # TODO: make sure all predicted scores are updated before resetting the memory.
+    #     # TODO: update this function
+    #     """
+    #     Reduce the value of self.epsilon by a factor. Then update the epsilon-cover memory using nodes in buffer.
+    #     """
+    #     assert len(self.buffer) > 0, "Buffer is empty. Cannot reset the memory with the temporary buffer."
+    #     self.epsilon *= factor
+    #     print_color(f"All candidates have been explored. Resetting the memory. New epsilon: {self.epsilon}.", "green")
+    #     batch = [(0,candidate) for candidate in self.buffer]
+    #     self.regressor.predict_scores(batch)
+    #     # sort the buffer by the predicted scores
+    #     self.buffer.sort(key=lambda x: x.predicted_score, reverse=True)
+    #     count_added = 0
+    #     for candidate in self.buffer:
+    #         distance = calculate_distance_to_memory(self.memory.memory, candidate)
+    #         if distance > self.epsilon:
+    #             heapq.heappush(self.memory.memory, (candidate.depth, candidate))
+    #             self.buffer.remove(candidate)
+    #             count_added += 1
+        
+        
+    #     print_color(f"Added {count_added} candidates to the memory. Buffer size: {len(self.buffer)}.", "green")
+    #     if count_added > 0:
+    #         self.print_memory_stats()
+        
+    def explore(self, verbose: bool = False, **kwargs):
+       
+        # pop top self.num_candidates candidates from the priority queue
+        top_candidates = [] 
+        priorities = [] 
+        
+        # while min([priority for _, candidate in self.memory.memory]) == self.max_depth+1:            
+        #     # check if all candidates have been explored
+        #     self.reset_memory()
+        neg_priority, candidate = self.memory.pop()  # pop the top candidate from the priority queue
+        priority = - neg_priority  # remember that we stored negative scores in the priority queue
+        priorities.append(priority)  # store the priority of the candidate
+        top_candidates.append(candidate)  # add the candidate to the top candidates
+        # only one candidate is popped from the memory, so we can get the depth from the candidate. This is used for adding depth attribute to new candidates.
+        self.depth = candidate.depth
+        
+        # NOTE some top_candidates can be duplicates
+        mean_scores = [c.mean_score() for c in top_candidates]
+        mean_scores = [s for s in mean_scores if s is not None]  # filter out None scores
+        info_dict = {
+            'num_exploration_candidates': len(top_candidates),
+            'exploration_candidates_mean_priority': safe_mean(priorities),  # list of priorities of the exploration candidates
+            'exploration_candidates_mean_score': safe_mean(mean_scores),  # list of mean scores of the exploration candidates
+            'exploration_candidates_average_num_rollouts': safe_mean([c.num_rollouts for c in top_candidates]),
+        }
+
+        return top_candidates, priorities, info_dict
+
+    def print_memory_stats(self):
+        # For debugging, print all candidates: number, mean_score(), num_rollouts, predicted_score. It is better to see an increasing trend in the predicted scores.
+        print("--- Printing memory stats...")
+        
+        print("Long-term memory:")
+        # sort the memory by the depth then print stats
+        # do not change the order of the memory.
+        
+        # Create a temporary memory sorted by depth for printing
+        temp_memory = sorted(self.long_term_memory.memory, key=lambda x: x[1].depth)
+        
+        for i, (priority, candidate) in enumerate(temp_memory):
+            mean_score = candidate.mean_score()
+            mean_score_str = f"{mean_score:.4g}" if mean_score is not None else "None"
+            print(f" Depth: {candidate.depth}, Candidate {i}, Mean Score: {mean_score_str}, Num Rollouts: {candidate.num_rollouts}, Predicted Score: {candidate.predicted_score}")
+            
+    
+
 class PS_Regressor_EpsilonCover(PrioritySearch_with_Regressor):
     """ 
     A subclass of PrioritySearch_with_Regressor, which keeps an epsilon-cover of memory. Reject new candidates that are in the epsilon-cover of the memory.
@@ -310,6 +501,8 @@ class PS_Regressor_EpsilonCover(PrioritySearch_with_Regressor):
                 count_new_candidates += 1
                 self.memory.push(self.max_score, new_candidate)
         print_color(f"Proposed {len(new_candidates)} new candidates, {count_new_candidates} of them are added to the memory.", "green")
+
+   
 
    
 
