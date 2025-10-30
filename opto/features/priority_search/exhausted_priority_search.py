@@ -28,7 +28,7 @@ def calculate_distance_to_memory(memory, new_candidate):
                 min_distance = distance
         return min_distance
 
-class ExpansivePrioritySearch(PrioritySearch_with_Regressor):
+class ExhaustedPrioritySearch(PrioritySearch_with_Regressor):
     """
     A search algorithm that uses a priority queue to explore the parameter space and propose new candidates.
     """
@@ -44,8 +44,8 @@ class ExpansivePrioritySearch(PrioritySearch_with_Regressor):
         self.buffer = [] # buffer to store the candidates that are not added to the memory.
 
     def train(self,num_candidates: int = 1,batch_size: int = 2,num_batches: int = 10, *args, **kwargs):
-        assert num_candidates == 1, "ExpansivePrioritySearch only supports one candidate at a time."
-        print_color(f"ExpansivePrioritySearch: num_candidates = {num_candidates}, batch_size = {batch_size}, num_batches = {num_batches}", "green")
+        assert num_candidates == 1, "ExhaustedPrioritySearch only supports one candidate at a time."
+        print_color(f"ExhaustedPrioritySearch: num_candidates = {num_candidates}, batch_size = {batch_size}, num_batches = {num_batches}", "green")
         print_color(f"For each candidate, generate {num_batches} children. epsilon = {self.epsilon}", "green")
 
         super().train(num_candidates=num_candidates, batch_size=batch_size, num_batches=num_batches, *args, **kwargs)
@@ -277,7 +277,7 @@ class ExpansivePrioritySearch(PrioritySearch_with_Regressor):
 
         return top_candidates, priorities, info_dict
 
-class ExpansivePrioritySearch_highscore(ExpansivePrioritySearch):
+class ExhaustedPrioritySearch_highscore(ExhaustedPrioritySearch):
     """Choose the candidate with the highest predicted score to explore, rather than the one with the least depth."""
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
