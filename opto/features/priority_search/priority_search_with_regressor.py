@@ -236,6 +236,7 @@ class PrioritySearch_with_Regressor(PrioritySearch):
             # 3. Update the priority queue with the validation results
             self.update_memory(validate_results, verbose=verbose, **kwargs)  # samples are provided here in case candidates do not capture full information
         else:  # The first iteration.
+            self.base_agent_ModuleCandidate = ModuleCandidate(self.agent, optimizer=self.optimizer)
             self.default_batch_size, self.default_num_batches = self.get_sampler_batch_size()
             self.memory.push(self.max_score, ModuleCandidate(self.agent, optimizer=self.optimizer))  # Push the base agent as the first candidate (This gives the initialization of the priority queue)
         self.update_memory_with_regressor(verbose=verbose, **kwargs)

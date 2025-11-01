@@ -54,7 +54,7 @@ class ExhaustedPrioritySearch_v2(PrioritySearch_with_Regressor):
         self.buffer = [] # buffer to store the candidates that are not added to the memory.
 
     def train(self,num_batches: int = 1, *args, **kwargs):
-        assert num_batches == 1, "ExhaustedPrioritySearch_v2 only supports num_batches of 1."
+        # assert num_batches == 1, "ExhaustedPrioritySearch_v2 only supports num_batches of 1."
         print_color(f"Training with ExhaustedPrioritySearch_v2 algorithm...", "green")
         print_color(f"For the exhausted candidate, generate {self.exhausted_pull_times} children. Initial epsilon = {self.epsilon}", "green")
 
@@ -89,6 +89,7 @@ class ExhaustedPrioritySearch_v2(PrioritySearch_with_Regressor):
                 # log epsilon
                 self.logger.log('SearchTree/epsilon', self.epsilon, self.n_iters, color='blue')
         else:  # The first iteration.
+            self.base_agent_ModuleCandidate = ModuleCandidate(self.agent, optimizer=self.optimizer)
             self.default_batch_size, self.default_num_batches = self.get_sampler_batch_size()
             self.memory.push(self.max_score, ModuleCandidate(self.agent, optimizer=self.optimizer))  # Push the base agent as the first candidate (This gives the initialization of the priority queue)
             self.update_memory_with_regressor(verbose=verbose, **kwargs)
@@ -124,11 +125,12 @@ class ExhaustedPrioritySearch_v2(PrioritySearch_with_Regressor):
         exploration_memory = [(0, candidate) for candidate in self._exploration_candidates]
         print_color(f"len(exploration_results.keys()): {len(exploration_results.keys())}", "red")
         try:
-            assert len(exploration_results.keys()) == self.num_candidates or len(exploration_results.keys()) == 1 or len(self.memory) == 0, "The number of exploration results should be equal to the number of exploration candidates."
+            assert len(exploration_results.keys()) == self.num_candidates  or len(self._fresh_candidates()) == 0, "The number of exploration results should be equal to the number of exploration candidates."
         except AssertionError as e:
             print_color(f"AssertionError: {e}", "red")
             print_color(f"len(exploration_results.keys()): {len(exploration_results.keys())}", "red")
             print_color(f"self.num_candidates: {self.num_candidates}", "red")
+            print_color(f"len(self._fresh_candidates()): {len(self._fresh_candidates())}", "red")
             raise e
         
         # print_color(f'len of long_term_memory: {len(self.long_term_memory.memory)},  len of exploration_memory: {len(exploration_memory)}',  "red")
@@ -228,16 +230,8 @@ class ExhaustedPrioritySearch_v2(PrioritySearch_with_Regressor):
         # only update the memory when self.use_validation is True. Otherwise we have done this before.
         if self.use_validation or self.n_iters == 0:
             self.regressor.update(self.long_term_memory.memory+self.short_term_memory.memory)
-            # self.children_regressor.update(self.long_term_memory.memory+self.short_term_memory.memory)
-            # Always keep track of the predicted score of the base agent. Ideally this number should converge to the true score of the base agent, when we have more and more data.
-            self.regressor.predict_scores([(0, self.base_agent_ModuleCandidate)])
-            # self.children_regressor.predict_scores([(0, self.base_agent_ModuleCandidate)])
-            self.base_agent_predicted_score = self.base_agent_ModuleCandidate.predicted_score
         # Predict the scores for the long-term memory and the short-term memory
-        self.regressor.predict_scores(self.long_term_memory.memory)
-        # self.children_regressor.predict_scores(self.long_term_memory.memory)
-        self.regressor.predict_scores(self.short_term_memory.memory)
-        # self.children_regressor.predict_scores(self.short_term_memory.memory)
+        self.regressor.predict_scores(self.long_term_memory.memory+self.short_term_memory.memory)
         # update the highest predicted score
         self.highest_predicted_score = max(0, max([candidate.predicted_score for _, candidate in self.long_term_memory.memory+self.short_term_memory.memory]))
         # Reorder both long_term_memory and short_term_memory according to the predicted scores
@@ -255,7 +249,8 @@ class ExhaustedPrioritySearch_v2(PrioritySearch_with_Regressor):
                 std = candidate.standard_deviation()
                 mean_score_str = f"{mean_score:.4g}" if mean_score is not None else "None"
                 std_str = f"{std:.4g}" if std is not None else "None"
-                print(f"Candidate {i}, Mean Score: {mean_score_str}, Std: {std_str}, Num Rollouts: {candidate.num_rollouts}, Predicted Score: {candidate.predicted_score}")
+                predicted_score_str = f"{candidate.predicted_score:.4g}" if candidate.predicted_score is not None else "None"
+                print(f"Candidate {i}, Mean Score: {mean_score_str}, Std: {std_str}, Num Rollouts: {candidate.num_rollouts}, Predicted Score: {predicted_score_str}")
                 # def get_parameter_text(candidate):
                 #     """Get the parameter text for a ModuleCandidate."""
                 #     if not candidate.update_dict:
@@ -310,6 +305,17 @@ class ExhaustedPrioritySearch_v2(PrioritySearch_with_Regressor):
         """
         # Pulling one candidate one time means sampling it on one minibatch of data.
         return [candidate for _, candidate in self.memory.memory if candidate.num_rollouts < self.exhausted_pull_times * self.batch_size]
+    
+    def _reset_num_batches(self,len_top_candidates: int):
+        """
+        Reset the number of batches based on the number of top candidates.
+        """
+        if len_top_candidates < self.num_candidates:
+            new_num_batches = np.ceil(self.default_num_batches * self.num_candidates/len_top_candidates).astype(int)
+            print(f'Setting sampler num_batches from {self.default_num_batches} to {new_num_batches} to accommodate {self.num_candidates} exploration candidates request using {len_top_candidates} candidates.')
+            self.set_sampler_batch_size(self.default_batch_size, new_num_batches)
+        else:
+            self.set_sampler_batch_size(self.default_batch_size, self.default_num_batches)
 
     def explore(self, verbose: bool = False, **kwargs): # Exploration+Exhaustion method
         """ 
@@ -336,12 +342,14 @@ class ExhaustedPrioritySearch_v2(PrioritySearch_with_Regressor):
             priorities.append(priority)  # store the priority of the candidate
             top_candidates.append(candidate)  # add the candidate to the top candidates
 
-
+        num_exploration_candidates = len(top_candidates)
         # Step b: Exhaustion: select multiple candidates (with the highest scores, unexplored), pull one more time to cover its children (exhausted).
 
         unexplored_candidates = self._fresh_candidates()
         # the candidate to be exhausted is the one with the highest predicted score among the unexplored candidates.
         exhausted_candidates = unexplored_candidates[:num_exhaustion_candidates]
+
+        num_exhaustion_candidates = len(exhausted_candidates)
         
         initial_length = len(self.memory.memory) # for defensive programming
         for candidate in exhausted_candidates:
@@ -358,9 +366,6 @@ class ExhaustedPrioritySearch_v2(PrioritySearch_with_Regressor):
         # assert no duplicates in top_candidates
         assert len(top_candidates) == len(set(top_candidates)) == len(priorities), "There are duplicates in the top candidates, or the number of top candidates is not equal to the number of priorities."
 
-        
-
-       
         mean_scores = [c.mean_score() for c in top_candidates]
         mean_scores = [s for s in mean_scores if s is not None]  # filter out None scores
         info_dict = {
@@ -369,6 +374,10 @@ class ExhaustedPrioritySearch_v2(PrioritySearch_with_Regressor):
             'exploration_candidates_mean_score': safe_mean(mean_scores),  # list of mean scores of the exploration candidates
             'exploration_candidates_average_num_rollouts': safe_mean([c.num_rollouts for c in top_candidates]),
         }
+        print_color(f"Exploration candidates: {num_exploration_candidates}, Exhaustion candidates: {num_exhaustion_candidates}", "green")
+
+        self._reset_num_batches(len(top_candidates))
+        
 
         return top_candidates, priorities, info_dict
 

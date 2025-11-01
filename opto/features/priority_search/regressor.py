@@ -112,6 +112,8 @@ class RegressorTemplate:
 
     def _get_parameter_text(self, candidate):
         """Get the parameter text for a ModuleCandidate."""
+        if not hasattr(candidate, 'update_dict'):
+            print(candidate)
         assert hasattr(candidate, 'update_dict'), "ModuleCandidate must have an update_dict"
         # Convert parameter nodes to readable names for deterministic embedding
         params_with_names = {k.py_name: v for k, v in candidate.update_dict.items()}
