@@ -34,9 +34,10 @@ class ExhaustedPrioritySearch_v2(PrioritySearch_with_Regressor):
     We do not need a depth attribute for each node (no Tree structure for the memory).
     Step 0: Pull the original candidate many times to generate many children.
     Step 1:
-        At each step,
-            a: Select one candidate (with the highest score, unexplored), pull k (we are going to pull each arm at least this number) times to cover its children (exhausted), 
-            b: Select multiple candidates based on predicted scores (and/or bonus) to accelerate information collection process.
+        At each iteration,
+            a. Exploration: select multiple candidates based on predicted scores (and/or bonus) to accelerate information collection process.
+            b. Ensuring nodes exhausted: select multiple candidates (with the highest scores, unexplored), pull one more time to cover its children (exhausted).
+
         Only keep children which are not in the current eps-cover. Others into a temporary buffer.
     Step 2: 
         If all nodes in the current memory are explored (num_rollouts>=k), reset eps and include more nodes from the buffer to the memory.
@@ -53,7 +54,7 @@ class ExhaustedPrioritySearch_v2(PrioritySearch_with_Regressor):
         self.buffer = [] # buffer to store the candidates that are not added to the memory.
 
     def train(self,num_batches: int = 1, *args, **kwargs):
-        assert num_batches == 1, "ExhaustedPrioritySearch_v2 only supports batch size of 1."
+        assert num_batches == 1, "ExhaustedPrioritySearch_v2 only supports num_batches of 1."
         print_color(f"Training with ExhaustedPrioritySearch_v2 algorithm...", "green")
         print_color(f"For the exhausted candidate, generate {self.exhausted_pull_times} children. Initial epsilon = {self.epsilon}", "green")
 
@@ -254,8 +255,10 @@ class ExhaustedPrioritySearch_v2(PrioritySearch_with_Regressor):
         for i, (_, candidate) in enumerate(self.long_term_memory.memory):
             if len(self.long_term_memory.memory) <= 40 or i < 20 or i >= len(self.long_term_memory.memory) - 20:
                 mean_score = candidate.mean_score()
+                std = candidate.standard_deviation()
                 mean_score_str = f"{mean_score:.4g}" if mean_score is not None else "None"
-                print(f"Candidate {i}, Mean Score: {mean_score_str}, Num Rollouts: {candidate.num_rollouts}, Predicted Score: {candidate.predicted_score}")
+                std_str = f"{std:.4g}" if std is not None else "None"
+                print(f"Candidate {i}, Mean Score: {mean_score_str}, Std: {std_str}, Num Rollouts: {candidate.num_rollouts}, Predicted Score: {candidate.predicted_score}")
                 # def get_parameter_text(candidate):
                 #     """Get the parameter text for a ModuleCandidate."""
                 #     if not candidate.update_dict:
@@ -303,56 +306,64 @@ class ExhaustedPrioritySearch_v2(PrioritySearch_with_Regressor):
         if count_added > 0:
             self.heapify_memory(self.memory.memory)
             self.print_memory_stats()
-            
 
-    def explore(self, verbose: bool = False, **kwargs): # exhausted+explore method
+    def _fresh_candidates(self):
+        """
+        List of candidates in the memory, that have not been exhaustedly pulled.
+        """
+        # Pulling one candidate one time means sampling it on one minibatch of data.
+        return [candidate for _, candidate in self.memory.memory if candidate.num_rollouts < self.exhausted_pull_times * self.batch_size]
+
+    def explore(self, verbose: bool = False, **kwargs): # Exploration+Exhaustion method
         """ 
         a. Select one candidate (with the highest score, unexplored), pull k (we are going to pull each arm at least this number) times to cover its children (exhausted).
         b. Select multiple candidates based on predicted scores (and/or bonus) to accelerate information collection process.
-
         """
         print_color(f"Using exhausted priority search v2 exploration method...", "green")
 
-        # Step 1: Select one candidate (with the highest score, unexplored), pull k (we are going to pull each arm at least this number) times to cover its children (exhausted)
-        
-        while len([candidate for _, candidate in self.memory.memory if candidate.num_rollouts < self.exhausted_pull_times * self.batch_size * self.num_batches ]) == 0:
+        while len(self._fresh_candidates()) == 0:
             # All candidates have been exhaustedly pulled. Reset the memory.
             self.reset_memory()
-
-        unexplored_candidates = [candidate for _, candidate in self.memory.memory if candidate.num_rollouts < self.exhausted_pull_times * self.batch_size * self.num_batches ]
-        # the candidate to be exhausted is the one with the highest predicted score among the unexplored candidates.
-        exhausted_candidate = max(unexplored_candidates, key=lambda x: x.predicted_score)
-        exhausted_candidates = [exhausted_candidate] * self.exhausted_pull_times
-        exhausted_priorities = [exhausted_candidate.predicted_score] * self.exhausted_pull_times
-
-        initial_length = len(self.memory.memory) # for defensive programming
-        self.memory.memory.remove((-exhausted_candidate.predicted_score, exhausted_candidate))
-        self.heapify_memory(self.memory.memory)
-        assert len(self.memory.memory) == initial_length - 1, "The memory should have one less candidate after exhausting one."
-
-        # Step 2: Select multiple candidates based on predicted scores (and/or bonus) to accelerate information collection process.
         
         top_candidates = []
         priorities = []
-        while len(top_candidates) < self.num_candidates-1 and len(self.memory) > 0:
+
+        # Step a: Exploration: select multiple candidates based on predicted scores (and/or bonus) to accelerate information collection process.
+
+        num_exploration_candidates = self.num_candidates//2
+        num_exhaustion_candidates = self.num_candidates - num_exploration_candidates
+
+        while len(top_candidates) < num_exploration_candidates and len(self.memory) > 0:
             neg_priority, candidate = self.memory.pop()  # pop the top candidate from the priority queue
             priority = - neg_priority  # remember that we stored negative scores in the priority queue
             priorities.append(priority)  # store the priority of the candidate
             top_candidates.append(candidate)  # add the candidate to the top candidates
 
-        top_candidates.extend(exhausted_candidates)
-        priorities.extend(exhausted_priorities)
-        try:
-            assert len(top_candidates) == self.num_candidates-1 + self.exhausted_pull_times or len(self.memory) == 0, "The number of top candidates should be equal to the number of candidates minus one plus the number of times to pull the exhausted candidate."
-        except AssertionError as e:
-            print_color(f"AssertionError: {e}", "red")
-            print_color(f"len(top_candidates): {len(top_candidates)}", "red")
-            print_color(f"len(self.memory): {len(self.memory)}", "red")
-            print_color(f"self.num_candidates: {self.num_candidates}", "red")
-            print_color(f"self.exhausted_pull_times: {self.exhausted_pull_times}", "red")
-            raise e
 
-        # NOTE some top_candidates can be duplicates
+        # Step b: Exhaustion: select multiple candidates (with the highest scores, unexplored), pull one more time to cover its children (exhausted).
+
+        unexplored_candidates = self._fresh_candidates()
+        # the candidate to be exhausted is the one with the highest predicted score among the unexplored candidates.
+        exhausted_candidates = unexplored_candidates[:num_exhaustion_candidates]
+        
+        initial_length = len(self.memory.memory) # for defensive programming
+        for candidate in exhausted_candidates:
+            assert (-candidate.predicted_score, candidate) in self.memory.memory, "The candidate should be in the memory."
+            self.memory.memory.remove((-candidate.predicted_score, candidate))
+            priorities.append(candidate.predicted_score)
+
+        assert len(self.memory.memory) == initial_length - len(exhausted_candidates), "The memory should have one less candidate after exhausting one."
+
+        top_candidates.extend(exhausted_candidates)
+        
+        self.heapify_memory(self.memory.memory)
+
+        # assert no duplicates in top_candidates
+        assert len(top_candidates) == len(set(top_candidates)) == len(priorities), "There are duplicates in the top candidates, or the number of top candidates is not equal to the number of priorities."
+
+        
+
+       
         mean_scores = [c.mean_score() for c in top_candidates]
         mean_scores = [s for s in mean_scores if s is not None]  # filter out None scores
         info_dict = {

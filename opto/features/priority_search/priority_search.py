@@ -85,6 +85,13 @@ class ModuleCandidate:
         if not self.rollouts:
             return None
         return safe_mean([r['score'] for r in self.rollouts])
+
+    def standard_deviation(self):
+        """ Compute the standard deviation of the scores of the candidate. """
+        if not self.rollouts:
+            return None
+        return np.std([r['score'] for r in self.rollouts if r['score'] is not None])
+
     # Add children statistics
     def children_rollouts(self):
         """ Compute the rollouts of the children of the candidate. """
