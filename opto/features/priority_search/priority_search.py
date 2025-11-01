@@ -323,6 +323,7 @@ class PrioritySearch(SearchTemplate):
         self._enforce_using_data_collecting_candidates = True
         # enforce only data collecting candidates are used in in calling match_candidates_and_samples
         # this attribute is purposefully designed to be only modified by subclasses, not through input arguments.
+        self.default_batch_size, self.default_num_batches = None, None
 
         super().train(guide=guide,
                       train_dataset=train_dataset,
@@ -430,9 +431,8 @@ class PrioritySearch(SearchTemplate):
             # 3. Update the priority queue with the validation results
             self.update_memory(validate_results, verbose=verbose, **kwargs)  # samples are provided here in case candidates do not capture full information
         else:  # The first iteration.
-            max_mem_size = self.memory.size if self.memory.size is not None else float('inf')
-            while len(self.memory) < min(max_mem_size, self.num_candidates):
-                self.memory.push(self.max_score, ModuleCandidate(self.agent, optimizer=self.optimizer))  # Push the base agent as the first candidate (This gives the initialization of the priority queue)
+            self.default_batch_size, self.default_num_batches = self.get_sampler_batch_size()
+            self.memory.push(self.max_score, ModuleCandidate(self.agent, optimizer=self.optimizer))  # Push the base agent as the first candidate (This gives the initialization of the priority queue)
 
         # Log information about the update
         info_log = {
@@ -719,7 +719,12 @@ class PrioritySearch(SearchTemplate):
             'exploration_candidates_mean_score': safe_mean(mean_scores),  # list of mean scores of the exploration candidates
             'exploration_candidates_average_num_rollouts': safe_mean([c.num_rollouts for c in top_candidates]),
         }
-
+        if len(top_candidates) < self.num_candidates:
+            new_num_batches = int(self.default_num_batches * self.num_candidates/len(top_candidates))
+            print(f'Setting sampler num_batches from {self.default_num_batches} to {new_num_batches} to accommodate {self.num_candidates} exploration candidates request using {len(top_candidates)} candidates.')
+            self.set_sampler_batch_size(self.default_batch_size, new_num_batches)
+        else:
+            self.set_sampler_batch_size(self.default_batch_size, self.default_num_batches)
         return top_candidates, priorities, info_dict
 
     def exploit(self, verbose: bool = False, **kwargs) -> Tuple[ModuleCandidate, Dict[str, Any]]:
@@ -756,6 +761,26 @@ class PrioritySearch(SearchTemplate):
             raise TypeError("candidate must be an instance of ModuleCandidate.")
         # By default, we compute the mean score of the rollouts
         return candidate.mean_score()
+
+    def set_sampler_batch_size(self, batch_size: int, num_batches: int, set_train_sampler: bool = True, set_validate_sampler: bool = True):
+
+        subbatch_size, batch_size = batch_size, batch_size*num_batches
+
+        if self.train_sampler is not None and set_train_sampler:
+            self.train_sampler.loader.batch_size = batch_size  # update the batch size in the DataLoader
+            self.train_sampler.subbatch_size = subbatch_size  # update the sub-batch size in the Sampler
+
+        if self.validate_sampler is not None and set_validate_sampler:
+            self.validate_sampler.loader.batch_size = batch_size  # update the batch size in the DataLoader
+            self.validate_sampler.subbatch_size = subbatch_size  # no sub-batch size for validation
+
+    def get_sampler_batch_size(self):
+        if self.train_sampler is not None:
+            batchsize, subbatch_size = self.train_sampler.loader.batch_size, self.train_sampler.subbatch_size
+            batchsize, num_batches = subbatch_size, batchsize // subbatch_size
+            return batchsize, num_batches
+        else:
+            raise ValueError("train_sampler is not set.")
 
     # NOTE This function can be overridden by subclasses to compute a different score
     def compute_exploration_priority(self, candidate) -> float:
