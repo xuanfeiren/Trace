@@ -82,7 +82,7 @@ class ExhaustedPrioritySearch_v2(PrioritySearch_with_Regressor):
             if self.n_iters % self.log_frequency == 0:
                 self.logger.log('SearchTree/len_memory', len(self.memory), self.n_iters, color='blue')
                 self.logger.log('SearchTree/len_buffer', len(self.buffer), self.n_iters, color='blue')
-                self.logger.log('SearchTree/len_unexplored_nodes',len([candidate for _, candidate in self.memory.memory if candidate.num_rollouts < self.exhausted_pull_times * self.batch_size * self.num_batches ]), self.n_iters, color='blue')
+                self.logger.log('SearchTree/len_unexplored_nodes',len([candidate for _, candidate in self.memory.memory if candidate.num_rollouts < self.exhausted_pull_times * self.batch_size ]), self.n_iters, color='blue')
                 # highest_mean_score = 
                 self.logger.log('SearchTree/highest_mean_score',max([candidate.mean_score() for _, candidate in self.memory.memory if candidate.mean_score() is not None]) , self.n_iters, color='blue')
                 self.logger.log('SearchTree/highest_predicted_score',max([candidate.predicted_score for _, candidate in self.memory.memory]) , self.n_iters, color='blue')
