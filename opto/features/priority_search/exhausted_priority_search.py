@@ -107,6 +107,12 @@ class ExhaustedPrioritySearch_v2(PrioritySearch_with_Regressor):
         info_log.update({'total_samples': total_samples})
         # 4. Explore and exploit the priority queue
         self._best_candidate, self._best_candidate_priority, info_exploit = self.exploit(verbose=verbose, **kwargs)  # get the best candidate (ModuleCandidate) from the priority queue
+        if self.n_iters % self.log_frequency == 0:
+            exploitation_ucb = self._best_candidate.predicted_score
+            exploitation_lcb = self._best_candidate.lcb
+            # exploitation_mean = self._best_candidate.mean_prediction
+            self.logger.log('Test/exploitation_ucb', exploitation_ucb, self.n_iters, color='magenta') # best candidate's ucb score
+            self.logger.log('Test/exploitation_lcb', exploitation_lcb, self.n_iters, color='magenta') # best candidate's lcb score
         self._exploration_candidates, self._exploration_candidates_priority, info_explore = self.explore(verbose=verbose, **kwargs)  # List of ModuleCandidates
         info_log.update(info_exploit)  # add the info from the exploit step
         info_log.update(info_explore)  # add the info from the explore step
@@ -135,14 +141,14 @@ class ExhaustedPrioritySearch_v2(PrioritySearch_with_Regressor):
         
         # print_color(f'len of long_term_memory: {len(self.long_term_memory.memory)},  len of exploration_memory: {len(exploration_memory)}',  "red")
         self.regressor.update(self.long_term_memory.memory+self.short_term_memory.memory+exploration_memory)
-        self.children_regressor.update(self.long_term_memory.memory+self.short_term_memory.memory+exploration_memory)
+        # self.children_regressor.update(self.long_term_memory.memory+self.short_term_memory.memory+exploration_memory)
         # update the predicted scores for all candidates with data
         predicted_scores = self.regressor.predict_scores(self.long_term_memory.memory+self.short_term_memory.memory+exploration_memory)
-        self.children_regressor.predict_scores(self.long_term_memory.memory+self.short_term_memory.memory+exploration_memory)
+        # self.children_regressor.predict_scores(self.long_term_memory.memory+self.short_term_memory.memory+exploration_memory)
         self.highest_predicted_score = max(predicted_scores)
 
         self.regressor.predict_scores([(0, self.base_agent_ModuleCandidate)])
-        self.children_regressor.predict_scores([(0, self.base_agent_ModuleCandidate)])
+        # self.children_regressor.predict_scores([(0, self.base_agent_ModuleCandidate)])
         self.base_agent_predicted_score = self.base_agent_ModuleCandidate.predicted_score
         # heapify the memory
         self.heapify_memory(self.long_term_memory.memory)
@@ -250,7 +256,13 @@ class ExhaustedPrioritySearch_v2(PrioritySearch_with_Regressor):
                 mean_score_str = f"{mean_score:.4g}" if mean_score is not None else "None"
                 std_str = f"{std:.4g}" if std is not None else "None"
                 predicted_score_str = f"{candidate.predicted_score:.4g}" if candidate.predicted_score is not None else "None"
-                print(f"Candidate {i}, Mean Score: {mean_score_str}, Std: {std_str}, Num Rollouts: {candidate.num_rollouts}, Predicted Score: {predicted_score_str}")
+                lcb_str = f"{candidate.lcb:.4g}" if candidate.lcb is not None else "None"
+                print_color(f"Candidate {i}, Mean Score: {mean_score_str}, Std: {std_str}, Num Rollouts: {candidate.num_rollouts}, Predicted Score: {predicted_score_str}, LCB: {lcb_str}", "magenta")
+                all_pred_scores_str = ""
+                for predicted_score in candidate.predicted_scores:
+                    pred_score_str = f"{predicted_score:.4g}" if predicted_score is not None else "None"
+                    all_pred_scores_str += f"{pred_score_str}, "
+                print(f"All Predicted Scores: {all_pred_scores_str}")
                 # def get_parameter_text(candidate):
                 #     """Get the parameter text for a ModuleCandidate."""
                 #     if not candidate.update_dict:
@@ -270,7 +282,9 @@ class ExhaustedPrioritySearch_v2(PrioritySearch_with_Regressor):
         # The generalization ability of the regressor is not good enough, so we won't pick unexplored candidates to exploit.
         if candidate.mean_score() is None:
             return 0.0
-        return candidate.predicted_score 
+        assert candidate.lcb is not None, "The candidate should have an lcb score."
+        # use the lowest predicted score as the test criterion.
+        return candidate.lcb
     
     def reset_memory(self, factor: float = 0.9): # shrink eps to include more cands
         """
@@ -297,7 +311,7 @@ class ExhaustedPrioritySearch_v2(PrioritySearch_with_Regressor):
         print_color(f"Added {count_added} candidates to the memory. Buffer size: {len(self.buffer)}.", "green")
         if count_added > 0:
             self.heapify_memory(self.memory.memory)
-            self.print_memory_stats()
+            # self.print_memory_stats()
 
     def _fresh_candidates(self):
         """
@@ -311,7 +325,7 @@ class ExhaustedPrioritySearch_v2(PrioritySearch_with_Regressor):
         Reset the number of batches based on the number of top candidates.
         """
         if len_top_candidates < self.num_candidates:
-            new_num_batches = np.ceil(self.default_num_batches * self.num_candidates/len_top_candidates).astype(int)
+            new_num_batches = int(self.default_num_batches * self.num_candidates/len_top_candidates)
             print(f'Setting sampler num_batches from {self.default_num_batches} to {new_num_batches} to accommodate {self.num_candidates} exploration candidates request using {len_top_candidates} candidates.')
             self.set_sampler_batch_size(self.default_batch_size, new_num_batches)
         else:
@@ -336,11 +350,15 @@ class ExhaustedPrioritySearch_v2(PrioritySearch_with_Regressor):
         num_exploration_candidates = self.num_candidates//2
         num_exhaustion_candidates = self.num_candidates - num_exploration_candidates
 
-        while len(top_candidates) < num_exploration_candidates and len(self.memory) > 0:
-            neg_priority, candidate = self.memory.pop()  # pop the top candidate from the priority queue
-            priority = - neg_priority  # remember that we stored negative scores in the priority queue
-            priorities.append(priority)  # store the priority of the candidate
-            top_candidates.append(candidate)  # add the candidate to the top candidates
+        # We want to make sure that we sample at least num_exhaustion_candidates batches for unexplored candidates. 
+        if len(self._fresh_candidates()) >= num_exhaustion_candidates:
+            # Using the current rule, at least num_exhaustion_candidates will be popped out.
+            while len(top_candidates) < num_exploration_candidates and len(self.memory) > 0:
+                neg_priority, candidate = self.memory.pop()  # pop the top candidate from the priority queue
+                priority = - neg_priority  # remember that we stored negative scores in the priority queue
+                priorities.append(priority)  # store the priority of the candidate
+                top_candidates.append(candidate)  # add the candidate to the top candidates
+
 
         num_exploration_candidates = len(top_candidates)
         # Step b: Exhaustion: select multiple candidates (with the highest scores, unexplored), pull one more time to cover its children (exhausted).
@@ -367,7 +385,6 @@ class ExhaustedPrioritySearch_v2(PrioritySearch_with_Regressor):
         assert len(top_candidates) == len(set(top_candidates)) == len(priorities), "There are duplicates in the top candidates, or the number of top candidates is not equal to the number of priorities."
 
         mean_scores = [c.mean_score() for c in top_candidates]
-        mean_scores = [s for s in mean_scores if s is not None]  # filter out None scores
         info_dict = {
             'num_exploration_candidates': len(top_candidates),
             'exploration_candidates_mean_priority': safe_mean(priorities),  # list of priorities of the exploration candidates

@@ -216,7 +216,7 @@ class LogisticRegressor(RegressorTemplate):
     predict_scores has no parameters, it could return predicted scores for all candidates in the memory. 
     predict_scores_for_batch has one parameter, a batch of candidates, it could return predicted scores for the batch of candidates."""
     
-    def __init__(self, embedding_model="gemini/text-embedding-004", num_threads=None, learning_rate=0.001, regularization_strength=1, max_iterations=20000, tolerance=5e-3, gradient_tolerance=5e-3, linear_dim=None, rich_text=True,use_children_data=False):
+    def __init__(self, embedding_model="gemini/text-embedding-004", num_threads=None, learning_rate=0.001, regularization_strength=1, max_iterations=20000, tolerance=5e-3, gradient_tolerance=5e-3, linear_dim=None, rich_text=True,use_children_data=False,verbose=True):
         super().__init__(embedding_model, num_threads, regularization_strength, linear_dim, rich_text)
         # Logistic regression specific parameters
         self.learning_rate = learning_rate
@@ -226,6 +226,7 @@ class LogisticRegressor(RegressorTemplate):
         self.gradient_tolerance = gradient_tolerance
         self.patience = 50  # Early stopping patience
         self.lr_decay_factor = 0.8   # Learning rate decay factor
+        self.verbose = verbose  # Control whether to print training information
         
         # Convert weights and bias to PyTorch tensors
         self.weights_tensor = torch.tensor(self.weights, dtype=torch.float32, requires_grad=True)
@@ -235,7 +236,7 @@ class LogisticRegressor(RegressorTemplate):
         self.optimizer = None
 
         # Initialize a covariance matrix
-        self.calculate_bonus = True
+        self.calculate_bonus = False
         self.cov = np.eye(self.linear_dim)
 
         self.use_children_data = use_children_data
@@ -244,60 +245,29 @@ class LogisticRegressor(RegressorTemplate):
     def _sigmoid(self, z):
         """Sigmoid activation function for logistic regression."""
         return 1.0 / (1.0 + np.exp(-z))
-    
-    def update(self, memory: List[Tuple[float, ModuleCandidate]]):
-        """This function update the regression model parameters using the input batch of candidates.
-        Input:
-            batch: a list of candidates.
+
+    def update_with_data(self, X: torch.Tensor, y: torch.Tensor):
+        """Update the regression model parameters using binary training data (X, y).
+        
+        This is a low-level training method that does not include timing or high-level logging.
+        It is designed to be called by update() or by ensemble methods.
+        
+        Args:
+            X: Feature matrix of shape (n_samples, linear_dim), already as PyTorch tensor
+            y: Binary labels of shape (n_samples,), already as PyTorch tensor
         """
-        start_time = time.time()
-        batch = [candidate for _, candidate in memory]
-        print_color("Updating regression model using the memory with logistic regression...", "blue")
-        # Ensure all candidates have embeddings
-        self._update_memory_embeddings_for_batch(batch)
-        
-        # Get training data from memory (only candidates with rollout data)
-        training_candidates = [candidate for candidate in batch if candidate.num_rollouts > 0 and candidate.mean_score() is not None]
-        
-        if len(training_candidates) == 0:
-            print_color("Warning: No training data available for regression model.", "yellow")
-            end_time = time.time()
-            elapsed_time = end_time - start_time
-            print_color(f"Regressor update completed in {elapsed_time:.4f} seconds (no training data)", "cyan")
+        if len(X) == 0:
             return
-        # Extract raw binary training data from each candidate
-        X_list = []
-        y_list = []
-        # Initialize as identity matrix
-        self.cov = np.eye(self.linear_dim)
-        
-        for candidate in training_candidates:
-            embedding = candidate.embedding
-            if self.use_children_data:
-                scores = [r['score'] for r in candidate.children_rollouts()]
-            else:
-                scores = [r['score'] for r in candidate.rollouts]
-            for score in scores:
-                if score is None:
-                    continue
-                else:
-                    X_list.append(embedding)
-                    y_list.append(score)
-                    self.cov += np.outer(embedding, embedding)
-                
-        if len(X_list) == 0:
-            print_color("Warning: No binary training samples generated.", "yellow")
-            end_time = time.time()
-            elapsed_time = end_time - start_time
-            print_color(f"Regressor update completed in {elapsed_time:.4f} seconds (no binary samples)", "cyan")
-            return
-        print_color(f"Updating regression model with {len(training_candidates)} candidates ({len(X_list)} binary samples)...", "blue")
-        # Convert to PyTorch tensors
-        X = torch.tensor(X_list, dtype=torch.float32)
-        y = torch.tensor(y_list, dtype=torch.float32)
         
         # Assert that dimensions match - this should never fail if properly initialized
         assert X.shape[1] == self.linear_dim, f"Feature dimension mismatch: expected {self.linear_dim}, got {X.shape[1]}. This indicates an initialization error."
+        
+        # Update covariance matrix for bonus calculation
+        self.cov = np.eye(self.linear_dim)
+        X_numpy = X.detach().numpy()
+        for i in range(len(X_numpy)):
+            embedding = X_numpy[i]
+            self.cov += np.outer(embedding, embedding)
         
         # Initialize Adam optimizer with current parameters
         self.optimizer = optim.Adam([self.weights_tensor, self.bias_tensor], 
@@ -316,7 +286,8 @@ class LogisticRegressor(RegressorTemplate):
         converged = False
         patience_counter = 0
         
-        print_color(f"Training with PyTorch and Adam optimizer: lr={self.learning_rate}, weight_decay={self.regularization_strength}", "blue")
+        if self.verbose:
+            print_color(f"Training with PyTorch and Adam optimizer: lr={self.learning_rate}, weight_decay={self.regularization_strength}", "blue")
         
         for iteration in range(self.max_iterations):
             # Zero gradients
@@ -358,12 +329,14 @@ class LogisticRegressor(RegressorTemplate):
             # Check convergence criteria - both loss change and gradient norm must be small
             if loss_change < self.tolerance and grad_norm < self.gradient_tolerance:
                 converged = True
-                print_color(f"Converged at iteration {iteration + 1}: loss change {loss_change:.10f}, gradient norm {grad_norm:.10f}", "green")
+                if self.verbose:
+                    print_color(f"Converged at iteration {iteration + 1}: loss change {loss_change:.10f}, gradient norm {grad_norm:.10f}", "green")
                 break
             
             # Early stopping if no improvement
             if patience_counter >= self.patience:
-                print_color(f"Early stopping at iteration {iteration + 1}: no improvement for {self.patience} iterations", "yellow")
+                if self.verbose:
+                    print_color(f"Early stopping at iteration {iteration + 1}: no improvement for {self.patience} iterations", "yellow")
                 break
             
             prev_loss = current_loss
@@ -371,33 +344,80 @@ class LogisticRegressor(RegressorTemplate):
         # Update numpy versions for compatibility with existing code
         self.weights = self.weights_tensor.detach().numpy()
         self.bias = self.bias_tensor.item()
+    
+    def update(self, memory: List[Tuple[float, ModuleCandidate]]):
+        """This function update the regression model parameters using the input batch of candidates.
+        Input:
+            batch: a list of candidates.
+        """
+        start_time = time.time()
+        batch = [candidate for _, candidate in memory]
+        if self.verbose:
+            print_color("Updating regression model using the memory with logistic regression...", "blue")
+        # Ensure all candidates have embeddings
+        self._update_memory_embeddings_for_batch(batch)
         
-        # Final status
-        final_loss = loss.item()
-        final_lr = self.optimizer.param_groups[0]['lr']
-        if converged:
-            print_color(f"PyTorch logistic regression converged after {iteration + 1} iterations. Final loss: {final_loss:.6f}, bias: {self.bias:.6f}, final LR: {final_lr:.8f}", "green")
-        else:
-            print_color(f"PyTorch logistic regression reached max iterations ({self.max_iterations}), or early stopping. Final loss: {final_loss:.6f}, bias: {self.bias:.6f}, final LR: {final_lr:.8f}", "yellow")
+        # Get training data from memory (only candidates with rollout data)
+        training_candidates = [candidate for candidate in batch if candidate.num_rollouts > 0 and candidate.mean_score() is not None]
         
-        # Print timing information
+        if len(training_candidates) == 0:
+            if self.verbose:
+                print_color("Warning: No training data available for regression model.", "yellow")
+            end_time = time.time()
+            elapsed_time = end_time - start_time
+            if self.verbose:
+                print_color(f"Regressor update completed in {elapsed_time:.4f} seconds (no training data)", "cyan")
+            return
+        
+        # Extract raw binary training data from each candidate
+        X_list = []
+        y_list = []
+        
+        for candidate in training_candidates:
+            embedding = candidate.embedding
+            if self.use_children_data:
+                scores = [r['score'] for r in candidate.children_rollouts()]
+            else:
+                scores = [r['score'] for r in candidate.rollouts]
+            for score in scores:
+                if score is None:
+                    continue
+                else:
+                    X_list.append(embedding)
+                    y_list.append(score)
+                
+        if len(X_list) == 0:
+            if self.verbose:
+                print_color("Warning: No binary training samples generated.", "yellow")
+            end_time = time.time()
+            elapsed_time = end_time - start_time
+            if self.verbose:
+                print_color(f"Regressor update completed in {elapsed_time:.4f} seconds (no binary samples)", "cyan")
+            return
+        
+        if self.verbose:
+            print_color(f"Updating regression model with {len(training_candidates)} candidates ({len(X_list)} binary samples)...", "blue")
+            print_color(f"Training with PyTorch and Adam optimizer: lr={self.learning_rate}, weight_decay={self.regularization_strength}", "blue")
+        
+        # Convert to PyTorch tensors
+        X = torch.tensor(X_list, dtype=torch.float32)
+        y = torch.tensor(y_list, dtype=torch.float32)
+        
+        # Use the new update_with_data method
+        self.update_with_data(X, y)
+        
+        # Print final status after training
         end_time = time.time()
         elapsed_time = end_time - start_time
-        print_color(f"Regressor update completed in {elapsed_time:.4f} seconds", "cyan")
-        # Create regressor_models directory if it doesn't exist
-        import os
-        models_dir = "regressor_models"
-        os.makedirs(models_dir, exist_ok=True)
-        
-        # Save the weights and bias to npy with descriptive names
-        # model_name = f"logistic_reg_Oct4"
-        # weights_path = os.path.join(models_dir, f"{model_name}_weights.npy")
-        # bias_path = os.path.join(models_dir, f"{model_name}_bias.npy")
-        
-        # np.save(weights_path, self.weights)
-        # np.save(bias_path, self.bias)
-        
-        # print_color(f"Saved regressor model to {weights_path} and {bias_path}", "cyan")
+        if self.verbose:
+            # Calculate final loss for reporting
+            with torch.no_grad():
+                z = X @ self.weights_tensor + self.bias_tensor
+                predictions = torch.sigmoid(z)
+                final_loss = nn.functional.binary_cross_entropy(predictions, y).item()
+            
+            print_color(f"PyTorch logistic regression training completed. Final loss: {final_loss:.6f}, bias: {self.bias:.6f}", "green")
+            print_color(f"Regressor update completed in {elapsed_time:.4f} seconds", "cyan")
     
     def predict_scores(self,memory):
         """Predict scores for all candidates in the memory."""
@@ -511,6 +531,200 @@ class LogisticRegressor(RegressorTemplate):
             available_embeddings.pop(max_bonus_local_index)
 
         return exploration_indices
+
+class EnsembleLogisticRegressor(LogisticRegressor):
+    """
+    Ensemble multiple (default to be 5) logistic regressors to predict the scores of the candidates. 
+
+    In the __init__ method, we should initialize the regressors.
+    In the update method, we should update all the regressors.
+    In the predict_scores method, we should predict the scores of the candidates using the ensemble of the regressors. The final score is the highest score predicted by the regressors. Also add a lcb attribute to the candidate, which is the lowest score predicted by the regressors.
+
+    Regressors should be trained diversely. They should be initialized with different random seeds. Since we are using Adam (SGD), at each step we use a minibatch of data to update the regressors. Ideally we should use different minibatches for each regressor.
+    """
+    def __init__(self, embedding_model="gemini/text-embedding-004", num_threads=None, learning_rate=0.001, regularization_strength=1, max_iterations=20000, tolerance=5e-3, gradient_tolerance=5e-3, linear_dim=None, rich_text=True, use_children_data=False, num_regressors=5, verbose=True):
+        # Initialize parent class to inherit shared functionality
+        super().__init__(embedding_model, num_threads, learning_rate, regularization_strength, max_iterations, tolerance, gradient_tolerance, linear_dim, rich_text, use_children_data, verbose)
+        
+        # Create ensemble of regressors with different random seeds for diversity
+        self.num_regressors = num_regressors
+        self.regressors = []
+        
+        if self.verbose:
+            print_color(f"Initializing ensemble of {num_regressors} logistic regressors...", "blue")
+        for i in range(num_regressors):
+            regressor = LogisticRegressor(
+                embedding_model=embedding_model, 
+                num_threads=num_threads, 
+                learning_rate=learning_rate, 
+                regularization_strength=regularization_strength, 
+                max_iterations=max_iterations, 
+                tolerance=tolerance, 
+                gradient_tolerance=gradient_tolerance, 
+                linear_dim=linear_dim, 
+                rich_text=rich_text, 
+                use_children_data=use_children_data,
+                verbose=False  # Set verbose=False for individual regressors in ensemble
+            )
+            # Reinitialize weights for diversity - each regressor will get different random weights
+            # The global random seed set elsewhere ensures reproducibility
+            regressor.weights = np.random.normal(0, 0.1, regressor.linear_dim)
+            regressor.bias = 0.0
+            regressor.weights_tensor = torch.tensor(regressor.weights, dtype=torch.float32, requires_grad=True)
+            regressor.bias_tensor = torch.tensor(regressor.bias, dtype=torch.float32, requires_grad=True)
+            
+            self.regressors.append(regressor)
+        
+        if self.verbose:
+            print_color(f"Ensemble initialization complete with {num_regressors} regressors", "green")
+    
+    def update(self, memory: List[Tuple[float, ModuleCandidate]]):
+        """Update all the regressors. Since we are using ensemble learning, we should make these regressors learn diversely.
+        
+        The concrete way to enforce diversity:
+        - Bootstrap sampling (sampling with replacement) is performed on the binary training data (X, y)
+        - Each regressor gets a different bootstrap sample of the binary training data
+        """
+        start_time = time.time()
+        if self.verbose:
+            print_color(f"Updating ensemble of {self.num_regressors} regressors...", "blue")
+        
+        batch = [candidate for _, candidate in memory]
+        
+        # Ensure all candidates have embeddings
+        self._update_memory_embeddings_for_batch(batch)
+        
+        # Get training candidates (only those with rollout data)
+        training_candidates = [candidate for candidate in batch if candidate.num_rollouts > 0 and candidate.mean_score() is not None]
+        
+        if len(training_candidates) == 0:
+            if self.verbose:
+                print_color("Warning: No training data available for ensemble regression model.", "yellow")
+            end_time = time.time()
+            elapsed_time = end_time - start_time
+            if self.verbose:
+                print_color(f"Ensemble regressor update completed in {elapsed_time:.4f} seconds (no training data)", "cyan")
+            return
+        
+        # Extract ALL binary training data first (this is the key difference from the old implementation)
+        X_list = []
+        y_list = []
+        
+        for candidate in training_candidates:
+            embedding = candidate.embedding
+            if self.use_children_data:
+                scores = [r['score'] for r in candidate.children_rollouts()]
+            else:
+                scores = [r['score'] for r in candidate.rollouts]
+            for score in scores:
+                if score is None:
+                    continue
+                else:
+                    X_list.append(embedding)
+                    y_list.append(score)
+        
+        if len(X_list) == 0:
+            if self.verbose:
+                print_color("Warning: No binary training samples generated.", "yellow")
+            end_time = time.time()
+            elapsed_time = end_time - start_time
+            if self.verbose:
+                print_color(f"Ensemble regressor update completed in {elapsed_time:.4f} seconds (no binary samples)", "cyan")
+            return
+        
+        if self.verbose:
+            print_color(f"Training ensemble with {len(training_candidates)} candidates ({len(X_list)} binary samples)...", "blue")
+        
+        # Convert to PyTorch tensors
+        X_all = torch.tensor(X_list, dtype=torch.float32)
+        y_all = torch.tensor(y_list, dtype=torch.float32)
+
+        print_color(f"Training {self.num_regressors} regressors with {len(X_all)} binary samples...", "cyan")
+        
+        # Update each regressor with a different bootstrap sample of the BINARY DATA
+        for i, regressor in enumerate(self.regressors):
+            # Bootstrap sampling on binary training data: sample with replacement
+            bootstrap_indices = np.random.choice(len(X_all), size=len(X_all), replace=True)
+            X_bootstrap = X_all[bootstrap_indices]
+            y_bootstrap = y_all[bootstrap_indices]
+            
+            # if self.verbose:
+            #     print_color(f"Training regressor {i+1}/{self.num_regressors} with {len(X_bootstrap)} bootstrap samples...", "cyan")
+            
+            # Use the new update_with_data method directly
+            regressor.update_with_data(X_bootstrap, y_bootstrap)
+        
+        end_time = time.time()
+        elapsed_time = end_time - start_time
+        if self.verbose:
+            print_color(f"Ensemble regressor update completed in {elapsed_time:.4f} seconds", "cyan")
+            # average norm of the weights of the regressors
+            norms = [np.linalg.norm(regressor.weights) for regressor in self.regressors]
+            print_color(f"Average norm of the weights of the regressors: {np.mean(norms):.4f}, std: {np.std(norms):.4f}", "cyan")
+    
+    def predict_scores(self, memory: List[Tuple[float, ModuleCandidate]]):
+        """
+        In the predict_scores method, we should predict the scores of the candidates using the ensemble of the regressors. 
+        The final score is the highest score predicted by the regressors. 
+        Also add a lcb attribute to the candidate, which is the lowest score predicted by the regressors.
+        """
+        if len(memory) == 0:
+            return
+        
+        batch = [candidate for _, candidate in memory]
+        
+        # Ensure all candidates have embeddings
+        self._update_memory_embeddings_for_batch(batch)
+        
+        # Collect predictions from all regressors
+        all_predictions = []
+        
+        for i, regressor in enumerate(self.regressors):
+            # Get predictions from this regressor
+            embeddings = []
+            for candidate in batch:
+                if candidate.embedding:
+                    embeddings.append(candidate.embedding)
+                else:
+                    candidate.embedding = self._get_embedding(candidate)
+                    embeddings.append(candidate.embedding)
+            
+            # Batch prediction
+            X_batch = np.array(embeddings)
+            z = X_batch @ regressor.weights + regressor.bias
+            predicted_scores = regressor._sigmoid(z)
+            
+            all_predictions.append(predicted_scores)
+        
+        # Convert to numpy array for easier manipulation: shape (num_regressors, num_candidates)
+        all_predictions = np.array(all_predictions)
+        
+        # Calculate UCB (upper confidence bound) - maximum across regressors
+        ucb_scores = np.max(all_predictions, axis=0)
+        
+        # Calculate LCB (lower confidence bound) - minimum across regressors
+        lcb_scores = np.min(all_predictions, axis=0)
+        
+        # Calculate mean for reference
+        mean_scores = np.mean(all_predictions, axis=0)
+        
+        # Update each candidate with predicted scores
+        for i, candidate in enumerate(batch):
+            # Store all individual predictions from each regressor
+            candidate.predicted_scores = [float(all_predictions[j, i]) for j in range(self.num_regressors)]
+            
+            if self.use_children_data:
+                candidate.predicted_children_score = ucb_scores[i]
+            else:
+                candidate.predicted_score = ucb_scores[i]
+            
+            # Add LCB as separate attribute
+            candidate.lcb = float(lcb_scores[i])
+            
+            # Also store mean prediction for reference
+            candidate.mean_prediction = float(mean_scores[i])
+        
+        return ucb_scores
 
 
 

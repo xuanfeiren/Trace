@@ -37,7 +37,10 @@ class ConsoleLogger(BaseLogger):
             'green': '\033[92m',
             'red': '\033[91m',
             'blue': '\033[94m',
-            'end': '\033[0m'
+            'end': '\033[0m' ,
+            'magenta': '\033[95m',
+            'cyan': '\033[96m',
+            'orange': '\033[93m',
         }
         
         start_color = color_codes.get(color, '')

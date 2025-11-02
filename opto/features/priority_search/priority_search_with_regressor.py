@@ -5,7 +5,10 @@ import os
 import math
 from typing import Union, List, Tuple, Dict, Any, Optional
 from opto.features.priority_search.search_template import Samples, SearchTemplate, BatchRollout
-from opto.features.priority_search.regressor import LogisticRegressor, LinearRegressor, LinearUCBRegressor, LLMRegressor
+# from opto.features.priority_search.regressor import LogisticRegressor, LinearRegressor, LinearUCBRegressor, LLMRegressor
+
+from opto.features.priority_search.regressor import  LinearRegressor, LinearUCBRegressor, LLMRegressor
+from opto.features.priority_search.regressor import EnsembleLogisticRegressor as LogisticRegressor
 # import pretrained regressors
 from my_processing_agents.pretained_regressor import PretrainedLinearRegressor, PretrainedLogisticRegressor
 from opto.optimizers.utils import print_color
