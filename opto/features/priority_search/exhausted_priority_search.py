@@ -44,7 +44,7 @@ class ExhaustedPrioritySearch_v2(PrioritySearch_with_Regressor):
     """
     def __init__(self,
                  max_depth: int = 100,
-                 epsilon: float = 0.5,
+                 epsilon: float = 0.2,
                  *args,
                  **kwargs):
         super().__init__(*args, **kwargs)
