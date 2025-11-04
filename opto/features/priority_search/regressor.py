@@ -643,6 +643,11 @@ class EnsembleLogisticRegressor(LogisticRegressor):
         
         # Update each regressor with a different bootstrap sample of the BINARY DATA
         for i, regressor in enumerate(self.regressors):
+            # reinitialize the weights and bias for each regressor
+            regressor.weights = np.random.normal(0, 0.1, regressor.linear_dim)
+            regressor.bias = 0.0
+            regressor.weights_tensor = torch.tensor(regressor.weights, dtype=torch.float32, requires_grad=True)
+            regressor.bias_tensor = torch.tensor(regressor.bias, dtype=torch.float32, requires_grad=True)
             # Bootstrap sampling on binary training data: sample with replacement
             bootstrap_indices = np.random.choice(len(X_all), size=len(X_all), replace=True)
             X_bootstrap = X_all[bootstrap_indices]
