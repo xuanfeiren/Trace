@@ -717,7 +717,7 @@ class EnsembleLogisticRegressor(LogisticRegressor):
         for i, candidate in enumerate(batch):
             # Store all individual predictions from each regressor
             candidate.predicted_scores = [float(all_predictions[j, i]) for j in range(self.num_regressors)]
-            
+            candidate.ucb = float(ucb_scores[i])
             if self.use_children_data:
                 candidate.predicted_children_score = ucb_scores[i]
             else:
