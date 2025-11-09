@@ -973,8 +973,8 @@ class PrioritySearchUCBExploration(PrioritySearch):
         # pop top self.num_candidates candidates from the priority queue
         # self._best_candidate is the exploited candidate from the previous iteration
         
-        # sort the memory by UCB score
-        self.memory.memory.sort(key=lambda x: x[0], reverse=True)
+        # sort the memory by UCB score. candidate.ucb is the UCB score of the candidate.
+        self.memory.memory.sort(key=lambda x: x[1].ucb, reverse=True)
         top_candidates = [candidate for _, candidate in self.memory.memory[:self.num_candidates]]
         priorities = [candidate.ucb for candidate in top_candidates]
         self.memory.memory = self.memory.memory[self.num_candidates:]
@@ -1000,3 +1000,18 @@ class PrioritySearchUCBExploration(PrioritySearch):
         else:
             self.set_sampler_batch_size(self.default_batch_size, self.default_num_batches)
         return top_candidates, priorities, info_dict
+
+    def _get_best_candidate_by_priority(self, priority_compute_fn, priority_name: str) -> Tuple[float, ModuleCandidate]:
+        """Helper function to get the best candidate using a specific priority computation function.
+        
+        Args:
+            priority_compute_fn: The function to compute priority for a candidate.
+            priority_name (str): Name of the priority metric for assertion messages.
+            
+        Returns:
+            Tuple[float, ModuleCandidate]: The priority value and the best candidate.
+        """
+        neg_priority, best_candidate = self.memory.best(priority_compute_fn)
+        priority = best_candidate.ucb
+        assert best_candidate.depth is not None, f"Best candidate for {priority_name} must have a depth."
+        return priority, best_candidate
