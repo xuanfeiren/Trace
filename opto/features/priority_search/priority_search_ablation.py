@@ -11,6 +11,7 @@ from opto.trainer.algorithms.basic_algorithms import batchify
 from opto.features.priority_search.search_template_ablation import SearchTemplate, Samples, BatchRollout, save_train_config
 from opto.features.priority_search.utils import set_module_parameters, remap_update_dict, create_module_from_update_dict, is_module_copy, deepcopy_module
 from opto.features.priority_search.regressor import EnsembleLogisticRegressor
+from opto.optimizers.utils import print_color
 
 class ModuleCandidate:
     """ A container used by PrioritySearch to store a candidate module as (its base module and update dictionary) and its statistics. """
@@ -955,3 +956,47 @@ class PrioritySearch(SearchTemplate):
         for rollout in candidate.rollouts:
             _process_rollout(rollout)
         return candidate
+
+class PrioritySearchUCBExploration(PrioritySearch):
+    """ A search algorithm that uses UCB exploration to explore the parameter space and propose new candidates.
+    """
+    def explore(self, verbose: bool = False, **kwargs):
+        """
+        Pop top self.num_candidates candidates based on UCB score. 
+
+        After popping the candidates, heapify the memory. heapq.heapify(self.memory.memory)
+        """
+        print_color(f"Using UCB exploration to explore the parameter space...", "green")
+        print(f"--- Generating {min(len(self.memory), self.num_candidates)} exploration candidates...") if verbose else None
+        # in ablation study, we do not use the best candidate to explore.
+        assert not self.use_best_candidate_to_explore, "In ablation study, we do not use the best candidate to explore."
+        # pop top self.num_candidates candidates from the priority queue
+        # self._best_candidate is the exploited candidate from the previous iteration
+        
+        # sort the memory by UCB score
+        self.memory.memory.sort(key=lambda x: x[0], reverse=True)
+        top_candidates = [candidate for _, candidate in self.memory.memory[:self.num_candidates]]
+        priorities = [candidate.ucb for candidate in top_candidates]
+        self.memory.memory = self.memory.memory[self.num_candidates:]
+        heapq.heapify(self.memory.memory)
+
+        # NOTE some top_candidates can be duplicates
+        mean_scores = [c.mean_score() for c in top_candidates]
+        mean_scores = [s for s in mean_scores if s is not None]  # filter out None scores
+        depths = [c.depth for c in top_candidates]
+        assert all(depth is not None for depth in depths), "All exploration candidates must have a depth."
+        assert all(depth >= 1 for depth in depths), "All exploration candidates must have a depth of at least 1."
+        info_dict = {
+            'num_exploration_candidates': len(top_candidates),
+            'exploration_candidates_mean_priority': safe_mean(priorities),  # list of priorities of the exploration candidates
+            'exploration_candidates_mean_score': safe_mean(mean_scores),  # list of mean scores of the exploration candidates
+            'exploration_candidates_mean_depth': safe_mean(depths),  # list of depths of the exploration candidates
+            'exploration_candidates_average_num_rollouts': safe_mean([c.num_rollouts for c in top_candidates]),
+        }
+        if len(top_candidates) < self.num_candidates:
+            new_num_batches = int(self.default_num_batches * self.num_candidates/len(top_candidates))
+            print(f'Setting sampler num_batches from {self.default_num_batches} to {new_num_batches} to accommodate {self.num_candidates} exploration candidates request using {len(top_candidates)} candidates.')
+            self.set_sampler_batch_size(self.default_batch_size, new_num_batches)
+        else:
+            self.set_sampler_batch_size(self.default_batch_size, self.default_num_batches)
+        return top_candidates, priorities, info_dict
