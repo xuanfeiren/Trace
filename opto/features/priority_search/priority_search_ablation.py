@@ -13,31 +13,9 @@ from opto.features.priority_search.utils import set_module_parameters, remap_upd
 from opto.features.priority_search.regressor import EnsembleLogisticRegressor
 from opto.optimizers.utils import print_color
 
-def get_trajectory_from_output(output):
-    """Get trajectory from the agent's output."""
-    reward, messages, info = output
-    conversation_parts = []
-    for msg in messages:
-        msg_str = f"{msg['role']}: {msg.get('content', '')}"
-        
-        if 'tool_calls' in msg and msg['tool_calls']:
-            tool_calls_str = []
-            for tool_call in msg['tool_calls']:
-                if 'function' in tool_call:
-                    func_name = tool_call['function'].get('name', '')
-                    func_args = tool_call['function'].get('arguments', '')
-                    tool_calls_str.append(f"Tool: {func_name}({func_args})")
-            if tool_calls_str:
-                msg_str += f" [Tool Calls: {'; '.join(tool_calls_str)}]"
-        
-        if msg['role'] == 'tool':
-            tool_name = msg.get('name', '')
-            tool_call_id = msg.get('tool_call_id', '')
-            msg_str = f"tool ({tool_name}, ID: {tool_call_id}): {msg.get('content', '')}"
-        
-        conversation_parts.append(msg_str)
+
     
-    return conversation_parts
+
 
 class ModuleCandidate:
     """ A container used by PrioritySearch to store a candidate module as (its base module and update dictionary) and its statistics. """
@@ -1120,7 +1098,7 @@ class EpsilonNetPS(PrioritySearch):
             new_node = filtered_candidates[max_distance_idx]
             current_memory.append((0, new_node))
             added_candidates.append(new_node)
-            success_distances.append(filtered_distances[max_distance_idx])
+            success_distances.append(float(filtered_distances[max_distance_idx]))
             
             # remove the added candidate from new_candidates list
             new_candidates = [c for c in filtered_candidates if c is not new_node]
@@ -1142,5 +1120,18 @@ class EpsilonNetPS(PrioritySearch):
             candidate.add_rollouts(rollouts)  # add the rollouts to the candidate
             priority = self.compute_exploration_priority(candidate)  # compute the priority for the candidate
             self.memory.push(priority, candidate)
+    
+    def compress_candidate_memory(self, candidate: ModuleCandidate) -> ModuleCandidate:
+        """ Keep target of each rollout for long-term memory. """
+        def _process_rollout(rollout):
+            # rollout is a dict containing module, x, info, target, score, feedback
+            for k in rollout:
+                if k not in ['score', 'target']:
+                    rollout[k] = None
+        candidate = copy.copy(candidate)  # make a copy of the candidate to avoid modifying the original one
+        candidate.rollouts = copy.deepcopy(candidate.rollouts)  # deep copy the rollouts to avoid modifying the original one
+        for rollout in candidate.rollouts:
+            _process_rollout(rollout)
+        return candidate
         
    
