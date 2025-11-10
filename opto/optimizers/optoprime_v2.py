@@ -229,66 +229,11 @@ class OptimizerPromptSymbolSetJSON(OptimizerPromptSymbolSet):
         return json.dumps(output, indent=2)
 
     def output_response_extractor(self, response: str) -> Dict[str, Any]:
-        reasoning = ""
-        suggestion_tag = "suggestion"
-
-        if "```" in response:
-            response = response.replace("```", "").strip()
-
-        suggestion = {}
-        attempt_n = 0
-        while attempt_n < 2:
-            try:
-                suggestion = json.loads(response)[suggestion_tag]
-                reasoning = json.loads(response)[self.reasoning_tag]
-                break
-            except json.JSONDecodeError:
-                # Remove things outside the brackets
-                response = re.findall(r"{.*}", response, re.DOTALL)
-                if len(response) > 0:
-                    response = response[0]
-                attempt_n += 1
-            except Exception:
-                attempt_n += 1
-
-        if not isinstance(suggestion, dict):
-            suggestion = {}
-
-        if len(suggestion) == 0:
-            # we try to extract key/value separately and return it as a dictionary
-            pattern = rf'"{suggestion_tag}"\s*:\s*\{{(.*?)\}}'
-            suggestion_match = re.search(pattern, str(response), re.DOTALL)
-            if suggestion_match:
-                suggestion = {}
-                # Extract the entire content of the suggestion dictionary
-                suggestion_content = suggestion_match.group(1)
-                # Regex to extract each key-value pair;
-                # This scheme assumes double quotes but is robust to missing commas at the end of the line
-                pair_pattern = r'"([a-zA-Z0-9_]+)"\s*:\s*"(.*)"'
-                # Find all matches of key-value pairs
-                pairs = re.findall(pair_pattern, suggestion_content, re.DOTALL)
-                for key, value in pairs:
-                    suggestion[key] = value
-
-        if len(suggestion) == 0:
-            print(f"Cannot extract suggestion from LLM's response:")
-            print(response)
-
-        # if the suggested value is a code, and the entire code body is empty (i.e., not even function signature is present)
-        # then we remove such suggestion
-        keys_to_remove = []
-        for key, value in suggestion.items():
-            if "__code" in key and value.strip() == "":
-                keys_to_remove.append(key)
-        for key in keys_to_remove:
-            del suggestion[key]
-
-        extracted_data = {"reasoning": reasoning,
-                          "variables": suggestion}
-
-        return extracted_data
-
-
+        """
+        Extracts reasoning and suggestion variables from the LLM response using OptoPrime's extraction logic.
+        """
+        # Use the centralized extraction logic from OptoPrime
+        return OptoPrime.extract_llm_suggestion(response)
 class OptimizerPromptSymbolSet2(OptimizerPromptSymbolSet):
     variables_section_title = "# Variables"
     inputs_section_title = "# Inputs"
