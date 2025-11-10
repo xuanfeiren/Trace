@@ -308,8 +308,7 @@ class ProblemInstance:
             inputs=self.inputs,
             outputs=self.outputs,
             others=self.others,
-            feedback=self.feedback,
-            context=self.context
+            feedback=self.feedback
         )
 
         context_section = dedent("""
