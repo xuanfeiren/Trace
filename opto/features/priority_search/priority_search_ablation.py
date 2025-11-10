@@ -44,6 +44,8 @@ class ModuleCandidate:
         self.children = []  # list of ModuleCandidate objects that are children of this candidate
         assert depth is not None, "depth must be provided."
         self.depth = depth
+        self.is_new = True # If ever been added to the memory, set to False.
+
     def get_module(self):
         """ Apply the update_dict to the base_module and return the updated module.
         A new module is always created so the base_module is not modified.
@@ -184,6 +186,8 @@ class HeapMemory:
     def push(self, score, data):
         """ Push an item to the heap memory. """
         data = self.processing_fun(data) if self.processing_fun is not None else data
+        # Set the is_new flag to False when adding to the memory.
+        data.is_new = False
         heapq.heappush(self.memory, (-score, data))
         if len(self.memory) > self.size:
             # NOTE a heuristic for now
@@ -1015,3 +1019,76 @@ class PrioritySearchUCBExploration(PrioritySearch):
         priority = best_candidate.ucb
         assert best_candidate.depth is not None, f"Best candidate for {priority_name} must have a depth."
         return priority, best_candidate
+
+def calculate_distance_to_memory(memory, new_candidate):
+        """For a new candidate, calculate the distance to the current memory. That's the least L2 distance to any candidate in the memory.
+        
+        To use this funciton in PrioritySearch, set memory to be self.memory.memory.
+        """
+        # assert new_candidate.num_rollouts == 0, "New candidates should have no rollouts."
+        # assert new candidate and all candidates in the memory have the  embedding.
+        assert hasattr(new_candidate, 'embedding') and all(hasattr(candidate, 'embedding') for _, candidate in memory), "All candidates should have the embedding attribute."
+        # calculate the distance to the current memory. That's the least L2 distance to any candidate in the memory.
+        min_distance = float('inf')
+        for _, candidate in memory:
+            distance = np.linalg.norm(np.array(new_candidate.embedding) - np.array(candidate.embedding))
+            if distance < min_distance:
+                min_distance = distance
+        return min_distance
+        
+class EpsilonNetPS(PrioritySearch):
+    """
+    A subclass of PrioritySearch, which keeps an epsilon-net as the memory. Reject new candidates that are in the epsilon-net of the memory.
+    """
+    def __init__(self,
+                 epsilon: float = 0.005,
+                 *args,
+                 **kwargs):
+        super().__init__(*args, **kwargs)
+        self.epsilon = epsilon
+
+    def update_memory(self, validate_results, verbose: bool = False, **kwargs):
+        """ 
+        First, add all old candidates (candidate.is_new is False) to the memory. Then, for each new candidate, calculate the distance to the memory, add the one with the largest distance to the memory. Repeat until all new candidates are added to the memory, or in the epsilon-neighborhood of the memory.
+        """
+        print("--- Updating memory with validation results...") if verbose else None
+        new_candidates = [] # new candidates will be added here.
+
+        for candidate, rollouts in validate_results.items():
+            candidate.add_rollouts(rollouts)  # add the rollouts to the candidate
+            priority = self.compute_exploration_priority(candidate)  # compute the priority for the candidate
+            if candidate.is_new: # new candidate
+                new_candidates.append(candidate)
+            else: # old candidate
+                self.memory.push(priority, candidate)
+        
+        # add embeddings to the new candidates.
+        self.regressor.add_embeddings_to_candidates(new_candidates)
+        
+        while len(new_candidates) > 0:
+            # calculate the distance to the memory for each new candidate
+            distances = [calculate_distance_to_memory(self.memory.memory, new_candidate) for new_candidate in new_candidates]
+            
+            # filter candidates: keep only those with distance > epsilon
+            filtered_candidates = []
+            filtered_distances = []
+            for i, (candidate, distance) in enumerate(zip(new_candidates, distances)):
+                if distance > self.epsilon:
+                    filtered_candidates.append(candidate)
+                    filtered_distances.append(distance)
+            
+            # if no candidates remain, exit the loop
+            if len(filtered_candidates) == 0:
+                break
+            
+            # add the candidate with the largest distance to the memory
+            max_distance_idx = np.argmax(filtered_distances)
+            new_node = filtered_candidates[max_distance_idx]
+            self.memory.push(self.compute_exploration_priority(new_node), new_node)
+            
+            # remove the added candidate from new_candidates list
+            new_candidates = [c for c in filtered_candidates if c is not new_node]
+
+        return
+        
+   
