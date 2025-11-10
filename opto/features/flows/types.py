@@ -113,8 +113,18 @@ class QueryModel(BaseModel):
         # 1) Start with the text part
         if isinstance(raw_query, str):
             out: List[Dict[str, Any]] = [{"type": "text", "text": raw_query}]
+        elif isinstance(raw_query, list):
+            # Normalize each element in the list
+            out = []
+            for item in raw_query:
+                if isinstance(item, str):
+                    out.append({"type": "text", "text": item})
+                elif isinstance(item, dict):
+                    out.append(item)
+                else:
+                    raise TypeError("Elements of `query` list must be str or dict")
         else:
-            raise TypeError("`query` must be a string")
+            raise TypeError("`query` must be a string or list")
 
         # 2) If we have an image, append an image block
         payload = data.get("multimodal_payload")
