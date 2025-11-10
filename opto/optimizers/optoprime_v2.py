@@ -871,7 +871,7 @@ class OptoPrimeV2(OptoPrime):
                 "prompt_symbols": self.prompt_symbols,
                 "representation_prompt": self.representation_prompt,
                 "output_format_prompt": self.output_format_prompt,
-                'context_prompt': self.context_prompt
+                "context_prompt": self.context_prompt
             }, f)
 
     def load(self, path: str):
