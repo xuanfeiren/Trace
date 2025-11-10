@@ -13,6 +13,32 @@ from opto.features.priority_search.utils import set_module_parameters, remap_upd
 from opto.features.priority_search.regressor import EnsembleLogisticRegressor
 from opto.optimizers.utils import print_color
 
+def get_trajectory_from_output(output):
+    """Get trajectory from the agent's output."""
+    reward, messages, info = output
+    conversation_parts = []
+    for msg in messages:
+        msg_str = f"{msg['role']}: {msg.get('content', '')}"
+        
+        if 'tool_calls' in msg and msg['tool_calls']:
+            tool_calls_str = []
+            for tool_call in msg['tool_calls']:
+                if 'function' in tool_call:
+                    func_name = tool_call['function'].get('name', '')
+                    func_args = tool_call['function'].get('arguments', '')
+                    tool_calls_str.append(f"Tool: {func_name}({func_args})")
+            if tool_calls_str:
+                msg_str += f" [Tool Calls: {'; '.join(tool_calls_str)}]"
+        
+        if msg['role'] == 'tool':
+            tool_name = msg.get('name', '')
+            tool_call_id = msg.get('tool_call_id', '')
+            msg_str = f"tool ({tool_name}, ID: {tool_call_id}): {msg.get('content', '')}"
+        
+        conversation_parts.append(msg_str)
+    
+    return conversation_parts
+
 class ModuleCandidate:
     """ A container used by PrioritySearch to store a candidate module as (its base module and update dictionary) and its statistics. """
 
@@ -45,6 +71,7 @@ class ModuleCandidate:
         assert depth is not None, "depth must be provided."
         self.depth = depth
         self.is_new = True # If ever been added to the memory, set to False.
+        self.trajecories = [] # list of conversations of tasks.
 
     def get_module(self):
         """ Apply the update_dict to the base_module and return the updated module.
@@ -453,6 +480,16 @@ class PrioritySearch(SearchTemplate):
         self.long_term_memory = HeapMemory(size=long_term_memory_size, processing_fun=self.compress_candidate_memory)
         self.short_term_memory = HeapMemory(size=short_term_memory_size)
         self.memory_update_frequency = memory_update_frequency
+    
+    def filter_candidates(self, candidates: List[ModuleCandidate]) -> List[ModuleCandidate]:
+        """ Filter candidates by their embeddings.
+        This function can be overridden by subclasses to filter candidates by other criteria.
+        Args:
+            candidates (List[ModuleCandidate]): A list of candidates to filter.
+        Returns:
+            List[ModuleCandidate]: A list of filtered candidates.
+        """
+        return candidates
 
     def update(self,
                samples: Union[Samples, None] = None,
@@ -467,6 +504,9 @@ class PrioritySearch(SearchTemplate):
         if samples is not None:
             # 1. Propose new parameters based on running LLM optimizers on the collected samples
             candidates = self.propose(samples, verbose=verbose, **kwargs)  # List of ModuleCandidates
+            # add embeddings to the candidates asynchronously
+            self.regressor.add_embeddings_to_candidates(candidates)
+            candidates = self.filter_candidates(candidates)
             # 2. Validate the proposed parameters
             validate_results = self.validate(candidates, samples, verbose=verbose, **kwargs)  # this updates the priority queue
             # 3. Update the priority queue with the validation results
@@ -1041,33 +1081,27 @@ class EpsilonNetPS(PrioritySearch):
     A subclass of PrioritySearch, which keeps an epsilon-net as the memory. Reject new candidates that are in the epsilon-net of the memory.
     """
     def __init__(self,
-                 epsilon: float = 0.005,
+                 epsilon: float = 0.1,
                  *args,
                  **kwargs):
         super().__init__(*args, **kwargs)
         self.epsilon = epsilon
 
-    def update_memory(self, validate_results, verbose: bool = False, **kwargs):
-        """ 
-        First, add all old candidates (candidate.is_new is False) to the memory. Then, for each new candidate, calculate the distance to the memory, add the one with the largest distance to the memory. Repeat until all new candidates are added to the memory, or in the epsilon-neighborhood of the memory.
+    def filter_candidates(self, new_candidates: List[ModuleCandidate]) -> List[ModuleCandidate]:
+        """ Filter candidates by their embeddings.
         """
-        print("--- Updating memory with validation results...") if verbose else None
-        new_candidates = [] # new candidates will be added here.
+        exploration_memory = [(0, candidate) for candidate in self._exploration_candidates]
+        current_memory = self.memory.memory + exploration_memory
 
-        for candidate, rollouts in validate_results.items():
-            candidate.add_rollouts(rollouts)  # add the rollouts to the candidate
-            priority = self.compute_exploration_priority(candidate)  # compute the priority for the candidate
-            if candidate.is_new: # new candidate
-                new_candidates.append(candidate)
-            else: # old candidate
-                self.memory.push(priority, candidate)
-        
-        # add embeddings to the new candidates.
-        self.regressor.add_embeddings_to_candidates(new_candidates)
+        # filter new candidates based on the distance to the current memory.
+        num_new_candidates = len(new_candidates)
+
+        added_candidates = []
+        success_distances = []
         
         while len(new_candidates) > 0:
             # calculate the distance to the memory for each new candidate
-            distances = [calculate_distance_to_memory(self.memory.memory, new_candidate) for new_candidate in new_candidates]
+            distances = [calculate_distance_to_memory(current_memory, new_candidate) for new_candidate in new_candidates]
             
             # filter candidates: keep only those with distance > epsilon
             filtered_candidates = []
@@ -1084,11 +1118,29 @@ class EpsilonNetPS(PrioritySearch):
             # add the candidate with the largest distance to the memory
             max_distance_idx = np.argmax(filtered_distances)
             new_node = filtered_candidates[max_distance_idx]
-            self.memory.push(self.compute_exploration_priority(new_node), new_node)
+            current_memory.append((0, new_node))
+            added_candidates.append(new_node)
+            success_distances.append(filtered_distances[max_distance_idx])
             
             # remove the added candidate from new_candidates list
             new_candidates = [c for c in filtered_candidates if c is not new_node]
 
-        return
+        print_color(f"Proposed {num_new_candidates} new candidates, {len(added_candidates)} of them are added to the memory.", "green")
+        # print the distances between the added candidates and the memory before adding them.
+        print_color(f"Distances between the added candidates and the memory before adding them: {success_distances}", "green")
+        return added_candidates
+    
+
+    def update_memory(self, validate_results, verbose: bool = False, **kwargs):
+        """ Update the priority queue with the validation results.
+        Args:
+            validate_results (dict): A dictionary where the keys are ModuleCandidate objects and the values are lists of rollouts (list of dicts) containing the module, x, info, target, score, feedback.
+            **kwargs: Additional keyword arguments that may be used by the implementation.
+        """
+        print("--- Updating memory with validation results...") if verbose else None
+        for candidate, rollouts in validate_results.items():
+            candidate.add_rollouts(rollouts)  # add the rollouts to the candidate
+            priority = self.compute_exploration_priority(candidate)  # compute the priority for the candidate
+            self.memory.push(priority, candidate)
         
    
