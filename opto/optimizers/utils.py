@@ -145,6 +145,58 @@ def extract_xml_like_data(text: str, reasoning_tag: str = "reasoning",
     return result
 
 
+class MultiModalPayload:
+    """
+    A payload for multimodal content, particularly images.
+
+    Supports three types of image inputs:
+    1. URL (string starting with 'http://' or 'https://')
+    2. Local file path (string path to image file)
+    3. Numpy array (RGB image array)
+    """
+    image_data: Optional[str] = None  # Can be URL or base64 data URL
+
+    def set_image(self, image: Union[str, Any], format: str = "PNG") -> None:
+        """
+        Set the image from various input formats.
+
+        Args:
+            image: Can be:
+                - URL string (starting with 'http://' or 'https://')
+                - Local file path (string)
+                - Numpy array or array-like RGB image
+            format: Image format for numpy arrays (PNG, JPEG, etc.). Default: PNG
+        """
+        if isinstance(image, str):
+            # Check if it's a URL
+            if image.startswith('http://') or image.startswith('https://'):
+                # Direct URL - litellm supports this
+                self.image_data = image
+            else:
+                # Assume it's a local file path
+                self.image_data = encode_image_to_base64(image)
+        else:
+            # Assume it's a numpy array or array-like object
+            self.image_data = encode_numpy_to_base64(image, format=format)
+
+    def get_content_block(self) -> Optional[Dict[str, Any]]:
+        """
+        Get the content block for the image in litellm format.
+
+        Returns:
+            Dict with format: {"type": "image_url", "image_url": {"url": ...}}
+            or None if no image data is set
+        """
+        if self.image_data is None:
+            return None
+
+        return {
+            "type": "image_url",
+            "image_url": {
+                "url": self.image_data
+            }
+        }
+
 def encode_image_to_base64(path: str) -> str:
     """Encode a local image file to base64 data URL."""
     # Read binary
