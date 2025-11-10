@@ -178,7 +178,8 @@ class OptimizerPromptSymbolSetJSON(OptimizerPromptSymbolSet):
         Extracts reasoning and suggestion variables from the LLM response using OptoPrime's extraction logic.
         """
         # Use the centralized extraction logic from OptoPrime
-        return OptoPrime.extract_llm_suggestion(response)
+        optoprime_instance = OptoPrime()
+        return optoprime_instance.extract_llm_suggestion(response)
 class OptimizerPromptSymbolSet2(OptimizerPromptSymbolSet):
     variables_section_title = "# Variables"
     inputs_section_title = "# Inputs"
@@ -252,8 +253,7 @@ class ProblemInstance:
             inputs=self.inputs,
             outputs=self.outputs,
             others=self.others,
-            feedback=self.feedback,
-            context=self.context
+            feedback=self.feedback
         )
 
         context_section = dedent("""

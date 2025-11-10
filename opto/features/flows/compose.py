@@ -191,7 +191,7 @@ class TracedLLM:
         If chat_history_on is True, the chat history will be included in the LLM input.
 
         Args:
-            user_query: The user query to send to the LLM. Can be
+            user_query: The user query to send to the LLM. This should be a string containing the user's input or question.
 
         Returns:
             str: For direct pattern
