@@ -1062,11 +1062,15 @@ class EpsilonNetPS(PrioritySearch):
     """
     def __init__(self,
                  epsilon: float = 0.1,
+                 use_summarizer: bool = False,
                  *args,
                  **kwargs):
         super().__init__(*args, **kwargs)
         self.epsilon = epsilon
+        self.use_summarizer = use_summarizer
         self.summarizer = Summarizer(model_name="gemini/gemini-2.0-flash")
+        
+            
 
     def filter_candidates(self, new_candidates: List[ModuleCandidate]) -> List[ModuleCandidate]:
         """ Filter candidates by their embeddings.
@@ -1143,13 +1147,17 @@ class EpsilonNetPS(PrioritySearch):
         """
         # added exploration rollouts to the exploration candidates.
         self.add_exploration_rollouts_to_candidates(self._exploration_candidates, samples)
-
-        # Summarize the memory and the exploration candidates.
-
-        exploration_memory = [(0, candidate) for candidate in self._exploration_candidates]
-        summary = self.summarizer.summarize(self.memory.memory+exploration_memory)
-        # breakpoint()
-        print_color(f"Summary: {summary}", "green")
+        # Use the summarizer to summarize the memory and the exploration candidates.
+        if self.use_summarizer:
+            # Summarize the memory and the exploration candidates.
+            exploration_memory = [(0, candidate) for candidate in self._exploration_candidates]
+            print_color(f"Summarizing the history...", "green")
+            summary = self.summarizer.summarize(self.memory.memory+exploration_memory)
+            # summary is already a string returned by summarizer.summarize()
+            print_color(f"Summary: {summary}", "green")
+            context = f"Concrete recommendations for generating better agent parameters based on successful patterns observed in the trajectories: {summary}"
+            for candidate in self._exploration_candidates:
+                candidate.optimizer.set_context(context)
         return super().propose(samples, verbose, **kwargs)
         
    

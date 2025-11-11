@@ -75,6 +75,9 @@ class Summarizer:
             trajectories.append(get_trajectories_of_one_rollout(random_rollout))
         
         print_color(f"Generated {len(trajectories)} trajectories.", "green")
+
+        # only use the first 10 trajectories.
+        trajectories = trajectories[:10]
         
         return '\n'.join(trajectories)
 
@@ -120,9 +123,9 @@ class Summarizer:
         response = self.llm(prompt_messages, response_format=response_format)
 
         response = response.choices[0].message.content
-        print_color(f"Response: {response}", "yellow")
-        # breakpoint()
+        # print_color(f"Response: {response}", "yellow")
 
         summary_json = json.loads(response)
+        summary = summary_json['summary']
         
-        return summary_json['summary']
+        return str(summary)
