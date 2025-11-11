@@ -1,4 +1,13 @@
-from typing import Dict, Any
+import base64
+import mimetypes
+import io
+from typing import Dict, Any, Union, Optional
+try:
+    import numpy as np
+    NUMPY_AVAILABLE = True
+except ImportError:
+    NUMPY_AVAILABLE = False
+
 
 def print_color(message, color=None, logger=None):
     colors = {
@@ -134,3 +143,121 @@ def extract_xml_like_data(text: str, reasoning_tag: str = "reasoning",
             if var_name:  # Only require name to be non-empty, value can be empty
                 result['variables'][var_name] = var_value
     return result
+
+
+class MultiModalPayload:
+    """
+    A payload for multimodal content, particularly images.
+
+    Supports three types of image inputs:
+    1. URL (string starting with 'http://' or 'https://')
+    2. Local file path (string path to image file)
+    3. Numpy array (RGB image array)
+    """
+    image_data: Optional[str] = None  # Can be URL or base64 data URL
+
+    def set_image(self, image: Union[str, Any], format: str = "PNG") -> None:
+        """
+        Set the image from various input formats.
+
+        Args:
+            image: Can be:
+                - URL string (starting with 'http://' or 'https://')
+                - Local file path (string)
+                - Numpy array or array-like RGB image
+            format: Image format for numpy arrays (PNG, JPEG, etc.). Default: PNG
+        """
+        if isinstance(image, str):
+            # Check if it's a URL
+            if image.startswith('http://') or image.startswith('https://'):
+                # Direct URL - litellm supports this
+                self.image_data = image
+            else:
+                # Assume it's a local file path
+                self.image_data = encode_image_to_base64(image)
+        else:
+            # Assume it's a numpy array or array-like object
+            self.image_data = encode_numpy_to_base64(image, format=format)
+
+    def get_content_block(self) -> Optional[Dict[str, Any]]:
+        """
+        Get the content block for the image in litellm format.
+
+        Returns:
+            Dict with format: {"type": "image_url", "image_url": {"url": ...}}
+            or None if no image data is set
+        """
+        if self.image_data is None:
+            return None
+
+        return {
+            "type": "image_url",
+            "image_url": {
+                "url": self.image_data
+            }
+        }
+
+def encode_image_to_base64(path: str) -> str:
+    """Encode a local image file to base64 data URL."""
+    # Read binary
+    with open(path, "rb") as f:
+        image_bytes = f.read()
+    # Guess MIME type from file extension
+    mime_type, _ = mimetypes.guess_type(path)
+    if mime_type is None:
+        # fallback
+        mime_type = "image/jpeg"
+    b64 = base64.b64encode(image_bytes).decode("utf-8")
+    data_url = f"data:{mime_type};base64,{b64}"
+    return data_url
+
+
+def encode_numpy_to_base64(array, format: str = "PNG") -> str:
+    """
+    Encode a numpy array to base64 data URL.
+    
+    Args:
+        array: numpy array representing an image (H, W, C) with values in [0, 255] or [0, 1]
+        format: Image format (PNG, JPEG, etc.)
+    
+    Returns:
+        Base64 encoded data URL string
+    """
+    if not NUMPY_AVAILABLE:
+        raise ImportError("numpy is required to encode numpy arrays. Install it with: pip install numpy")
+    
+    try:
+        from PIL import Image
+    except ImportError:
+        raise ImportError("Pillow is required to encode numpy arrays. Install it with: pip install Pillow")
+    
+    # Convert to numpy array if not already
+    if not isinstance(array, np.ndarray):
+        array = np.array(array)
+    
+    # Normalize to [0, 255] if needed
+    if array.dtype == np.float32 or array.dtype == np.float64:
+        if array.max() <= 1.0:
+            array = (array * 255).astype(np.uint8)
+        else:
+            array = array.astype(np.uint8)
+    elif array.dtype != np.uint8:
+        array = array.astype(np.uint8)
+    
+    # Convert to PIL Image
+    image = Image.fromarray(array)
+    
+    # Save to bytes buffer
+    buffer = io.BytesIO()
+    image.save(buffer, format=format.upper())
+    buffer.seek(0)
+    
+    # Encode to base64
+    image_bytes = buffer.getvalue()
+    b64 = base64.b64encode(image_bytes).decode("utf-8")
+    
+    # Determine MIME type
+    mime_type = f"image/{format.lower()}"
+    data_url = f"data:{mime_type};base64,{b64}"
+    
+    return data_url
