@@ -358,7 +358,7 @@ class PrioritySearch(SearchTemplate):
             decouple_optimizers=decouple_optimizers,
         )
 
-        self._enforce_using_data_collecting_candidates = True
+        self._enforce_using_data_collecting_candidates = False
         self.num_epochs = num_epochs
         
         # enforce only data collecting candidates are used in in calling match_candidates_and_samples
@@ -690,7 +690,8 @@ class PrioritySearch(SearchTemplate):
         assert self._exploration_candidates is not None, "exploration_candidates must be set before calling validate."
 
         # The current batch of samples can be used to validate the exploration candidates
-        validate_samples = copy.copy(samples)
+        # Do a hack here: we added the samples before this step.
+        validate_samples = Samples([], {'inputs': [], 'infos': []})
 
         # Validate newly proposed candidates
         use_prev_batch = self.use_prev_batch  # when True, self.validate_sampler == self.train_sampler, and the current batch is used for validation
@@ -1053,17 +1054,19 @@ def calculate_distance_to_memory(memory, new_candidate):
             if distance < min_distance:
                 min_distance = distance
         return min_distance
-        
+
+from opto.features.priority_search.summarizer import Summarizer
 class EpsilonNetPS(PrioritySearch):
     """
     A subclass of PrioritySearch, which keeps an epsilon-net as the memory. Reject new candidates that are in the epsilon-net of the memory.
     """
     def __init__(self,
-                 epsilon: float = 0.01,
+                 epsilon: float = 0.1,
                  *args,
                  **kwargs):
         super().__init__(*args, **kwargs)
         self.epsilon = epsilon
+        self.summarizer = Summarizer(model_name="gemini/gemini-2.0-flash")
 
     def filter_candidates(self, new_candidates: List[ModuleCandidate]) -> List[ModuleCandidate]:
         """ Filter candidates by their embeddings.
@@ -1108,19 +1111,6 @@ class EpsilonNetPS(PrioritySearch):
         print_color(f"Distances between the added candidates and the memory before adding them: {success_distances}", "green")
         return added_candidates
     
-
-    def update_memory(self, validate_results, verbose: bool = False, **kwargs):
-        """ Update the priority queue with the validation results.
-        Args:
-            validate_results (dict): A dictionary where the keys are ModuleCandidate objects and the values are lists of rollouts (list of dicts) containing the module, x, info, target, score, feedback.
-            **kwargs: Additional keyword arguments that may be used by the implementation.
-        """
-        print("--- Updating memory with validation results...") if verbose else None
-        for candidate, rollouts in validate_results.items():
-            candidate.add_rollouts(rollouts)  # add the rollouts to the candidate
-            priority = self.compute_exploration_priority(candidate)  # compute the priority for the candidate
-            self.memory.push(priority, candidate)
-    
     def compress_candidate_memory(self, candidate: ModuleCandidate) -> ModuleCandidate:
         """ Keep target of each rollout for long-term memory. """
         def _process_rollout(rollout):
@@ -1133,5 +1123,33 @@ class EpsilonNetPS(PrioritySearch):
         for rollout in candidate.rollouts:
             _process_rollout(rollout)
         return candidate
+    
+    def add_exploration_rollouts_to_candidates(self, exploration_candidates: List[ModuleCandidate], samples: Samples):
+        """ Add the exploration rollouts to the exploration candidates.
+        """
+        matched_exploration_candidates_and_samples = self.match_candidates_and_samples(exploration_candidates, samples.samples)
+        exploration_results = {}  # dict of ModuleCandidate id: (ModuleCandidate, list of rollouts)
+        for c, rollouts in matched_exploration_candidates_and_samples.items():  # rollouts is a list of BatchRollouts
+            exploration_results[c] = [ r for rr in rollouts for r in rr.to_list()]
+        for candidate, rollouts in exploration_results.items():
+            candidate.add_rollouts(rollouts) 
+
+    def propose(self,
+                samples : Samples,
+                verbose : bool = False,
+                **kwargs):
+        """ 
+        Override the propose method to include a summary into the context of the optimizer.
+        """
+        # added exploration rollouts to the exploration candidates.
+        self.add_exploration_rollouts_to_candidates(self._exploration_candidates, samples)
+
+        # Summarize the memory and the exploration candidates.
+
+        exploration_memory = [(0, candidate) for candidate in self._exploration_candidates]
+        summary = self.summarizer.summarize(self.memory.memory+exploration_memory)
+        # breakpoint()
+        print_color(f"Summary: {summary}", "green")
+        return super().propose(samples, verbose, **kwargs)
         
    

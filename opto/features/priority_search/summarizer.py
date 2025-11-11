@@ -5,8 +5,19 @@ import random
 
 def get_trajectory_from_output(output):
     """Get trajectory from the agent's output."""
-    reward, messages, info = output
+    reward, messages = output
     conversation_parts = []
+    # assert messages is a list of dicts
+    try:
+        assert isinstance(messages, list) and all(isinstance(msg, dict) for msg in messages), "messages must be a list of dicts."
+    except AssertionError as e:
+        print_color(f"Error: {e}", "red")
+        print_color(f"messages: {messages}", "blue")
+        breakpoint()
+        return None
+    # delete the first message if it is the system message. That's the wiki prompt.
+    if messages[0]['role'] == 'system':
+        messages.pop(0)
     for msg in messages:
         msg_str = f"{msg['role']}: {msg.get('content', '')}"
         
@@ -31,14 +42,12 @@ def get_trajectory_from_output(output):
 def get_trajectories_of_one_rollout(rollout):
     """Get trajectories of one rollout."""
     target = rollout['target']
-    reward, messages, info = target
+    # reward, messages = target
     conversation_str = get_trajectory_from_output(target)
     # print two versions of the conversation.
-    print_color(f"Conversation: {conversation_str}", "green")
-    breakpoint()
+    # print_color(f"Conversation: {conversation_str}", "green")
+    # breakpoint()
     return conversation_str
-
-
 
 class Summarizer:
     """A class which use LLM to summarize the trajectories of the memory. It should be able to learn the patterns of the trajectories. Generate a summary to guide the optimizer to generate better candidates.
@@ -55,10 +64,18 @@ class Summarizer:
         """
         trajectories = []
         # Here we use one heuristic: for each candidate, randomly select one trajectory to put into trajectories.
+        print_color(f"Getting trajectories from {len(memory)} candidates.", "blue")
         for _, candidate in memory:
             rollouts = candidate.rollouts
-            random_rollout = random.choice(rollouts)
+            # only learn from successful rollouts.
+            successful_rollouts = [rollout for rollout in rollouts if rollout['score'] > 0]
+            if len(successful_rollouts) == 0:
+                continue
+            random_rollout = random.choice(successful_rollouts)
             trajectories.append(get_trajectories_of_one_rollout(random_rollout))
+        
+        print_color(f"Generated {len(trajectories)} trajectories.", "green")
+        
         return '\n'.join(trajectories)
 
     def summarize(self, memory) -> str:
@@ -70,22 +87,27 @@ class Summarizer:
         """
 
         history_trajectories = self._get_trajecories_for_memory(memory)
+
+        # print_color(f"History trajectories: {history_trajectories}", "green")
+
+        if len(history_trajectories) == 0:
+            return "No successful trajectories found for the memory."
         
-        system_prompt = "You are an expert at analyzing agent behavior patterns and extracting insights to improve agent performance."
+        system_prompt = "You are an expert at analyzing agent behavior patterns and providing actionable guidance for parameter optimization."
         
-        user_prompt = f"""Analyze the following agent conversation trajectories and provide insights.
+        user_prompt = f"""Analyze the following successful agent conversation trajectories and extract insights for optimization.
 
         Trajectories:
         {history_trajectories}
 
-        Please provide your analysis in JSON format with the following structure:
-        1. First, provide your reasoning about patterns you observe in these trajectories
-        2. Then, provide a summary with key insights
+        Provide your analysis in JSON format:
+        1. First, reason about what made these trajectories successful
+        2. Then, provide concrete guidance for the optimizer
 
         Output format:
         {{
-            "reasoning": "Your step-by-step analysis of patterns, successful strategies, common failures, and important observations from the trajectories",
-            "summary": "A concise summary of key insights that can guide the optimizer to generate better agent parameters. Focus on what works well and what should be improved."
+            "reasoning": "Analyze the key patterns and strategies that led to success in these trajectories",
+            "summary": "[Concrete recommendations for generating better agent parameters based on successful patterns observed in the trajectories]"
         }}"""
 
         prompt_messages = [
@@ -94,8 +116,13 @@ class Summarizer:
         ]
         
         response_format = {"type": "json_object"}
+        # print_color(f"Prompt messages: {prompt_messages}", "blue")
         response = self.llm(prompt_messages, response_format=response_format)
 
-        summary = response.choices[0].message.content
-        summary_json = json.loads(summary)
+        response = response.choices[0].message.content
+        print_color(f"Response: {response}", "yellow")
+        # breakpoint()
+
+        summary_json = json.loads(response)
+        
         return summary_json['summary']
