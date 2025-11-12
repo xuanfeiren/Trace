@@ -2,6 +2,7 @@ from opto.optimizers.utils import print_color
 from opto.utils.llm import LLM # For the selector LLM
 import json
 import random
+import re
 
 def get_trajectory_from_output(output):
     """Get trajectory from the agent's output."""
@@ -77,7 +78,7 @@ class Summarizer:
         print_color(f"Generated {len(trajectories)} trajectories.", "green")
 
         # only use the first 10 trajectories.
-        trajectories = trajectories[:10]
+        # trajectories = trajectories[:10]
         
         return '\n'.join(trajectories)
 
@@ -110,7 +111,7 @@ class Summarizer:
         Output format:
         {{
             "reasoning": "Analyze the key patterns and strategies that led to success in these trajectories",
-            "summary": "[Concrete recommendations for generating better agent parameters based on successful patterns observed in the trajectories]"
+            "summary": "Concrete recommendations for generating better agent parameters based on successful patterns observed in the trajectories"
         }}"""
 
         prompt_messages = [
@@ -124,8 +125,25 @@ class Summarizer:
 
         response = response.choices[0].message.content
         # print_color(f"Response: {response}", "yellow")
-
-        summary_json = json.loads(response)
-        summary = summary_json['summary']
         
-        return str(summary)
+        # Extract summary field directly using regex, avoiding JSON parsing issues
+        summary_match = re.search(r'"summary"\s*:\s*"([^"]*(?:\\.[^"]*)*)"', response, re.DOTALL)
+        
+        if summary_match:
+            summary = summary_match.group(1)
+            # Unescape basic JSON escape sequences if needed
+            summary = summary.replace('\\"', '"').replace('\\n', '\n').replace('\\t', '\t')
+            return str(summary)
+        else:
+            # Fallback to JSON parsing if regex doesn't match
+            try:
+                summary_json = json.loads(response)
+                summary = summary_json.get('summary', '')
+                # Handle both string and array formats
+                if isinstance(summary, list):
+                    summary = '\n'.join(str(item) for item in summary)
+                return str(summary)
+            except Exception as e:
+                print_color(f"Unable to extract summary from response: {e}", "red")
+                print_color(f"Response: {response}", "blue")
+                return "Unable to extract summary from LLM response."
