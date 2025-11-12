@@ -364,7 +364,7 @@ class PrioritySearch(SearchTemplate):
         # enforce only data collecting candidates are used in in calling match_candidates_and_samples
         # this attribute is purposefully designed to be only modified by subclasses, not through input arguments.
         self.default_batch_size, self.default_num_batches = None, None
-
+        self.train_dataset = train_dataset
         super().train(guide=guide,
                       train_dataset=train_dataset,
                       validate_dataset=validate_dataset,
@@ -1164,5 +1164,121 @@ class EpsilonNetPS(PrioritySearch):
             for candidate in self._exploration_candidates:
                 candidate.optimizer.set_context(self.context)
         return super().propose(samples, verbose, **kwargs)
+
+class ParetobasedPS(PrioritySearch):
+    """
+    A subclass of PrioritySearch, which uses Pareto-based exploration to explore the parameter space and propose new candidates.
+    """
+    def compress_candidate_memory(self, candidate: ModuleCandidate) -> ModuleCandidate:
+        """ Compress the memory of the candidate to save space. This is used to preprocess candidates before adding them to long-term memory.
+            By default, we save only the feedback and score of each rollout for long-term memory. """
+        def _process_rollout(rollout):
+            # rollout is a dict containing module, x, info, target, score, feedback
+            for k in rollout:
+                if k not in ['x', 'score']:
+                    rollout[k] = None
+        candidate = copy.copy(candidate)  # make a copy of the candidate to avoid modifying the original one
+        candidate.rollouts = copy.deepcopy(candidate.rollouts)  # deep copy the rollouts to avoid modifying the original one
+        for rollout in candidate.rollouts:
+            _process_rollout(rollout)
+        return candidate
+
+    def compute_score_for_task_x(self, candidate, x):
+        """ 
+        Compute the empirical mean score for the candidate for the task x.
+        """
+        rollouts_x = [ rollout for rollout in candidate.rollouts if rollout['x'] == x]
+        return safe_mean([rollout['score'] for rollout in rollouts_x],missing_value=0)
+
+    def get_best_candidates_for_x(self,x):
+        """
+        Get the candidates with the highest score for the task x.
+        """
+        best_candidates = []
+        highest_score = max(self.compute_score_for_task_x(candidate, x) for _,candidate in self.memory.memory)
+        for _,candidate in self.memory.memory:
+            if self.compute_score_for_task_x(candidate, x) == highest_score:
+                best_candidates.append(candidate)
+        return best_candidates
+
+       
+    def explore(self, verbose: bool = False, **kwargs):
+        """
+        1. Keep candidates achieving the highest score for each task
+        2. Remove strictly dominated candidates.
+
+        The strict domination definition: for two candidates a,b in best_candidates_for_tasks, we say candidate a strictly dominates candidate b, if all tasks on which b is among the best, a also achieves the highest score.
+        """
+        # get all xs in the train dataset
+        xs = [x for x in self.train_dataset['inputs']]
+        # best candidates for each task
+        best_candidates_for_tasks = {x: self.get_best_candidates_for_x(x) for x in xs}
+        
+        # collect all unique candidates from best_candidates_for_tasks
+        all_candidates = list(set(candidate for candidates in best_candidates_for_tasks.values() for candidate in candidates))
+        
+        # remove strictly dominated candidates
+        non_dominated_candidates = []
+        for candidate_b in all_candidates:
+            is_dominated = False
+            # find all tasks where candidate_b is among the best
+            tasks_b = [task_x for task_x in xs if candidate_b in best_candidates_for_tasks[task_x]]
+            
+            # check if any other candidate strictly dominates candidate_b
+            for candidate_a in all_candidates:
+                if candidate_a is candidate_b:
+                    continue
+                
+                # check if candidate_a is among the best for all tasks where candidate_b is among the best
+                if all(candidate_a in best_candidates_for_tasks[task_x] for task_x in tasks_b):
+                    # candidate_a strictly dominates candidate_b
+                    is_dominated = True
+                    break
+            
+            if not is_dominated:
+                non_dominated_candidates.append(candidate_b)
+        
+        # update best_candidates_for_tasks to only contain non-dominated candidates
+        for x in xs:
+            best_candidates_for_tasks[x] = [c for c in best_candidates_for_tasks[x] if c in non_dominated_candidates]
+
+        # Get all candidates in best_candidates_for_tasks as the exploration candidates. Remove the duplicates.
+        top_candidates = list(set(candidate for candidates in best_candidates_for_tasks.values() for candidate in candidates))
+
+        # Remove the top candidates from the memory. Do the logging stuff like PS.
+        priorities = []
+        items_to_remove = []
+        for neg_priority, candidate in self.memory.memory:
+            if candidate in top_candidates:
+                priorities.append(-neg_priority)
+                items_to_remove.append((neg_priority, candidate))
+        # It may be safer to remove items after traversing the memory.
+        for item in items_to_remove:
+            self.memory.memory.remove(item)
+        heapq.heapify(self.memory.memory)
+
+        
+        mean_scores = [c.mean_score() for c in top_candidates]
+        mean_scores = [s for s in mean_scores if s is not None]  # filter out None scores
+        depths = [c.depth for c in top_candidates]
+        assert all(depth is not None for depth in depths), "All exploration candidates must have a depth."
+        assert all(depth >= 1 for depth in depths), "All exploration candidates must have a depth of at least 1."
+        info_dict = {
+            'num_exploration_candidates': len(top_candidates),
+            'exploration_candidates_mean_priority': safe_mean(priorities),  # list of priorities of the exploration candidates
+            'exploration_candidates_mean_score': safe_mean(mean_scores),  # list of mean scores of the exploration candidates
+            'exploration_candidates_mean_depth': safe_mean(depths),  # list of depths of the exploration candidates
+            'exploration_candidates_average_num_rollouts': safe_mean([c.num_rollouts for c in top_candidates]),
+        }
+        if len(top_candidates) < self.num_candidates:
+            new_num_batches = int(self.default_num_batches * self.num_candidates/len(top_candidates))
+            print(f'Setting sampler num_batches from {self.default_num_batches} to {new_num_batches} to accommodate {self.num_candidates} exploration candidates request using {len(top_candidates)} candidates.')
+            self.set_sampler_batch_size(self.default_batch_size, new_num_batches)
+        else:
+            self.set_sampler_batch_size(self.default_batch_size, self.default_num_batches)
+        return top_candidates, priorities, info_dict
+       
+
+
         
    
