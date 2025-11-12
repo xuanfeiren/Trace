@@ -1069,6 +1069,7 @@ class EpsilonNetPS(PrioritySearch):
         self.epsilon = epsilon
         self.use_summarizer = use_summarizer
         self.summarizer = Summarizer(model_name="gemini/gemini-2.0-flash")
+        self.context = "Concrete recommendations for generating better agent parameters based on successful patterns observed in the trajectories: "
         
             
 
@@ -1152,12 +1153,16 @@ class EpsilonNetPS(PrioritySearch):
             # Summarize the memory and the exploration candidates.
             exploration_memory = [(0, candidate) for candidate in self._exploration_candidates]
             print_color(f"Summarizing the history...", "green")
-            summary = self.summarizer.summarize(self.memory.memory+exploration_memory)
-            # summary is already a string returned by summarizer.summarize()
-            print_color(f"Summary: {summary}", "green")
-            context = f"Concrete recommendations for generating better agent parameters based on successful patterns observed in the trajectories: {summary}"
+            try: 
+                summary = self.summarizer.summarize(self.memory.memory+exploration_memory)
+                print_color(f"Summary: {summary}", "green")
+                self.context = f"Concrete recommendations for generating better agent parameters based on successful patterns observed in the trajectories: {summary}"
+            except RuntimeError as e:
+                print_color(f"Error: {e}", "red")
+                print_color(f"Using fallback context: {self.context}", "red")
+            # Set the context for the optimizer.
             for candidate in self._exploration_candidates:
-                candidate.optimizer.set_context(context)
+                candidate.optimizer.set_context(self.context)
         return super().propose(samples, verbose, **kwargs)
         
    
