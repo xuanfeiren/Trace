@@ -356,7 +356,10 @@ class SearchTemplate(Trainer):
         tested_update_dicts = []  # List of (update_dict, test_score) tuples
         
         # Test all 4 versions
-        for version_name in ['empirical_mean', 'ucb', 'lcb', 'mean_prediction']:
+        # list_to_test = ['empirical_mean', 'ucb', 'lcb', 'mean_prediction']
+        # only test empirical_mean
+        list_to_test = ['empirical_mean']
+        for version_name in list_to_test:
             if version_name in self._best_candidates:
                 candidate = self._best_candidates[version_name]
                 

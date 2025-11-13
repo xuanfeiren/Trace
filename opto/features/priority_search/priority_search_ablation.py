@@ -1061,7 +1061,7 @@ class EpsilonNetPS(PrioritySearch):
     A subclass of PrioritySearch, which keeps an epsilon-net as the memory. Reject new candidates that are in the epsilon-net of the memory.
     """
     def __init__(self,
-                 epsilon: float = 0.1,
+                 epsilon: float = 0.01,
                  use_summarizer: bool = False,
                  *args,
                  **kwargs):
@@ -1209,10 +1209,17 @@ class ParetobasedPS(PrioritySearch):
 
         The strict domination definition: for two candidates a,b in best_candidates_for_tasks, we say candidate a strictly dominates candidate b, if all tasks on which b is among the best, a also achieves the highest score.
         """
+        print_color(f"Using Pareto-based exploration to explore the parameter space...", "green")
         # get all xs in the train dataset
         xs = [x for x in self.train_dataset['inputs']]
         # best candidates for each task
         best_candidates_for_tasks = {x: self.get_best_candidates_for_x(x) for x in xs}
+
+        # For debugging, print the best candidates for each task.
+        for x in xs:
+            print_color(f"Best candidates for task {x}: ", "green")
+            for candidate in best_candidates_for_tasks[x]:
+                print_color(f"Candidate: {candidate.update_dict.values()[0]}", "green")
         
         # collect all unique candidates from best_candidates_for_tasks
         all_candidates = list(set(candidate for candidates in best_candidates_for_tasks.values() for candidate in candidates))
@@ -1242,6 +1249,12 @@ class ParetobasedPS(PrioritySearch):
         for x in xs:
             best_candidates_for_tasks[x] = [c for c in best_candidates_for_tasks[x] if c in non_dominated_candidates]
 
+        # Print the best candidates after removing the dominated candidates
+        for x in xs:
+            print_color(f"After removing dominated candidates, best candidates for task {x}: ", "green")
+            for candidate in best_candidates_for_tasks[x]:
+                print_color(f"Candidate: {candidate.update_dict.values()[0]}", "green")
+
         # Get all candidates in best_candidates_for_tasks as the exploration candidates. Remove the duplicates.
         top_candidates = list(set(candidate for candidates in best_candidates_for_tasks.values() for candidate in candidates))
 
@@ -1252,6 +1265,7 @@ class ParetobasedPS(PrioritySearch):
             if candidate in top_candidates:
                 priorities.append(-neg_priority)
                 items_to_remove.append((neg_priority, candidate))
+        assert len(items_to_remove) == len(top_candidates), "The number of removed candidates should be equal to the number of top_candidates."
         # It may be safer to remove items after traversing the memory.
         for item in items_to_remove:
             self.memory.memory.remove(item)
