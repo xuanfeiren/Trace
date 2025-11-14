@@ -481,6 +481,8 @@ class PrioritySearch(SearchTemplate):
         # samples is None in the first iteration
         if samples is not None:
             # 1. Propose new parameters based on running LLM optimizers on the collected samples
+            # added exploration rollouts to the exploration candidates.
+            self.add_exploration_rollouts_to_candidates(self._exploration_candidates, samples)
             candidates = self.propose(samples, verbose=verbose, **kwargs)  # List of ModuleCandidates
             # add embeddings to the candidates asynchronously
             self.regressor.add_embeddings_to_candidates(candidates)
@@ -567,6 +569,15 @@ class PrioritySearch(SearchTemplate):
     #    optimizer_2_copy_2_copy_2(param2) -> proposal_8
     # which form the new candidate list returned by `propose`.
     #
+    def add_exploration_rollouts_to_candidates(self, exploration_candidates: List[ModuleCandidate], samples: Samples):
+        """ Add the exploration rollouts to the exploration candidates.
+        """
+        matched_exploration_candidates_and_samples = self.match_candidates_and_samples(exploration_candidates, samples.samples)
+        exploration_results = {}  # dict of ModuleCandidate id: (ModuleCandidate, list of rollouts)
+        for c, rollouts in matched_exploration_candidates_and_samples.items():  # rollouts is a list of BatchRollouts
+            exploration_results[c] = [ r for rr in rollouts for r in rr.to_list()]
+        for candidate, rollouts in exploration_results.items():
+            candidate.add_rollouts(rollouts) 
     def propose(self,
                 samples : Samples,
                 verbose : bool = False,
@@ -767,7 +778,6 @@ class PrioritySearch(SearchTemplate):
             candidate.add_rollouts(rollouts)  # add the rollouts to the candidate
             priority = self.compute_exploration_priority(candidate)  # compute the priority for the candidate
             self.memory.push(priority, candidate)
-
     def explore(self, verbose: bool = False, **kwargs):
         """ Explore the parameter space and propose new candidates.
         Args:
@@ -1129,15 +1139,7 @@ class EpsilonNetPS(PrioritySearch):
             _process_rollout(rollout)
         return candidate
     
-    def add_exploration_rollouts_to_candidates(self, exploration_candidates: List[ModuleCandidate], samples: Samples):
-        """ Add the exploration rollouts to the exploration candidates.
-        """
-        matched_exploration_candidates_and_samples = self.match_candidates_and_samples(exploration_candidates, samples.samples)
-        exploration_results = {}  # dict of ModuleCandidate id: (ModuleCandidate, list of rollouts)
-        for c, rollouts in matched_exploration_candidates_and_samples.items():  # rollouts is a list of BatchRollouts
-            exploration_results[c] = [ r for rr in rollouts for r in rr.to_list()]
-        for candidate, rollouts in exploration_results.items():
-            candidate.add_rollouts(rollouts) 
+    
 
     def propose(self,
                 samples : Samples,
@@ -1146,8 +1148,7 @@ class EpsilonNetPS(PrioritySearch):
         """ 
         Override the propose method to include a summary into the context of the optimizer.
         """
-        # added exploration rollouts to the exploration candidates.
-        self.add_exploration_rollouts_to_candidates(self._exploration_candidates, samples)
+        
         # Use the summarizer to summarize the memory and the exploration candidates.
         if self.use_summarizer:
             # Summarize the memory and the exploration candidates.
@@ -1219,7 +1220,7 @@ class ParetobasedPS(PrioritySearch):
         for x in xs:
             print_color(f"Best candidates for task {x}: ", "green")
             for candidate in best_candidates_for_tasks[x]:
-                print_color(f"Candidate: {candidate.update_dict.values()[0]}", "green")
+                print_color(f"Candidate: {id(candidate)}", "green")
         
         # collect all unique candidates from best_candidates_for_tasks
         all_candidates = list(set(candidate for candidates in best_candidates_for_tasks.values() for candidate in candidates))
@@ -1253,10 +1254,14 @@ class ParetobasedPS(PrioritySearch):
         for x in xs:
             print_color(f"After removing dominated candidates, best candidates for task {x}: ", "green")
             for candidate in best_candidates_for_tasks[x]:
-                print_color(f"Candidate: {candidate.update_dict.values()[0]}", "green")
+                print_color(f"Candidate: {id(candidate)}", "green")
 
         # Get all candidates in best_candidates_for_tasks as the exploration candidates. Remove the duplicates.
         top_candidates = list(set(candidate for candidates in best_candidates_for_tasks.values() for candidate in candidates))
+
+        # Only take <=num_candidates top candidates. Sort top_candidates by the mean score. If mean score for some candidate is None, use 0 to sort.
+        top_candidates.sort(key=lambda x: x.mean_score() if x.mean_score() is not None else 0, reverse=True)
+        top_candidates = top_candidates[:self.num_candidates]
 
         # Remove the top candidates from the memory. Do the logging stuff like PS.
         priorities = []
