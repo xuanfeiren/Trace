@@ -1217,10 +1217,10 @@ class ParetobasedPS(PrioritySearch):
         best_candidates_for_tasks = {x: self.get_best_candidates_for_x(x) for x in xs}
 
         # For debugging, print the best candidates for each task.
-        for x in xs:
-            print_color(f"Best candidates for task {x}: ", "green")
-            for candidate in best_candidates_for_tasks[x]:
-                print_color(f"Candidate: {id(candidate)}", "green")
+        # for x in xs:
+        #     print_color(f"Best candidates for task {x}: ", "green")
+        #     for candidate in best_candidates_for_tasks[x]:
+        #         print_color(f"Candidate: {id(candidate)}", "green")
         
         # collect all unique candidates from best_candidates_for_tasks
         all_candidates = list(set(candidate for candidates in best_candidates_for_tasks.values() for candidate in candidates))
@@ -1251,13 +1251,15 @@ class ParetobasedPS(PrioritySearch):
             best_candidates_for_tasks[x] = [c for c in best_candidates_for_tasks[x] if c in non_dominated_candidates]
 
         # Print the best candidates after removing the dominated candidates
-        for x in xs:
-            print_color(f"After removing dominated candidates, best candidates for task {x}: ", "green")
-            for candidate in best_candidates_for_tasks[x]:
-                print_color(f"Candidate: {id(candidate)}", "green")
+        # for x in xs:
+        #     print_color(f"After removing dominated candidates, best candidates for task {x}: ", "green")
+        #     for candidate in best_candidates_for_tasks[x]:
+        #         print_color(f"Candidate: {id(candidate)}", "green")
 
         # Get all candidates in best_candidates_for_tasks as the exploration candidates. Remove the duplicates.
         top_candidates = list(set(candidate for candidates in best_candidates_for_tasks.values() for candidate in candidates))
+
+        print_color(f"Number of pareto candidates: {len(top_candidates)}, we will take {min(len(top_candidates), self.num_candidates)} for exploration.", "green")
 
         # Only take <=num_candidates top candidates. Sort top_candidates by the mean score. If mean score for some candidate is None, use 0 to sort.
         top_candidates.sort(key=lambda x: x.mean_score() if x.mean_score() is not None else 0, reverse=True)
