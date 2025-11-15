@@ -637,7 +637,11 @@ class PrioritySearch(SearchTemplate):
         # For each optimizer, containing the backward feedback, we call it n_proposals times to get the proposed parameters.
         def _step(n):
             optimizer = optimizers[n]
-            update_dict = optimizer.step(verbose=verbose, num_threads=self.num_threads, bypassing=True, **kwargs)
+            try:
+                update_dict = optimizer.step(verbose=verbose, num_threads=self.num_threads, bypassing=True, **kwargs)
+            except Exception as e:
+                print(f"Error in optimizer.step. No update dict returned: {e}")
+                return None
             if not update_dict:  # if the optimizer did not propose any updates
                 return None # return None to indicate no updates were proposed
             # update_dict may only contain some of the parameters of the agent, we need to make sure it contains all the parameters
@@ -1258,6 +1262,8 @@ class ParetobasedPS(PrioritySearch):
 
         # Get all candidates in best_candidates_for_tasks as the exploration candidates. Remove the duplicates.
         top_candidates = list(set(candidate for candidates in best_candidates_for_tasks.values() for candidate in candidates))
+        # Log the number of pareto candidates.
+        self.logger.log('Update/num_pareto_candidates', len(top_candidates), self.n_iters, color='Green')
 
         print_color(f"Number of pareto candidates: {len(top_candidates)}, we will take {min(len(top_candidates), self.num_candidates)} for exploration.", "green")
 
