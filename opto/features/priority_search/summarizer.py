@@ -73,7 +73,7 @@ class Summarizer:
         # copy a random shuffle of the memory
         temporary_memory = random.sample(memory, k=min(self.max_candidates_in_prompt, len(memory)))
         for _, candidate in temporary_memory:
-            rollouts = candidate.rollouts
+            rollouts = [rollout for rollout in candidate.rollouts if rollout['score'] is not None]
             if len(rollouts) == 0:
                 continue
             # For each candidate, add one (if exists) successful_rollout and one (if exists) failed_rollout.
