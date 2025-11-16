@@ -18,7 +18,10 @@ def get_trajectory_from_output(output):
         return None
     # delete the first message if it is the system message. That's the wiki prompt.
     if messages[0]['role'] == 'system':
+        # print_color(f"Deleting the first message if it is the system message.", "red")
         messages.pop(0)
+    # else:
+    #     print_color(f"The first message: {messages[0]}", "red")
     for msg in messages:
         msg_str = f"{msg['role']}: {msg.get('content', '')}"
         
@@ -40,7 +43,7 @@ def get_trajectory_from_output(output):
         conversation_parts.append(msg_str)
     return '\n'.join(conversation_parts)
 
-def get_trajectories_of_one_rollout(rollout):
+def get_trajectory_of_one_rollout(rollout):
     """Get trajectories of one rollout."""
     target = rollout['target']
     # reward, messages = target
@@ -55,6 +58,7 @@ class Summarizer:
     """
     def __init__(self, model_name: str = "gemini/gemini-2.0-flash"):
         self.llm = LLM(model=model_name)
+        self.max_candidates_in_prompt = 20
 
     def _get_trajecories_for_memory(self, memory):
         """
@@ -66,20 +70,28 @@ class Summarizer:
         trajectories = []
         # Here we use one heuristic: for each candidate, randomly select one trajectory to put into trajectories.
         print_color(f"Getting trajectories from {len(memory)} candidates.", "blue")
-        for _, candidate in memory:
+        # copy a random shuffle of the memory
+        temporary_memory = random.sample(memory, k=min(self.max_candidates_in_prompt, len(memory)))
+        for _, candidate in temporary_memory:
             rollouts = candidate.rollouts
-            # only learn from successful rollouts.
-            successful_rollouts = [rollout for rollout in rollouts if rollout['score'] > 0]
-            if len(successful_rollouts) == 0:
+            if len(rollouts) == 0:
                 continue
-            random_rollout = random.choice(successful_rollouts)
-            trajectories.append(get_trajectories_of_one_rollout(random_rollout))
+            # For each candidate, add one (if exists) successful_rollout and one (if exists) failed_rollout.
+            candidate_update_dict = candidate.update_dict.values()
+            # print_color(f"Candidate pamameters: {candidate_update_dict}", "blue")# For debugging
+            prompt = f"Candidate pamameters: {candidate_update_dict}."
+            successful_rollouts = [rollout for rollout in rollouts if rollout['score'] > 0]
+            failed_rollouts = [rollout for rollout in rollouts if rollout['score'] == 0]
+            if len(successful_rollouts) > 0: 
+                random_successful_rollout = random.choice(successful_rollouts)
+                prompt += f"Successful trajectory: {get_trajectory_of_one_rollout(random_successful_rollout)}."
+            if len(failed_rollouts) > 0:
+                random_failed_rollout = random.choice(failed_rollouts)
+                prompt += f"Failed trajectory: {get_trajectory_of_one_rollout(random_failed_rollout)}."
+            
+            trajectories.append(prompt)
         
-        print_color(f"Generated {len(trajectories)} trajectories.", "green")
-
-        # only use the first 10 trajectories.
-        # trajectories = trajectories[:10]
-        
+        print_color(f"Generated trajectories from {len(trajectories)} candidates.", "green")
         return '\n'.join(trajectories)
 
     def summarize(self, memory) -> str:
@@ -99,19 +111,19 @@ class Summarizer:
         
         system_prompt = "You are an expert at analyzing agent behavior patterns and providing actionable guidance for parameter optimization."
         
-        user_prompt = f"""Analyze the following successful agent conversation trajectories and extract insights for optimization.
+        user_prompt = f"""Analyze the following agent conversation trajectories and extract insights for optimization.
 
         Trajectories:
         {history_trajectories}
 
         Provide your analysis in JSON format:
-        1. First, reason about what made these trajectories successful
+        1. First, reason about what made these trajectories successful or failed
         2. Then, provide concrete guidance for the optimizer
 
         Output format:
         {{
-            "reasoning": "Analyze the key patterns and strategies that led to success in these trajectories",
-            "summary": "Concrete recommendations for generating better agent parameters based on successful patterns observed in the trajectories"
+            "reasoning": "Analyze the key patterns and strategies that led to success or failure in these trajectories",
+            "summary": "Concrete recommendations for generating better agent parameters based on successful or failed patterns observed in the trajectories"
         }}"""
 
         prompt_messages = [
@@ -120,6 +132,7 @@ class Summarizer:
         ]
         
         response_format = {"type": "json_object"}
+        # print_color(f"History trajectories: {history_trajectories}", "blue")
         # print_color(f"Prompt messages: {prompt_messages}", "blue")
         response = self.llm(prompt_messages, response_format=response_format)
 
