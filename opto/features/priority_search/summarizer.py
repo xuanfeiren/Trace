@@ -58,7 +58,7 @@ class Summarizer:
     """
     def __init__(self, model_name: str = "gemini/gemini-2.0-flash"):
         self.llm = LLM(model=model_name)
-        self.max_candidates_in_prompt = 20
+        self.max_candidates_in_prompt = 50
 
     def _get_trajecories_for_memory(self, memory):
         """
