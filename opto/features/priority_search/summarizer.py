@@ -160,3 +160,190 @@ class Summarizer:
                 print_color(f"Unable to extract summary from response: {e}", "red")
                 print_color(f"Response: {response}", "blue")
                 return "Unable to extract summary from LLM response."
+from opto.trainer.utils import async_run
+class DetailedSummarizer:
+    """A class which use LLM to summarize the trajectories of the memory. It should be able to learn the patterns of the trajectories. Generate a summary to guide the optimizer to generate better candidates.
+    This version generates summaries for each (candidate, task) pair. Then it will be combined to a context, or call LLM for a final summary.
+    """
+    def __init__(self, model_name: str = "gemini/gemini-2.0-flash"):
+        self.llm = LLM(model=model_name)
+    def subsummarize(self, candidate, x):
+        """
+        Generate a summary for a specific (candidate, task) pair across multiple trajectories.
+        
+        Calls the LLM to analyze the candidate's performance on task x and generate a structured response containing:
+        - <reasoning>: Analysis of the candidate's approach and decision-making process
+        - <summary>: Description of how the candidate behaves when solving task x across observed trajectories
+        - <insights>: Identification of success patterns and failure modes for the candidate on task x
+        
+        Args:
+            candidate: The candidate agent/parameters being evaluated.
+            x: The specific task or input on which the candidate was tested.
+            
+        Returns:
+            A structured summary of the candidate's behavior on the given task.
+        """
+        # Extract the trajectories for the (candidate, x) pair.
+        rollouts = [rollout for rollout in candidate.rollouts if rollout['x'] == x and rollout['score'] is not None]
+        if len(rollouts) == 0:
+            return None
+        # Get the trajectories for the rollouts.
+        # trajectories = [get_trajectory_of_one_rollout(rollout) for rollout in rollouts]
+        # Call LLM to generate structured response.
+        
+        # Categorize trajectories by success/failure
+        successful_trajectories = [get_trajectory_of_one_rollout(r) for r in rollouts if r['score'] > 0]
+        failed_trajectories = [get_trajectory_of_one_rollout(r) for r in rollouts if r['score'] == 0]
+        
+        # Build trajectory summary
+        trajectory_summary = f"Task: {x}\n"
+        trajectory_summary += f"Candidate parameters: {candidate.update_dict.values()}\n\n"
+        
+        if successful_trajectories:
+            trajectory_summary += f"Successful trajectories ({len(successful_trajectories)}):\n"
+            trajectory_summary += "\n---\n".join(successful_trajectories[:3])  # Limit to 3 examples
+            trajectory_summary += "\n\n"
+        
+        if failed_trajectories:
+            trajectory_summary += f"Failed trajectories ({len(failed_trajectories)}):\n"
+            trajectory_summary += "\n---\n".join(failed_trajectories[:3])  # Limit to 3 examples
+        
+        system_prompt = "You are an expert at analyzing agent behavior and extracting actionable insights from execution traces."
+        
+        user_prompt = f"""Analyze the following trajectories for a candidate agent attempting to solve a specific task.
+
+            {trajectory_summary}
+
+            Provide a detailed analysis in the following XML format:
+            <reasoning>Analyze the candidate's approach, decision-making process, and execution patterns across these trajectories</reasoning>
+            <summary>Describe the candidate's overall behavior when solving this task, including strategies employed and common patterns</summary>
+            <insights>Identify specific success patterns (what works) and failure modes (what doesn't work) for this candidate on this task</insights>
+
+            Focus on actionable insights that can guide parameter optimization."""
+
+        prompt_messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ]
+        
+        try:
+            response = self.llm(prompt_messages)
+            response_content = response.choices[0].message.content
+            
+            # Extract summary and insights using regex
+            summary_match = re.search(r'<summary>(.*?)</summary>', response_content, re.DOTALL)
+            insights_match = re.search(r'<insights>(.*?)</insights>', response_content, re.DOTALL)
+            
+            # Format as XML with task wrapper using actual x value
+            result = f"<task_{x}>\n"
+            if summary_match:
+                result += f"<summary>{summary_match.group(1).strip()}</summary>\n"
+            if insights_match:
+                result += f"<insights>{insights_match.group(1).strip()}</insights>\n"
+            result += f"</task_{x}>"
+            
+            return result 
+        except Exception as e:
+            print_color(f"Error generating subsummary: {e}", "red")
+            return None
+
+    def summarize(self, memory):
+        """
+        Generate comprehensive summaries for all candidates in memory across their evaluated tasks.
+        
+        This method processes the memory by:
+        1. Extracting all unique (candidate, task) pairs from candidate rollouts
+        2. Calling subsummarize asynchronously for each (candidate, task) pair
+        3. Aggregating task-level summaries for each candidate
+        4. Formatting results as structured XML
+        
+        Args:
+            memory: List of (neg_score, candidate) tuples containing evaluation history.
+            
+        Returns:
+            str: XML-formatted string with structure:
+                <candidate>
+                    <parameters>{candidate.update_dict.values()}</parameters>
+                    <task_1><summary>...</summary><insights>...</insights></task_1>
+                    <task_2><summary>...</summary><insights>...</insights></task_2>
+                    ...
+                </candidate>
+                Multiple candidate blocks are concatenated with newlines.
+        """
+        # Collect all (candidate, task) pairs from memory
+        candidate_task_pairs = []
+        candidate_map = {}  # Map to track which tasks belong to which candidate
+        
+        for idx, (_, candidate) in enumerate(memory):
+            # Get unique tasks (x values) for this candidate
+            tasks = set()
+            for rollout in candidate.rollouts:
+                if rollout['score'] is not None and 'x' in rollout:
+                    tasks.add(rollout['x'])
+            
+            candidate_map[idx] = {
+                'candidate': candidate,
+                'tasks': list(tasks)
+            }
+            
+            # Create (candidate, task) pairs for async processing
+            for task in tasks:
+                candidate_task_pairs.append((candidate, task))
+        
+        if len(candidate_task_pairs) == 0:
+            return "No candidate-task pairs found in memory."
+        
+        print_color(f"Processing {len(candidate_task_pairs)} (candidate, task) pairs from {len(memory)} candidates.", "blue")
+        
+        # Prepare async execution
+        runs = [self.subsummarize] * len(candidate_task_pairs)
+        args_list = [[candidate, task] for candidate, task in candidate_task_pairs]
+        
+        # Run subsummarize asynchronously for all (candidate, task) pairs
+        subsummaries = async_run(
+            runs, 
+            args_list=args_list, 
+            description="Generating task summaries"
+        )
+        
+        # Organize results by candidate
+        candidate_summaries = {}
+        pair_idx = 0
+        for idx, info in candidate_map.items():
+            candidate = info['candidate']
+            tasks = info['tasks']
+            
+            # Collect summaries for this candidate's tasks
+            task_summaries = []
+            for task in tasks:
+                if pair_idx < len(subsummaries) and subsummaries[pair_idx] is not None:
+                    task_summaries.append(subsummaries[pair_idx])
+                pair_idx += 1
+            
+            candidate_summaries[idx] = {
+                'candidate': candidate,
+                'summaries': task_summaries
+            }
+        
+        # Format as XML
+        result_blocks = []
+        for idx, info in candidate_summaries.items():
+            candidate = info['candidate']
+            summaries = info['summaries']
+            
+            if len(summaries) == 0:
+                continue
+            
+            candidate_block = "<candidate>\n"
+            candidate_block += f"<parameters>{list(candidate.update_dict.values())}</parameters>\n"
+            
+            for summary in summaries:
+                if summary:
+                    candidate_block += summary + "\n"
+            
+            candidate_block += "</candidate>"
+            result_blocks.append(candidate_block)
+        
+        print_color(f"Generated summaries for {len(result_blocks)} candidates.", "green")
+        
+        return "\n\n".join(result_blocks) if result_blocks else "No summaries generated."
