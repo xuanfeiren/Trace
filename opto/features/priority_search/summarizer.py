@@ -68,10 +68,10 @@ class Summarizer:
         Return one single string of all trajectories.
         """
         trajectories = []
-        # Here we use one heuristic: for each candidate, randomly select one trajectory to put into trajectories.
         print_color(f"Getting trajectories from {len(memory)} candidates.", "blue")
         # copy a random shuffle of the memory
-        temporary_memory = random.sample(memory, k=min(self.max_candidates_in_prompt, len(memory)))
+        memory_with_rollouts = [(neg_score, candidate) for neg_score, candidate in memory if len([rollout for rollout in candidate.rollouts if rollout['score'] is not None]) > 0]
+        temporary_memory = random.sample(memory_with_rollouts, k=min(self.max_candidates_in_prompt, len(memory_with_rollouts)))
         for _, candidate in temporary_memory:
             rollouts = [rollout for rollout in candidate.rollouts if rollout['score'] is not None]
             if len(rollouts) == 0:

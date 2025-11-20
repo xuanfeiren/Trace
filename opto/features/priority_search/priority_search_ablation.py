@@ -13,10 +13,6 @@ from opto.features.priority_search.utils import set_module_parameters, remap_upd
 from opto.features.priority_search.regressor import EnsembleLogisticRegressor
 from opto.optimizers.utils import print_color
 
-
-    
-
-
 class ModuleCandidate:
     """ A container used by PrioritySearch to store a candidate module as (its base module and update dictionary) and its statistics. """
 
@@ -175,7 +171,6 @@ class ModuleCandidate:
     def num_rollouts(self):
         """ Return the number of rollouts collected for this candidate. """
         return len(self.rollouts)
-
 
 class HeapMemory:
     # This is a basic implementation of a heap memory that uses a priority queue to store candidates.
@@ -1070,13 +1065,13 @@ def calculate_distance_to_memory(memory, new_candidate):
         return min_distance
 
 # from opto.features.priority_search.summarizer import Summarizer
-from opto.features.priority_search.summarizer import DetailedSummarizer as Summarizer
+from opto.features.priority_search.summarizer import  Summarizer
 class EpsilonNetPS(PrioritySearch):
     """
     A subclass of PrioritySearch, which keeps an epsilon-net as the memory. Reject new candidates that are in the epsilon-net of the memory.
     """
     def __init__(self,
-                 epsilon: float = 0.1,
+                 epsilon: float = 0,
                  use_summarizer: bool = False,
                  *args,
                  **kwargs):
@@ -1091,6 +1086,9 @@ class EpsilonNetPS(PrioritySearch):
     def filter_candidates(self, new_candidates: List[ModuleCandidate]) -> List[ModuleCandidate]:
         """ Filter candidates by their embeddings.
         """
+        if self.epsilon == 0: # no filtering
+            print_color(f"No filtering of candidates.", "green")
+            return new_candidates
         exploration_memory = [(0, candidate) for candidate in self._exploration_candidates]
         current_memory = self.memory.memory + exploration_memory
 
@@ -1144,8 +1142,6 @@ class EpsilonNetPS(PrioritySearch):
             _process_rollout(rollout)
         return candidate
     
-    
-
     def propose(self,
                 samples : Samples,
                 verbose : bool = False,
