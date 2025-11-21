@@ -302,7 +302,7 @@ class DetailedSummarizer:
         # Run subsummarize asynchronously for all (candidate, task) pairs
         subsummaries = async_run(
             runs, 
-            max_workers=50,
+            max_workers=100,
             args_list=args_list, 
             description="Generating task summaries"
         )
