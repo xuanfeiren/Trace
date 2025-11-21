@@ -247,7 +247,7 @@ class DetailedSummarizer:
             print_color(f"Error generating subsummary: {e}", "red")
             return None
 
-    def summarize(self, memory):
+    def structured_summary(self, memory):
         """
         Generate comprehensive summaries for all candidates in memory across their evaluated tasks.
         
@@ -347,4 +347,45 @@ class DetailedSummarizer:
         
         print_color(f"Generated summaries for {len(result_blocks)} candidates.", "green")
         
-        return "\n\n".join(result_blocks) if result_blocks else "No summaries generated."
+        detailed_xml = "\n\n".join(result_blocks) if result_blocks else ""
+        return detailed_xml
+
+    def summarize(self, memory):
+        """
+        Generate a concise actionable summary for the optimizer.
+        """
+        detailed_xml = self.structured_summary(memory)
+        
+        if not detailed_xml or detailed_xml == "No candidate-task pairs found in memory.":
+            return "No summaries generated."
+            
+        # Final summarization step to condense XML into actionable insights
+        print_color("Synthesizing final recommendations from detailed summaries...", "blue")
+        
+        system_prompt = "You are an expert meta-optimizer. Your goal is to synthesize detailed performance logs into actionable guidance for parameter optimization."
+        
+        user_prompt = f"""Analyze the following detailed performance summaries of different candidate parameters:
+
+{detailed_xml}
+
+Synthesize these observations into a concise, actionable summary for the optimizer.
+Focus on:
+1. Which parameter patterns consistently succeed or fail?
+2. What specific qualities should new parameters have?
+3. What pitfalls should be avoided?
+
+Output ONLY concrete recommendations that the optimizer can use to generate better candidates."""
+
+        prompt_messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ]
+        
+        try:
+            response = self.llm(prompt_messages)
+            final_summary = response.choices[0].message.content
+            print_color("Final recommendations generated.", "green")
+            return final_summary
+        except Exception as e:
+            print_color(f"Error generating final summary: {e}", "red")
+            return detailed_xml  # Fallback to detailed XML if final step fails
