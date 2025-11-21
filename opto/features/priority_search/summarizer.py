@@ -366,15 +366,15 @@ class DetailedSummarizer:
         
         user_prompt = f"""Analyze the following detailed performance summaries of different candidate parameters:
 
-{detailed_xml}
+        {detailed_xml}
 
-Synthesize these observations into a concise, actionable summary for the optimizer.
-Focus on:
-1. Which parameter patterns consistently succeed or fail?
-2. What specific qualities should new parameters have?
-3. What pitfalls should be avoided?
+        Synthesize these observations into a concise, actionable summary for the optimizer.
+        Focus on:
+        1. Which parameter patterns consistently succeed or fail?
+        2. What specific qualities should new parameters have?
+        3. What pitfalls should be avoided?
 
-Output ONLY concrete recommendations that the optimizer can use to generate better candidates."""
+        Output ONLY concrete recommendations that the optimizer can use to generate better candidates."""
 
         prompt_messages = [
             {"role": "system", "content": system_prompt},
