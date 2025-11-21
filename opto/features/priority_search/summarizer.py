@@ -396,7 +396,7 @@ class DetailedSummarizer:
             content = response.choices[0].message.content
 
             # for debugging, print the content
-            print_color(f"Summarize response: {content}", "blue")
+            # print_color(f"Summarize response: {content}", "blue")
             
             # Extract summary using regex
             summary_match = re.search(r'<summary>(.*?)</summary>', content, re.DOTALL)
