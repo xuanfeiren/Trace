@@ -364,17 +364,27 @@ class DetailedSummarizer:
         
         system_prompt = "You are an expert meta-optimizer. Your goal is to synthesize detailed performance logs into actionable guidance for parameter optimization."
         
-        user_prompt = f"""Analyze the following detailed performance summaries of different candidate parameters:
+        user_prompt = f"""Analyze the following detailed performance summaries of different candidate parameters.
+
+        The data below contains structured XML entries where each <candidate> block represents a different parameter configuration tested on multiple tasks. Each candidate includes:
+        - <parameters>: The specific parameter values that were used
+        - <task_X>: Performance analysis for task X, containing:
+        - <summary>: Description of the candidate's behavior and strategies on this task
+        - <insights>: Specific success patterns and failure modes observed
+
+        Here is the detailed analysis:
 
         {detailed_xml}
 
-        Synthesize these observations into a concise, actionable summary for the optimizer.
-        Focus on:
-        1. Which parameter patterns consistently succeed or fail?
-        2. What specific qualities should new parameters have?
-        3. What pitfalls should be avoided?
+        Important: The detailed XML contains many parameters with their summaries. There may be common success or failure patterns across multiple candidates. Your goal is to identify these common patterns and synthesize them into actionable guidance that will be fed into the optimizer to generate better parameters.
 
-        Output ONLY concrete recommendations that the optimizer can use to generate better candidates."""
+        Provide your response in XML format:
+        <reasoning>
+        Identify key success/failure patterns across candidates and tasks. Explain what works, what fails, and why.
+        </reasoning>
+        <summary>
+        Concrete recommendations for the optimizer: what parameter qualities to pursue, what patterns to avoid, and specific guidance for generating improved candidates. This will be used directly as optimizer context.
+        </summary>"""
 
         prompt_messages = [
             {"role": "system", "content": system_prompt},
@@ -383,9 +393,21 @@ class DetailedSummarizer:
         
         try:
             response = self.llm(prompt_messages)
-            final_summary = response.choices[0].message.content
-            print_color("Final recommendations generated.", "green")
-            return final_summary
+            content = response.choices[0].message.content
+
+            # for debugging, print the content
+            print_color(f"Summarize response: {content}", "blue")
+            
+            # Extract summary using regex
+            summary_match = re.search(r'<summary>(.*?)</summary>', content, re.DOTALL)
+            
+            if summary_match:
+                final_summary = summary_match.group(1).strip()
+                return final_summary
+            else:
+                print_color("Could not parse summary from response, returning full content", "yellow")
+                return content
+                
         except Exception as e:
             print_color(f"Error generating final summary: {e}", "red")
             return detailed_xml  # Fallback to detailed XML if final step fails
