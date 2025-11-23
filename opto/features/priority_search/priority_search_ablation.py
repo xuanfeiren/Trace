@@ -10,7 +10,7 @@ from opto.trainer.utils import async_run, safe_mean
 from opto.trainer.algorithms.basic_algorithms import batchify
 from opto.features.priority_search.search_template_ablation import SearchTemplate, Samples, BatchRollout, save_train_config
 from opto.features.priority_search.utils import set_module_parameters, remap_update_dict, create_module_from_update_dict, is_module_copy, deepcopy_module
-from opto.features.priority_search.regressor import EnsembleLogisticRegressor
+from opto.features.priority_search.regressor import EnsembleLogisticRegressor, LogisticRegressor, LinearRegressor, LinearUCBRegressor, LLMRegressor
 from opto.optimizers.utils import print_color
 
 class ModuleCandidate:
@@ -419,9 +419,11 @@ class PrioritySearch(SearchTemplate):
         self.score_function = score_function
         self.decouple_optimizers = decouple_optimizers
 
-        self.regressor = EnsembleLogisticRegressor(
-            embedding_model="gemini/text-embedding-004", num_threads=20, learning_rate=0.001, regularization_strength=1, max_iterations=20000, tolerance=5e-3, gradient_tolerance=5e-3, linear_dim=None, rich_text=True, num_regressors=5, verbose=True
-        )
+        self.regressor = EnsembleLogisticRegressor()
+        self.logistic_regressor = LogisticRegressor()
+        self.linear_regressor = LinearRegressor()
+        self.linear_ucb_regressor = LinearUCBRegressor()
+        self.llm_regressor = LLMRegressor()
 
         # Validate and set score range for UCB
         if score_range is None:
@@ -491,6 +493,13 @@ class PrioritySearch(SearchTemplate):
             self.memory.push(self.max_score, ModuleCandidate(self.agent,depth=1, optimizer=self.optimizer))  # Push the base agent as the first candidate (This gives the initialization of the priority queue)
         
         self.regressor.update(self.memory.memory)
+
+        # for ablation, update for all regressors
+        self.logistic_regressor.update(self.memory.memory)
+        self.linear_regressor.update(self.memory.memory)
+        self.linear_ucb_regressor.update(self.memory.memory)
+        self.llm_regressor.update(self.memory.memory)
+
         self.regressor.predict_scores(self.memory.memory)
 
         # Log information about the update
@@ -1160,13 +1169,39 @@ class EpsilonNetPS(PrioritySearch):
                 summary = self.summarizer.summarize(self.memory.memory+exploration_memory)
                 print_color(f"Summary: {summary}", "green")
                 self.context = f"Concrete recommendations for generating better agent parameters based on successful patterns observed in the trajectories: {summary}"
-            except RuntimeError as e:
+            except Exception as e:
                 print_color(f"Error: {e}", "red")
                 print_color(f"Using fallback context: {self.context}", "red")
             # Set the context for the optimizer.
             for candidate in self._exploration_candidates:
                 candidate.optimizer.set_context(self.context)
         return super().propose(samples, verbose, **kwargs)
+
+    def _get_best_candidate_by_regressor(self, regressor_name: str) -> Tuple[float, ModuleCandidate]:
+        """ Get the best candidate by the regressor. regressor_name can be 'logistic', 'linear', 'linear_ucb', or 'llm'.
+        """
+        if regressor_name == 'logistic':
+            predicted_scores = self.logistic_regressor.predict_scores(self.memory.memory)
+            # the predicted scores have the same sequence as the memory.
+            neg_priority, best_candidate = self.memory.memory[np.argmax(predicted_scores)]
+            return -neg_priority, best_candidate
+        elif regressor_name == 'linear':
+            predicted_scores = self.linear_regressor.predict_scores(self.memory.memory)
+            # the predicted scores have the same sequence as the memory.
+            neg_priority, best_candidate = self.memory.memory[np.argmax(predicted_scores)]
+            return -neg_priority, best_candidate
+        elif regressor_name == 'linear_ucb':
+            predicted_scores = self.linear_ucb_regressor.predict_scores(self.memory.memory)
+            # the predicted scores have the same sequence as the memory.
+            neg_priority, best_candidate = self.memory.memory[np.argmax(predicted_scores)]
+            return -neg_priority, best_candidate
+        elif regressor_name == 'llm':
+            predicted_scores = self.llm_regressor.predict_scores(self.memory.memory)
+            # the predicted scores have the same sequence as the memory.
+            neg_priority, best_candidate = self.memory.memory[np.argmax(predicted_scores)]
+            return -neg_priority, best_candidate
+        else:
+            raise ValueError(f"Invalid regressor name: {regressor_name}")
 
     def exploit(self, verbose: bool = False, **kwargs) -> Tuple[ModuleCandidate, Dict[str, Any]]:
         """ Hack to use the LLM selector to select the best candidate.
@@ -1176,16 +1211,19 @@ class EpsilonNetPS(PrioritySearch):
             raise ValueError("The priority queue is empty. Cannot exploit.")
         best_candidates = {}
         priorities = {}
-        
-        try:
-            priorities['empirical_mean'], best_candidates['empirical_mean'] = self.summarizer.select_parameter(self.memory.memory)
 
-            print_color(f"Selected candidate using the LLM selector from the summarizer. In this experiment the log is still stored as the empirical mean priority.", "green")
+        try:
+            priorities['summarizer_selector'], best_candidates['summarizer_selector'] = self.summarizer.select_parameter(self.memory.memory)
         except Exception as e:
             print_color(f"Error: {e}", "red")
-            print_color(f"Using fallback to get the best candidate by the empirical mean priority.", "red")
-            priorities['empirical_mean'], best_candidates['empirical_mean'] = self._get_best_candidate_by_priority(self.compute_exploitation_priority_empirical_mean, 'empirical_mean')
+            print_color(f"Error when using the summarizer selector.", "red")
+            
+        priorities['empirical_mean'], best_candidates['empirical_mean'] = self._get_best_candidate_by_priority(self.compute_exploitation_priority_empirical_mean, 'empirical_mean')
         
+        priorities['logistic'], best_candidates['logistic'] = self._get_best_candidate_by_regressor('logistic')
+        priorities['linear'], best_candidates['linear'] = self._get_best_candidate_by_regressor('linear')
+        priorities['linear_ucb'], best_candidates['linear_ucb'] = self._get_best_candidate_by_regressor('linear_ucb')
+        priorities['llm'], best_candidates['llm'] = self._get_best_candidate_by_regressor('llm')
         
         info_dict = {}
         # Empirical mean version

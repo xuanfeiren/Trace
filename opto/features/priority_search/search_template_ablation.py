@@ -339,12 +339,8 @@ class SearchTemplate(Trainer):
         return test_score
 
     def test(self, test_dataset, guide):
-        """Test for 4 different versions of the best candidates.
+        """Test all versions of the best candidates in self._best_candidates.
         self._best_candidates is a dictionary of the best candidates for each priority criterion.
-        - empirical_mean
-        - ucb
-        - lcb
-        - mean_prediction
        
         Optimization: If multiple versions have the same candidate (same update_dict),
         reuse the test score instead of re-evaluating.
@@ -355,31 +351,26 @@ class SearchTemplate(Trainer):
         # Cache to avoid duplicate testing: compare update_dict to identify duplicates
         tested_update_dicts = []  # List of (update_dict, test_score) tuples
         
-        # Test all 4 versions
-        # list_to_test = ['empirical_mean', 'ucb', 'lcb', 'mean_prediction']
-        # only test empirical_mean
-        list_to_test = ['empirical_mean']
+        # Adaptively test all candidates in self._best_candidates
+        list_to_test = list(self._best_candidates.keys())
         for version_name in list_to_test:
-            if version_name in self._best_candidates:
-                candidate = self._best_candidates[version_name]
-                
-                # Check if we've already tested a candidate with the same update_dict
-                test_score = None
-                for tested_dict, cached_score in tested_update_dicts:
-                    if tested_dict == candidate.update_dict:
-                        # Reuse the previously computed test score
-                        test_score = cached_score
-                        print(f"Reusing test score for {version_name} (duplicate update_dict)")
-                        break
-                
-                if test_score is None:
-                    # Test this candidate for the first time
-                    test_score = self._test_candidate_version(candidate, version_name, test_dataset, guide)
-                    tested_update_dicts.append((candidate.update_dict, test_score))
-                
-                test_scores[f'test_score_{version_name}'] = test_score
-            else:
-                raise ValueError(f"{version_name} candidate not found in self._best_candidates.")
+            candidate = self._best_candidates[version_name]
+            
+            # Check if we've already tested a candidate with the same update_dict
+            test_score = None
+            for tested_dict, cached_score in tested_update_dicts:
+                if tested_dict == candidate.update_dict:
+                    # Reuse the previously computed test score
+                    test_score = cached_score
+                    print(f"Reusing test score for {version_name} (duplicate update_dict)")
+                    break
+            
+            if test_score is None:
+                # Test this candidate for the first time
+                test_score = self._test_candidate_version(candidate, version_name, test_dataset, guide)
+                tested_update_dicts.append((candidate.update_dict, test_score))
+            
+            test_scores[f'test_score_{version_name}'] = test_score
         
         return test_scores
 
