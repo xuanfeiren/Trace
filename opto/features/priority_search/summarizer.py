@@ -161,12 +161,15 @@ class Summarizer:
                 print_color(f"Response: {response}", "blue")
                 return "Unable to extract summary from LLM response."
 from opto.trainer.utils import async_run
+
 class DetailedSummarizer:
     """A class which use LLM to summarize the trajectories of the memory. It should be able to learn the patterns of the trajectories. Generate a summary to guide the optimizer to generate better candidates.
     This version generates summaries for each (candidate, task) pair. Then it will be combined to a context, or call LLM for a final summary.
     """
     def __init__(self, model_name: str = "gemini/gemini-2.0-flash"):
         self.llm = LLM(model=model_name)
+        self.long_summary = None
+
     def subsummarize(self, candidate, x):
         """
         Generate a summary for a specific (candidate, task) pair across multiple trajectories.
@@ -348,6 +351,8 @@ class DetailedSummarizer:
         print_color(f"Generated summaries for {len(result_blocks)} candidates.", "green")
         
         detailed_xml = "\n\n".join(result_blocks) if result_blocks else ""
+        # Store the structured summary for later use
+        self.long_summary = detailed_xml
         return detailed_xml
 
     def summarize(self, memory):
@@ -391,23 +396,74 @@ class DetailedSummarizer:
             {"role": "user", "content": user_prompt}
         ]
         
-        try:
-            response = self.llm(prompt_messages)
-            content = response.choices[0].message.content
+        response = self.llm(prompt_messages)
+        content = response.choices[0].message.content
+        
+        # Extract summary using regex
+        summary_match = re.search(r'<summary>(.*?)</summary>', content, re.DOTALL)
+        
+        final_summary = summary_match.group(1).strip()
+        return final_summary
+    
+    def select_parameter(self,memory):
+        """
+        This is to improve the test-time performance of the search algorithm. We store the structured summary in the summarizer class. When we need to select a parameter to test, we can select one from the current memory, based on the information provided by the structured summary.
+        Args:
+            memory: The memory containing the candidates to select from.
+        Returns:
+            priority, ModuleCandidate: The priority and the selected candidate.
+        """
+        # construct a prompt contain the candidates in the memory with their parameters.
+        candidates_prompt = "<candidates>\n"
+        for idx, (_, candidate) in enumerate(memory):
+            candidates_prompt += f"<candidate id=\"{idx}\">{candidate.update_dict.values()}</candidate>\n"
+        candidates_prompt += "</candidates>"
+        
+        
+        system_prompt = "You are an expert meta-optimizer responsible for selecting the most promising parameter candidate for testing based on historical performance patterns."
+        
+        user_prompt = f"""
+        ## Task
+        Select the candidate most likely to succeed based on historical performance patterns.
 
-            # for debugging, print the content
-            # print_color(f"Summarize response: {content}", "blue")
-            
-            # Extract summary using regex
-            summary_match = re.search(r'<summary>(.*?)</summary>', content, re.DOTALL)
-            
-            if summary_match:
-                final_summary = summary_match.group(1).strip()
-                return final_summary
-            else:
-                print_color("Could not parse summary from response, returning full content", "yellow")
-                return content
-                
-        except Exception as e:
-            print_color(f"Error generating final summary: {e}", "red")
-            return detailed_xml  # Fallback to detailed XML if final step fails
+        ## Historical Performance Analysis
+        {self.long_summary}
+
+        ## Current Candidates to Choose From
+        {candidates_prompt}
+
+        ## Selection Criteria
+        Based on the historical performance patterns above, consider:
+        1. Which candidate parameters align best with successful patterns identified in the historical analysis?
+        2. Which candidate most effectively avoids known failure patterns?
+
+        ## Output Format
+        Provide your response in the following XML format:
+        <reasoning>
+        Explain which historical patterns you're considering and why this candidate is most promising.
+        </reasoning>
+        <selection>
+        <candidate_id>ID_OF_SELECTED_CANDIDATE</candidate_id>
+        </selection>"""
+
+        prompt_messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ]
+        
+        response = self.llm(prompt_messages)
+        content = response.choices[0].message.content
+        print_color(f"Select parameter response: {content}", "blue")
+        # Extract candidate_id using regex
+        candidate_id_match = re.search(r'<candidate_id>(\d+)</candidate_id>', content, re.DOTALL)
+        
+        
+        selected_idx = int(candidate_id_match.group(1))
+        
+        
+        neg_priority, selected_candidate = memory[selected_idx]
+        print_color(f"Selected candidate {selected_idx}", "green")
+        
+        # Return negative of neg_priority to get the original priority
+        return -neg_priority, selected_candidate
+        

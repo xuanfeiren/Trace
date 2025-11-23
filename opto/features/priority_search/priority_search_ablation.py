@@ -861,17 +861,17 @@ class PrioritySearch(SearchTemplate):
         priorities['empirical_mean'], best_candidates['empirical_mean'] = self._get_best_candidate_by_priority(
             self.compute_exploitation_priority_empirical_mean, 'empirical_mean')
         
-        # ucb
-        priorities['ucb'], best_candidates['ucb'] = self._get_best_candidate_by_priority(
-            self.compute_exploitation_priority_ucb, 'ucb')
+        # # ucb
+        # priorities['ucb'], best_candidates['ucb'] = self._get_best_candidate_by_priority(
+        #     self.compute_exploitation_priority_ucb, 'ucb')
         
-        # lcb
-        priorities['lcb'], best_candidates['lcb'] = self._get_best_candidate_by_priority(
-            self.compute_exploitation_priority_lcb, 'lcb')
+        # # lcb
+        # priorities['lcb'], best_candidates['lcb'] = self._get_best_candidate_by_priority(
+        #     self.compute_exploitation_priority_lcb, 'lcb')
         
-        # mean prediction
-        priorities['mean_prediction'], best_candidates['mean_prediction'] = self._get_best_candidate_by_priority(
-            self.compute_exploitation_priority_mean_prediction, 'mean_prediction')
+        # # mean prediction
+        # priorities['mean_prediction'], best_candidates['mean_prediction'] = self._get_best_candidate_by_priority(
+        #     self.compute_exploitation_priority_mean_prediction, 'mean_prediction')
 
         # Log information for all 4 versions (16 items total)
         info_dict = {}
@@ -881,24 +881,25 @@ class PrioritySearch(SearchTemplate):
         info_dict['best_candidate_depth_empirical_mean'] = best_candidates['empirical_mean'].depth
         info_dict['best_candidate_mean_score_empirical_mean'] = best_candidates['empirical_mean'].mean_score()
         info_dict['best_candidate_num_rollouts_empirical_mean'] = best_candidates['empirical_mean'].num_rollouts
+
         
-        # UCB version
-        info_dict['best_candidate_priority_ucb'] = priorities['ucb']
-        info_dict['best_candidate_depth_ucb'] = best_candidates['ucb'].depth
-        info_dict['best_candidate_mean_score_ucb'] = best_candidates['ucb'].mean_score()
-        info_dict['best_candidate_num_rollouts_ucb'] = best_candidates['ucb'].num_rollouts
+        # # UCB version
+        # info_dict['best_candidate_priority_ucb'] = priorities['ucb']
+        # info_dict['best_candidate_depth_ucb'] = best_candidates['ucb'].depth
+        # info_dict['best_candidate_mean_score_ucb'] = best_candidates['ucb'].mean_score()
+        # info_dict['best_candidate_num_rollouts_ucb'] = best_candidates['ucb'].num_rollouts
         
-        # LCB version
-        info_dict['best_candidate_priority_lcb'] = priorities['lcb']
-        info_dict['best_candidate_depth_lcb'] = best_candidates['lcb'].depth
-        info_dict['best_candidate_mean_score_lcb'] = best_candidates['lcb'].mean_score()
-        info_dict['best_candidate_num_rollouts_lcb'] = best_candidates['lcb'].num_rollouts
+        # # LCB version
+        # info_dict['best_candidate_priority_lcb'] = priorities['lcb']
+        # info_dict['best_candidate_depth_lcb'] = best_candidates['lcb'].depth
+        # info_dict['best_candidate_mean_score_lcb'] = best_candidates['lcb'].mean_score()
+        # info_dict['best_candidate_num_rollouts_lcb'] = best_candidates['lcb'].num_rollouts
         
-        # Mean prediction version
-        info_dict['best_candidate_priority_mean_prediction'] = priorities['mean_prediction']
-        info_dict['best_candidate_depth_mean_prediction'] = best_candidates['mean_prediction'].depth
-        info_dict['best_candidate_mean_score_mean_prediction'] = best_candidates['mean_prediction'].mean_score()
-        info_dict['best_candidate_num_rollouts_mean_prediction'] = best_candidates['mean_prediction'].num_rollouts
+        # # Mean prediction version
+        # info_dict['best_candidate_priority_mean_prediction'] = priorities['mean_prediction']
+        # info_dict['best_candidate_depth_mean_prediction'] = best_candidates['mean_prediction'].depth
+        # info_dict['best_candidate_mean_score_mean_prediction'] = best_candidates['mean_prediction'].mean_score()
+        # info_dict['best_candidate_num_rollouts_mean_prediction'] = best_candidates['mean_prediction'].num_rollouts
         
         return best_candidates, priorities, info_dict
 
@@ -1166,6 +1167,34 @@ class EpsilonNetPS(PrioritySearch):
             for candidate in self._exploration_candidates:
                 candidate.optimizer.set_context(self.context)
         return super().propose(samples, verbose, **kwargs)
+
+    def exploit(self, verbose: bool = False, **kwargs) -> Tuple[ModuleCandidate, Dict[str, Any]]:
+        """ Hack to use the LLM selector to select the best candidate.
+        """
+        print("--- Exploiting the best candidate...") if verbose else None
+        if not self.memory:
+            raise ValueError("The priority queue is empty. Cannot exploit.")
+        best_candidates = {}
+        priorities = {}
+        
+        try:
+            priorities['empirical_mean'], best_candidates['empirical_mean'] = self.summarizer.select_parameter(self.memory.memory)
+
+            print_color(f"Selected candidate using the LLM selector from the summarizer. In this experiment the log is still stored as the empirical mean priority.", "green")
+        except Exception as e:
+            print_color(f"Error: {e}", "red")
+            print_color(f"Using fallback to get the best candidate by the empirical mean priority.", "red")
+            priorities['empirical_mean'], best_candidates['empirical_mean'] = self._get_best_candidate_by_priority(self.compute_exploitation_priority_empirical_mean, 'empirical_mean')
+        
+        
+        info_dict = {}
+        # Empirical mean version
+        info_dict['best_candidate_priority_empirical_mean'] = priorities['empirical_mean']
+        info_dict['best_candidate_depth_empirical_mean'] = best_candidates['empirical_mean'].depth
+        info_dict['best_candidate_mean_score_empirical_mean'] = best_candidates['empirical_mean'].mean_score()
+        info_dict['best_candidate_num_rollouts_empirical_mean'] = best_candidates['empirical_mean'].num_rollouts
+        
+        return best_candidates, priorities, info_dict
 
 class ParetobasedPS(PrioritySearch):
     """
