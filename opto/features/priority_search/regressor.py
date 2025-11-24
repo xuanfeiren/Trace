@@ -1422,11 +1422,16 @@ class LLMRegressor:
         for idx in range(len(shuffled_prediction_batch)):
             candidate_key = str(idx)
             original_idx = shuffled_to_original_idx[idx]
-
-            assert candidate_key in score_estimates, f"Candidate key {candidate_key} not in score_estimates"
+            
+            try:
+                assert candidate_key in score_estimates, f"Candidate key {candidate_key} not in score_estimates"
+                predicted_score = score_estimates[candidate_key]
+            except AssertionError:
+                print_color(f"WARNING: Candidate key {candidate_key} not in score_estimates. Using default score", "red")
+                predicted_score = default_scores[original_idx]
             # assert score_estimates[candidate_key] is not None, f"Predicted score for candidate {candidate_key} is None"
             # predicted_score could be None
-            predicted_score = score_estimates[candidate_key]
+            
             
             
             predicted_scores.append((original_idx, predicted_score))
