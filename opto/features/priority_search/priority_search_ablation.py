@@ -1074,8 +1074,8 @@ def calculate_distance_to_memory(memory, new_candidate):
                 min_distance = distance
         return min_distance
 
-# from opto.features.priority_search.summarizer import Summarizer
-from opto.features.priority_search.summarizer import  DetailedSummarizer as Summarizer
+from opto.features.priority_search.summarizer import Summarizer
+# from opto.features.priority_search.summarizer import  DetailedSummarizer as Summarizer
 class EpsilonNetPS(PrioritySearch):
     """
     A subclass of PrioritySearch, which keeps an epsilon-net as the memory. Reject new candidates that are in the epsilon-net of the memory.
@@ -1203,36 +1203,36 @@ class EpsilonNetPS(PrioritySearch):
         else:
             raise ValueError(f"Invalid regressor name: {regressor_name}")
 
-    def exploit(self, verbose: bool = False, **kwargs) -> Tuple[ModuleCandidate, Dict[str, Any]]:
-        """ Hack to use the LLM selector to select the best candidate.
-        """
-        print("--- Exploiting the best candidate...") if verbose else None
-        if not self.memory:
-            raise ValueError("The priority queue is empty. Cannot exploit.")
-        best_candidates = {}
-        priorities = {}
+    # def exploit(self, verbose: bool = False, **kwargs) -> Tuple[ModuleCandidate, Dict[str, Any]]:
+    #     """ Hack to use the LLM selector to select the best candidate.
+    #     """
+    #     print("--- Exploiting the best candidate...") if verbose else None
+    #     if not self.memory:
+    #         raise ValueError("The priority queue is empty. Cannot exploit.")
+    #     best_candidates = {}
+    #     priorities = {}
 
-        try:
-            priorities['summarizer_selector'], best_candidates['summarizer_selector'] = self.summarizer.select_parameter(self.memory.memory)
-        except Exception as e:
-            print_color(f"Error: {e}", "red")
-            print_color(f"Error when using the summarizer selector.", "red")
+    #     try:
+    #         priorities['summarizer_selector'], best_candidates['summarizer_selector'] = self.summarizer.select_parameter(self.memory.memory)
+    #     except Exception as e:
+    #         print_color(f"Error: {e}", "red")
+    #         print_color(f"Error when using the summarizer selector.", "red")
             
-        priorities['empirical_mean'], best_candidates['empirical_mean'] = self._get_best_candidate_by_priority(self.compute_exploitation_priority_empirical_mean, 'empirical_mean')
+    #     priorities['empirical_mean'], best_candidates['empirical_mean'] = self._get_best_candidate_by_priority(self.compute_exploitation_priority_empirical_mean, 'empirical_mean')
         
-        priorities['logistic'], best_candidates['logistic'] = self._get_best_candidate_by_regressor('logistic')
-        priorities['linear'], best_candidates['linear'] = self._get_best_candidate_by_regressor('linear')
-        priorities['linear_ucb'], best_candidates['linear_ucb'] = self._get_best_candidate_by_regressor('linear_ucb')
-        priorities['llm'], best_candidates['llm'] = self._get_best_candidate_by_regressor('llm')
+    #     priorities['logistic'], best_candidates['logistic'] = self._get_best_candidate_by_regressor('logistic')
+    #     priorities['linear'], best_candidates['linear'] = self._get_best_candidate_by_regressor('linear')
+    #     priorities['linear_ucb'], best_candidates['linear_ucb'] = self._get_best_candidate_by_regressor('linear_ucb')
+    #     priorities['llm'], best_candidates['llm'] = self._get_best_candidate_by_regressor('llm')
         
-        info_dict = {}
-        # Empirical mean version
-        info_dict['best_candidate_priority_empirical_mean'] = priorities['empirical_mean']
-        info_dict['best_candidate_depth_empirical_mean'] = best_candidates['empirical_mean'].depth
-        info_dict['best_candidate_mean_score_empirical_mean'] = best_candidates['empirical_mean'].mean_score()
-        info_dict['best_candidate_num_rollouts_empirical_mean'] = best_candidates['empirical_mean'].num_rollouts
+    #     info_dict = {}
+    #     # Empirical mean version
+    #     info_dict['best_candidate_priority_empirical_mean'] = priorities['empirical_mean']
+    #     info_dict['best_candidate_depth_empirical_mean'] = best_candidates['empirical_mean'].depth
+    #     info_dict['best_candidate_mean_score_empirical_mean'] = best_candidates['empirical_mean'].mean_score()
+    #     info_dict['best_candidate_num_rollouts_empirical_mean'] = best_candidates['empirical_mean'].num_rollouts
         
-        return best_candidates, priorities, info_dict
+    #     return best_candidates, priorities, info_dict
 
 class ParetobasedPS(PrioritySearch):
     """
