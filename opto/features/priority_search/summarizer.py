@@ -4,7 +4,9 @@ import json
 import random
 import re
 
-def get_trajectory_from_output(output):
+DOMAIN = "veribench" # or "tau-bench"
+
+def get_tau_bench_trajectory_from_output(output):
     """Get trajectory from the agent's output."""
     reward, messages = output
     conversation_parts = []
@@ -43,15 +45,82 @@ def get_trajectory_from_output(output):
         conversation_parts.append(msg_str)
     return '\n'.join(conversation_parts)
 
-def get_trajectory_of_one_rollout(rollout):
+def get_tau_bench_trajectory_of_one_rollout(rollout):
     """Get trajectories of one rollout."""
     target = rollout['target']
     # reward, messages = target
-    conversation_str = get_trajectory_from_output(target)
+    conversation_str = get_tau_bench_trajectory_from_output(target)
     # print two versions of the conversation.
     # print_color(f"Conversation: {conversation_str}", "green")
     # breakpoint()
     return conversation_str
+
+def get_veribench_trajectory_of_one_rollout(rollout):
+    """
+    Convert a rollout into a structured markdown trajectory for Veribench optimization.
+
+    Parameters
+    ----------
+    rollout : dict
+        A rollout dictionary containing:
+        - 'module': trace.Module - the agent module with parameters to optimize
+        - 'x': Any - the input (Python code to be translated)
+        - 'info': Any - additional information about the input
+        - 'target': Any - the generated Lean 4 code output
+        - 'score': float - evaluation score of the output
+        - 'feedback': Any - detailed feedback from the guide
+
+    Returns
+    -------
+    str
+        A markdown-formatted trajectory string containing:
+        - Task description
+        - System prompt (agent's optimizable parameters)
+        - User prompt (input code)
+        - Agent output (generated Lean 4 code)
+        - Evaluation results (score and feedback)
+    """
+    # Extract parameters as a readable dictionary
+    parameters = rollout['module'].parameters()
+    parameters_dict = {p.py_name: p.data for p in parameters}
+    
+    # Extract rollout components
+    user_prompt = rollout['x']
+    lean_output = rollout['target']  # target already has .data extracted
+    score = rollout['score']
+    feedback = rollout['feedback']
+    
+    # Construct structured markdown trajectory
+    trajectory = f"""## Task
+        Translate Python program into verified Lean 4 code.
+
+        ## System Prompt (Optimizable Parameters)
+        {parameters_dict}
+
+        ## User Prompt (Input)
+        {user_prompt}
+
+        ## Agent Output (Lean 4 Code)
+        {lean_output}
+
+        ## Evaluation
+        **Score:** {score}
+
+        **Feedback:**
+        {feedback}
+        """
+    # for debugging
+    print_color(f"Veribench trajectory: {trajectory}", "blue")
+    breakpoint()
+    return trajectory
+
+
+if DOMAIN == "tau-bench":
+    get_trajectory_of_one_rollout = get_tau_bench_trajectory_of_one_rollout
+elif DOMAIN == "veribench":
+    get_trajectory_of_one_rollout = get_veribench_trajectory_of_one_rollout
+else:
+    raise ValueError(f"Invalid domain: {DOMAIN}")
 
 class Summarizer:
     """A class which use LLM to summarize the trajectories of the memory. It should be able to learn the patterns of the trajectories. Generate a summary to guide the optimizer to generate better candidates.
