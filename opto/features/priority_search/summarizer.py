@@ -110,8 +110,8 @@ def get_veribench_trajectory_of_one_rollout(rollout):
         {feedback}
         """
     # for debugging
-    print_color(f"Veribench trajectory: {trajectory}", "blue")
-    breakpoint()
+    # print_color(f"Veribench trajectory: {trajectory}", "blue")
+    # breakpoint()
     return trajectory
 
 
