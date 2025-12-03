@@ -123,7 +123,7 @@ class RegressorTemplate:
             rich_text_parts = []
             
             # Add problem definition
-            rich_text_parts.append(f"Problem Definition: {DOMAIN_CONTEXT.strip()}")
+            rich_text_parts.append(f"Problem Definition: {DOMAIN_CONTEXT_VERIBENCH.strip()}")
             rich_text_parts.append("")  # Empty line for separation
             
             # Add parameter configuration
@@ -995,7 +995,7 @@ class LinearUCBRegressor(LinearRegressor):
             # candidate.ucb_score = float(ucb_scores[i])
             
         return ucb_scores
-DOMAIN_CONTEXT = """## Problem Context and Domain Knowledge
+DOMAIN_CONTEXT_TAUBENCH = """## Problem Context and Domain Knowledge
                     You are a score prediction model for tau-bench agent configurations. You are optimizing agents for tool-agent-user interaction in real-world domains (airline and retail environments).
 
                     **Core Optimization Task:**
@@ -1021,7 +1021,15 @@ DOMAIN_CONTEXT = """## Problem Context and Domain Knowledge
                     **Optimization Strategy:**
                     Better parameter configurations lead to higher task success rates. The goal is to find parameter settings that maximize agent performance across diverse scenarios in the target domain.
                  """
+DOMAIN_CONTEXT_VERIBENCH = """## Problem Context
+                    You are a score prediction model for Veribench agent configurations.
 
+                    **Task:** Optimize a Lean 4 code generation agent that translates Python programs into verified Lean 4 code.
+                    
+                    **Parameter:** System prompt containing code generation patterns and examples.
+                    
+                    **Metric:** Compilation success rate of generated Lean 4 code.
+                 """
 from opto.utils.llm import LLM
 import copy
 import random
