@@ -1081,7 +1081,7 @@ class EpsilonNetPS(PrioritySearch):
     A subclass of PrioritySearch, which keeps an epsilon-net as the memory. Reject new candidates that are in the epsilon-net of the memory.
     """
     def __init__(self,
-                 epsilon: float = 0,
+                 epsilon: float = 0.1,
                  use_summarizer: bool = False,
                  *args,
                  **kwargs):
