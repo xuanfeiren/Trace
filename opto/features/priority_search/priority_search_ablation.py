@@ -1141,15 +1141,16 @@ class EpsilonNetPS(PrioritySearch):
     
     def compress_candidate_memory(self, candidate: ModuleCandidate) -> ModuleCandidate:
         """ Keep target of each rollout for long-term memory. """
-        def _process_rollout(rollout):
-            # rollout is a dict containing module, x, info, target, score, feedback
-            for k in rollout:
-                if k not in ['x', 'score', 'target']:
-                    rollout[k] = None
-        candidate = copy.copy(candidate)  # make a copy of the candidate to avoid modifying the original one
-        candidate.rollouts = copy.deepcopy(candidate.rollouts)  # deep copy the rollouts to avoid modifying the original one
-        for rollout in candidate.rollouts:
-            _process_rollout(rollout)
+        # def _process_rollout(rollout):
+        #     # rollout is a dict containing module, x, info, target, score, feedback
+        #     for k in rollout:
+        #         if k not in ['x', 'score', 'target']:
+        #             rollout[k] = None
+        # candidate = copy.copy(candidate)  # make a copy of the candidate to avoid modifying the original one
+        # candidate.rollouts = copy.deepcopy(candidate.rollouts)  # deep copy the rollouts to avoid modifying the original one
+        # for rollout in candidate.rollouts:
+        #     _process_rollout(rollout)
+        # For the summarizer usage, we keep the entire rollout.
         return candidate
     
     def propose(self,
