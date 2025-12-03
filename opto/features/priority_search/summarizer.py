@@ -53,7 +53,6 @@ def get_tau_bench_trajectory_of_one_rollout(rollout):
     conversation_str = get_tau_bench_trajectory_from_output(target)
     # print two versions of the conversation.
     # print_color(f"Conversation: {conversation_str}", "green")
-    # breakpoint()
     return conversation_str
 
 def get_veribench_trajectory_of_one_rollout(rollout):
@@ -218,8 +217,6 @@ class Summarizer:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
         ]
-        print_color(f"Prompt messages: {prompt_messages}", "blue")
-        breakpoint()
         response_format = {"type": "json_object"}
         # print_color(f"History trajectories: {history_trajectories}", "blue")
         # print_color(f"Prompt messages: {prompt_messages}", "blue")
@@ -227,8 +224,6 @@ class Summarizer:
 
         response = response.choices[0].message.content
         # print_color(f"Response: {response}", "yellow")
-        print_color(f"Response: {response}", "blue")
-        breakpoint()
         # Extract summary field directly using regex, avoiding JSON parsing issues
         summary_match = re.search(r'"summary"\s*:\s*"([^"]*(?:\\.[^"]*)*)"', response, re.DOTALL)
         
