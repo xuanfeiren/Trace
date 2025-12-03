@@ -5,6 +5,7 @@ import random
 import re
 
 DOMAIN = "veribench" # or "tau-bench"
+from system_prompts import SYSTEM_PROMPT, EXAMPLES
 
 def get_tau_bench_trajectory_from_output(output):
     """Get trajectory from the agent's output."""
@@ -59,26 +60,27 @@ def get_veribench_trajectory_of_one_rollout(rollout):
     """
     Convert a rollout into a structured markdown trajectory for Veribench optimization.
 
+    The agent's system prompt structure is:
+        SYSTEM_PROMPT (fixed) + additional_instructions (trainable) + EXAMPLES (fixed)
+    
+    This function extracts the trainable `additional_instructions` parameter and formats
+    the trajectory to guide the optimizer in improving this component.
+
     Parameters
     ----------
     rollout : dict
         A rollout dictionary containing:
-        - 'module': trace.Module - the agent module with parameters to optimize
+        - 'module': trace.Module - the agent module with trainable additional_instructions
         - 'x': Any - the input (Python code to be translated)
         - 'info': Any - additional information about the input
         - 'target': Any - the generated Lean 4 code output
-        - 'score': float - evaluation score of the output
-        - 'feedback': Any - detailed feedback from the guide
+        - 'score': float - evaluation score (0 = failed, 1 = success)
+        - 'feedback': Any - detailed compilation feedback from the guide
 
     Returns
     -------
     str
-        A markdown-formatted trajectory string containing:
-        - Task description
-        - System prompt (agent's optimizable parameters)
-        - User prompt (input code)
-        - Agent output (generated Lean 4 code)
-        - Evaluation results (score and feedback)
+        A markdown-formatted trajectory string for optimizer guidance.
     """
     assert DOMAIN == "veribench", "This function is only for Veribench."
     assert rollout['module'] is not None, "rollout['module'] is None."
@@ -86,38 +88,49 @@ def get_veribench_trajectory_of_one_rollout(rollout):
     assert rollout['target'] is not None, "rollout['target'] is None."
     assert rollout['score'] is not None, "rollout['score'] is None."
     assert rollout['feedback'] is not None, "rollout['feedback'] is None."
-    # Extract parameters as a readable dictionary
+    
+    # Extract trainable parameters (additional_instructions)
     parameters = rollout['module'].parameters()
     parameters_dict = {p.py_name: p.data for p in parameters}
     
     # Extract rollout components
-    user_prompt = rollout['x']
-    lean_output = rollout['target']  # target already has .data extracted
+    python_code = rollout['x']
+    lean_output = rollout['target']
     score = rollout['score']
     feedback = rollout['feedback']
     
     # Construct structured markdown trajectory
     trajectory = f"""## Task
-        Translate Python program into verified Lean 4 code.
+Translate Python program into verified Lean 4 code.
 
-        ## System Prompt (Optimizable Parameters)
-        {parameters_dict}
+## Agent Configuration
+The system prompt is structured as: SYSTEM_PROMPT + additional_instructions + EXAMPLES
+- SYSTEM_PROMPT: Fixed base instructions for Lean 4 code generation
+- additional_instructions: **Trainable parameter** (shown below)
+- EXAMPLES: Fixed few-shot examples
 
-        ## User Prompt (Input)
-        {user_prompt}
+## SYSTEM_PROMPT (fixed)
+{SYSTEM_PROMPT}
 
-        ## Agent Output (Lean 4 Code)
-        {lean_output}
+## Trainable Parameter (additional_instructions)
+{parameters_dict}
 
-        ## Evaluation
-        **Score:** {score}
+## EXAMPLES (fixed)
+{EXAMPLES}
 
-        **Feedback:**
-        {feedback}
-        """
-    # for debugging
-    # print_color(f"Veribench trajectory: {trajectory}", "blue")
-    # breakpoint()
+## Input (Python Code)
+{python_code}
+
+## Output (Generated Lean 4 Code)
+{lean_output}
+
+## Evaluation
+**Score:** {score} (0 = compilation failed, 1 = compilation success)
+
+**Feedback:**
+{feedback}
+"""
+
     return trajectory
 
 
@@ -205,7 +218,8 @@ class Summarizer:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
         ]
-        
+        print_color(f"Prompt messages: {prompt_messages}", "blue")
+        breakpoint()
         response_format = {"type": "json_object"}
         # print_color(f"History trajectories: {history_trajectories}", "blue")
         # print_color(f"Prompt messages: {prompt_messages}", "blue")
@@ -213,7 +227,8 @@ class Summarizer:
 
         response = response.choices[0].message.content
         # print_color(f"Response: {response}", "yellow")
-        
+        print_color(f"Response: {response}", "blue")
+        breakpoint()
         # Extract summary field directly using regex, avoiding JSON parsing issues
         summary_match = re.search(r'"summary"\s*:\s*"([^"]*(?:\\.[^"]*)*)"', response, re.DOTALL)
         

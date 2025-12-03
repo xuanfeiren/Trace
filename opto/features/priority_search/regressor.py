@@ -1022,14 +1022,19 @@ DOMAIN_CONTEXT_TAUBENCH = """## Problem Context and Domain Knowledge
                     Better parameter configurations lead to higher task success rates. The goal is to find parameter settings that maximize agent performance across diverse scenarios in the target domain.
                  """
 DOMAIN_CONTEXT_VERIBENCH = """## Problem Context
-                    You are a score prediction model for Veribench agent configurations.
+You are a score prediction model for Veribench agent configurations.
 
-                    **Task:** Optimize a Lean 4 code generation agent that translates Python programs into verified Lean 4 code.
-                    
-                    **Parameter:** System prompt containing code generation patterns and examples.
-                    
-                    **Metric:** Compilation success rate of generated Lean 4 code.
-                 """
+**Task:** Optimize a Lean 4 code generation agent that translates Python programs into verified Lean 4 code.
+
+**Agent Structure:** The agent uses a system prompt composed of three parts:
+- Base system prompt (fixed)
+- Additional instructions (trainable parameter)
+- Examples (fixed)
+
+**Trainable Parameter:** `additional_instructions` - guidance text inserted between the base system prompt and examples to improve code generation quality.
+
+**Metric:** Compilation success rate of generated Lean 4 code (0 = failed, 1 = success).
+"""
 from opto.utils.llm import LLM
 import copy
 import random
