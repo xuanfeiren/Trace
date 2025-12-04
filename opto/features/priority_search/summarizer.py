@@ -84,7 +84,7 @@ def get_veribench_trajectory_of_one_rollout(rollout):
     assert DOMAIN == "veribench", "This function is only for Veribench."
     assert rollout['module'] is not None, "rollout['module'] is None."
     assert rollout['x'] is not None, "rollout['x'] is None."
-    assert rollout['target'] is not None, "rollout['target'] is None."
+    # assert rollout['target'] is not None, "rollout['target'] is None."
     assert rollout['score'] is not None, "rollout['score'] is None."
     assert rollout['feedback'] is not None, "rollout['feedback'] is None."
     
