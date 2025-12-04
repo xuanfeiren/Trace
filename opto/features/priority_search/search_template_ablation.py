@@ -199,6 +199,7 @@ class SearchTemplate(Trainer):
         train_num_samples = []  # to store the number of samples used to compute each score
         num_steps = num_steps if num_steps is not None else 0
         num_epochs = num_epochs if num_epochs is not None else 0
+        test_scores = []  # to store the test scores of the agent during training
         # Train the agent at least for num_epochs or num_steps
         while self.n_epochs < num_epochs or self.n_iters < num_steps:
 
@@ -220,6 +221,7 @@ class SearchTemplate(Trainer):
                     print("Skipping first evaluation.")
                 else:
                     info_test = self.test(test_dataset, test_guide)  # test self.agent
+                    test_scores.append(info_test['test_score_empirical_mean'])
                     self.log(info_test, prefix="Test/")
 
             # Save the algorithm state
@@ -234,6 +236,8 @@ class SearchTemplate(Trainer):
             train_num_samples.append(info_sample['num_samples'])
 
             if self.n_iters % log_frequency == 0:
+                highest_test_score_so_far = max(test_scores) if test_scores else 0
+                self.logger.log('Test/Highest test score so far', highest_test_score_so_far, self.n_iters, color='green')
                 avg_train_score = np.sum(np.array(train_scores) * np.array(train_num_samples)) / np.sum(train_num_samples)
                 self.logger.log('Algo/Average train score', avg_train_score, self.n_iters, color='blue')
                 self.log(info_update, prefix="Update/")
