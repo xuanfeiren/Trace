@@ -4,8 +4,8 @@ import json
 import random
 import re
 
-DOMAIN = "veribench" # or "tau-bench"
-from system_prompts import SYSTEM_PROMPT, EXAMPLES
+DOMAIN = "tau-bench" # or ""veribench
+# from system_prompts import SYSTEM_PROMPT, EXAMPLES
 
 def get_tau_bench_trajectory_from_output(output):
     """Get trajectory from the agent's output."""
