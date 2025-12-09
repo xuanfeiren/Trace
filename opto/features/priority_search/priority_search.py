@@ -594,7 +594,8 @@ class PrioritySearch(SearchTemplate):
         # For each optimizer, containing the backward feedback, we call it n_proposals times to get the proposed parameters.
         def _step(n):
             optimizer = optimizers[n]
-            update_dict = optimizer.step(verbose=verbose, num_threads=self.num_threads, bypassing=True, **kwargs)
+            update_dict = optimizer.step(verbose=True, num_threads=self.num_threads, bypassing=True, **kwargs)
+            breakpoint()
             if not update_dict:  # if the optimizer did not propose any updates
                 return None # return None to indicate no updates were proposed
             # update_dict may only contain some of the parameters of the agent, we need to make sure it contains all the parameters
@@ -858,3 +859,51 @@ class PrioritySearch(SearchTemplate):
         for rollout in candidate.rollouts:
             _process_rollout(rollout)
         return candidate
+
+class PS_veribench(PrioritySearch):
+    """Priority Search to solve the veribench task."""
+    def compute_exploitation_priority(self, candidate) -> float:
+        
+        if not isinstance(candidate, ModuleCandidate):
+            raise TypeError("candidate must be an instance of ModuleCandidate.")
+        # By default, we compute the mean score of the rollouts
+        return candidate.mean_score()+1/(candidate.num_rollouts+1) if candidate.num_rollouts > 0 else 1
+
+    def explore(self, verbose: bool = False, **kwargs):
+        """ 
+        Before the task succeeds, all candidates have the same 0 priority. So in this function we randomly sample candidates based on their num_rollouts.
+        """
+        top_candidates = []
+        priorities = []
+        candidates = [candidate for _,candidate in self.memory.memory ]
+        assert all(candidate.num_rollouts > 0 for candidate in candidates), "All candidates must have at least one rollout."
+        weights = np.array([1/(candidate.num_rollouts) for candidate in candidates])
+        weights = weights / weights.sum()  # normalize to probabilities
+        k = min(len(candidates), self.num_candidates)
+        indices = np.random.choice(len(candidates), size=k, replace=False, p=weights)
+        top_candidates = [candidates[i] for i in indices]
+        # remove those candidates from the memory
+        initial_length = len(self.memory.memory)
+        temporary_memory = self.memory.memory
+        for neg_priority, candidate in temporary_memory:
+            if candidate in top_candidates:
+                priorities.append(-neg_priority)
+                self.memory.memory.remove((neg_priority, candidate))
+        assert len(self.memory.memory) == initial_length - k, f"Error in removing {k} candidates from the memory. Initial length: {initial_length}, current length: {len(self.memory.memory)}."
+        heapq.heapify(self.memory.memory)
+
+        mean_scores = [c.mean_score() for c in top_candidates]
+        mean_scores = [s for s in mean_scores if s is not None]  # filter out None scores
+        info_dict = {
+            'num_exploration_candidates': len(top_candidates),
+            'exploration_candidates_mean_priority': safe_mean(priorities),  # list of priorities of the exploration candidates
+            'exploration_candidates_mean_score': safe_mean(mean_scores),  # list of mean scores of the exploration candidates
+            'exploration_candidates_average_num_rollouts': safe_mean([c.num_rollouts for c in top_candidates]),
+        }
+        if len(top_candidates) < self.num_candidates:
+            new_num_batches = int(self.default_num_batches * self.num_candidates/len(top_candidates))
+            print(f'Setting sampler num_batches from {self.default_num_batches} to {new_num_batches} to accommodate {self.num_candidates} exploration candidates request using {len(top_candidates)} candidates.')
+            self.set_sampler_batch_size(self.default_batch_size, new_num_batches)
+        else:
+            self.set_sampler_batch_size(self.default_batch_size, self.default_num_batches)
+        return top_candidates, priorities, info_dict
