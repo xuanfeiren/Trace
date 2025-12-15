@@ -3,8 +3,8 @@ from opto.utils.llm import LLM # For the selector LLM
 import json
 import random
 import re
-
-DOMAIN = "tau-bench" # or ""veribench
+choices = ["tau-bench", "veribench"]
+DOMAIN = "veribench" # or ""tau-bench
 # from system_prompts import SYSTEM_PROMPT, EXAMPLES
 
 def get_tau_bench_trajectory_from_output(output):
@@ -84,7 +84,7 @@ def get_veribench_trajectory_of_one_rollout(rollout):
     assert DOMAIN == "veribench", "This function is only for Veribench."
     assert rollout['module'] is not None, "rollout['module'] is None."
     assert rollout['x'] is not None, "rollout['x'] is None."
-    # assert rollout['target'] is not None, "rollout['target'] is None."
+    assert rollout['target'] is not None, "rollout['target'] is None."
     assert rollout['score'] is not None, "rollout['score'] is None."
     assert rollout['feedback'] is not None, "rollout['feedback'] is None."
     
@@ -93,43 +93,29 @@ def get_veribench_trajectory_of_one_rollout(rollout):
     parameters_dict = {p.py_name: p.data for p in parameters}
     
     # Extract rollout components
-    python_code = rollout['x']
+    python_code = rollout['x'] # input
     lean_output = rollout['target']
     score = rollout['score']
     feedback = rollout['feedback']
     
     # Construct structured markdown trajectory
-    trajectory = f"""## Task
-Translate Python program into verified Lean 4 code.
-
-## Agent Configuration
-The system prompt is structured as: SYSTEM_PROMPT + additional_instructions + EXAMPLES
-- SYSTEM_PROMPT: Fixed base instructions for Lean 4 code generation
-- additional_instructions: **Trainable parameter** (shown below)
-- EXAMPLES: Fixed few-shot examples
-
-## SYSTEM_PROMPT (fixed)
-{SYSTEM_PROMPT}
-
-## Trainable Parameter (additional_instructions)
-{parameters_dict}
-
-## EXAMPLES (fixed)
-{EXAMPLES}
+    trajectory = f"""## Task: Python → Lean 4 Translation
 
 ## Input (Python Code)
 {python_code}
 
-## Output (Generated Lean 4 Code)
+## Generated Lean 4 Code (Trainable Parameter)
 {lean_output}
 
-## Evaluation
-**Score:** {score} (0 = compilation failed, 1 = compilation success)
+## Result
+- **Score:** {score} (0 = failed, 1 = success)
+- **Compilation Feedback:** {feedback}
 
-**Feedback:**
-{feedback}
+## Optimization Note
+The Lean 4 code above is the trainable parameter. Analyze what code patterns lead to successful compilation vs. failure.
 """
-
+    # print_color(f"Trajectory: {trajectory}", "green")
+    # breakpoint()
     return trajectory
 
 
@@ -144,7 +130,7 @@ class Summarizer:
     """A class which use LLM to summarize the trajectories of the memory. It should be able to learn the patterns of the trajectories. Generate a summary to guide the optimizer to generate better candidates.
     """
     def __init__(self, model_name: str = "gemini/gemini-2.0-flash"):
-        self.llm = LLM(model=model_name)
+        self.llm = LLM() # use the default model
         self.max_candidates_in_prompt = 50
 
     def _get_trajecories_for_memory(self, memory):
@@ -171,10 +157,10 @@ class Summarizer:
             failed_rollouts = [rollout for rollout in rollouts if rollout['score'] == 0]
             if len(successful_rollouts) > 0: 
                 random_successful_rollout = random.choice(successful_rollouts)
-                prompt += f"Successful trajectory: {get_trajectory_of_one_rollout(random_successful_rollout)}."
+                prompt += f"\nSuccessful trajectory: {get_trajectory_of_one_rollout(random_successful_rollout)}."
             if len(failed_rollouts) > 0:
                 random_failed_rollout = random.choice(failed_rollouts)
-                prompt += f"Failed trajectory: {get_trajectory_of_one_rollout(random_failed_rollout)}."
+                prompt += f"\nFailed trajectory: {get_trajectory_of_one_rollout(random_failed_rollout)}."
             
             trajectories.append(prompt)
         
@@ -203,48 +189,31 @@ class Summarizer:
         Trajectories:
         {history_trajectories}
 
-        Provide your analysis in JSON format:
-        1. First, reason about what made these trajectories successful or failed
-        2. Then, provide concrete guidance for the optimizer
-
-        Output format:
-        {{
-            "reasoning": "Analyze the key patterns and strategies that led to success or failure in these trajectories",
-            "summary": "Concrete recommendations for generating better agent parameters based on successful or failed patterns observed in the trajectories"
-        }}"""
+        Provide your analysis in XML format:
+        <reasoning>
+        Analyze the key patterns and strategies that led to success or failure in these trajectories.
+        </reasoning>
+        <summary>
+        Concrete recommendations for generating better Lean 4 code based on successful or failed patterns observed in the trajectories.
+        </summary>"""
 
         prompt_messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
         ]
-        response_format = {"type": "json_object"}
-        # print_color(f"History trajectories: {history_trajectories}", "blue")
-        # print_color(f"Prompt messages: {prompt_messages}", "blue")
-        response = self.llm(prompt_messages, response_format=response_format)
-
+        
+        # print_color(f"System prompt: {system_prompt}", "blue")
+        # print_color(f"User prompt: {user_prompt}", "blue")
+        
+        response = self.llm(messages=prompt_messages)
         response = response.choices[0].message.content
         # print_color(f"Response: {response}", "yellow")
-        # Extract summary field directly using regex, avoiding JSON parsing issues
-        summary_match = re.search(r'"summary"\s*:\s*"([^"]*(?:\\.[^"]*)*)"', response, re.DOTALL)
         
-        if summary_match:
-            summary = summary_match.group(1)
-            # Unescape basic JSON escape sequences if needed
-            summary = summary.replace('\\"', '"').replace('\\n', '\n').replace('\\t', '\t')
-            return str(summary)
-        else:
-            # Fallback to JSON parsing if regex doesn't match
-            try:
-                summary_json = json.loads(response)
-                summary = summary_json.get('summary', '')
-                # Handle both string and array formats
-                if isinstance(summary, list):
-                    summary = '\n'.join(str(item) for item in summary)
-                return str(summary)
-            except Exception as e:
-                print_color(f"Unable to extract summary from response: {e}", "red")
-                print_color(f"Response: {response}", "blue")
-                return "Unable to extract summary from LLM response."
+        # Extract summary using XML regex
+        summary_match = re.search(r'<summary>(.*?)</summary>', response, re.DOTALL)
+
+        return summary_match.group(1).strip()
+
 from opto.trainer.utils import async_run
 
 class DetailedSummarizer:
@@ -315,7 +284,7 @@ class DetailedSummarizer:
         ]
         
         try:
-            response = self.llm(prompt_messages)
+            response = self.llm(messages=prompt_messages)
             response_content = response.choices[0].message.content
             
             # Extract summary and insights using regex
@@ -481,7 +450,7 @@ class DetailedSummarizer:
             {"role": "user", "content": user_prompt}
         ]
         
-        response = self.llm(prompt_messages)
+        response = self.llm(messages=prompt_messages)
         content = response.choices[0].message.content
         
         # Extract summary using regex
@@ -536,7 +505,7 @@ class DetailedSummarizer:
             {"role": "user", "content": user_prompt}
         ]
         
-        response = self.llm(prompt_messages)
+        response = self.llm(messages=prompt_messages)
         content = response.choices[0].message.content
         print_color(f"Select parameter response: {content}", "blue")
         # Extract candidate_id using regex

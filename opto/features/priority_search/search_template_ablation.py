@@ -223,6 +223,7 @@ class SearchTemplate(Trainer):
                     info_test = self.test(test_dataset, test_guide)  # test self.agent
                     test_scores.append(info_test['test_score_empirical_mean'])
                     self.log(info_test, prefix="Test/")
+                    
 
             # Save the algorithm state
             if (save_frequency is not None and save_frequency > 0) and self.n_iters % save_frequency == 0:
@@ -247,6 +248,9 @@ class SearchTemplate(Trainer):
                 # Log parameters
                 for p in self.agent.parameters():
                     self.logger.log(f"Parameter/{p.name}", p.data, self.n_iters, color='red')
+                import sys
+                if (test_frequency is not None) and (self.n_iters % test_frequency == 0) and info_test['test_score_empirical_mean'] ==1:
+                    sys.exit(0)
 
             # Update counters
             self.n_epochs = info_sample['self.n_epochs']  # update the number of epochs completed
@@ -375,6 +379,8 @@ class SearchTemplate(Trainer):
                 tested_update_dicts.append((candidate.update_dict, test_score))
             
             test_scores[f'test_score_{version_name}'] = test_score
+        # A default logging key for the test score
+        test_scores['test_score'] = test_scores['test_score_empirical_mean']
         
         return test_scores
 

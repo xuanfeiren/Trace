@@ -10,7 +10,7 @@ from opto.trainer.utils import async_run, safe_mean
 from opto.trainer.algorithms.basic_algorithms import batchify
 from opto.features.priority_search.search_template_ablation import SearchTemplate, Samples, BatchRollout, save_train_config
 from opto.features.priority_search.utils import set_module_parameters, remap_update_dict, create_module_from_update_dict, is_module_copy, deepcopy_module
-from opto.features.priority_search.regressor import EnsembleLogisticRegressor, LogisticRegressor, LinearRegressor, LinearUCBRegressor, LLMRegressor
+from opto.features.priority_search.regressor import EnsembleLogisticRegressor, LogisticRegressor, LinearRegressor, LinearUCBRegressor, LLMRegressor, RegressorTemplate
 from opto.optimizers.utils import print_color
 
 class ModuleCandidate:
@@ -419,11 +419,7 @@ class PrioritySearch(SearchTemplate):
         self.score_function = score_function
         self.decouple_optimizers = decouple_optimizers
 
-        self.regressor = EnsembleLogisticRegressor()
-        self.logistic_regressor = LogisticRegressor()
-        self.linear_regressor = LinearRegressor()
-        self.linear_ucb_regressor = LinearUCBRegressor()
-        self.llm_regressor = LLMRegressor()
+        
 
         # Validate and set score range for UCB
         if score_range is None:
@@ -490,17 +486,19 @@ class PrioritySearch(SearchTemplate):
             self.update_memory(validate_results, verbose=verbose, **kwargs)  # samples are provided here in case candidates do not capture full information
         else:  # The first iteration.
             self.default_batch_size, self.default_num_batches = self.get_sampler_batch_size()
-            self.memory.push(self.max_score, ModuleCandidate(self.agent,depth=1, optimizer=self.optimizer))  # Push the base agent as the first candidate (This gives the initialization of the priority queue)
+            initial_candidate = ModuleCandidate(self.agent,depth=1, optimizer=self.optimizer)
+            self.regressor.add_embeddings_to_candidates([initial_candidate])
+            self.memory.push(self.max_score, initial_candidate)  # Push the base agent as the first candidate (This gives the initialization of the priority queue)
         
-        self.regressor.update(self.memory.memory)
+        # self.regressor.update(self.memory.memory)
 
         # for ablation, update for all regressors
-        self.logistic_regressor.update(self.memory.memory)
-        self.linear_regressor.update(self.memory.memory)
-        self.linear_ucb_regressor.update(self.memory.memory)
-        self.llm_regressor.update(self.memory.memory)
+        # self.logistic_regressor.update(self.memory.memory)
+        # self.linear_regressor.update(self.memory.memory)
+        # self.linear_ucb_regressor.update(self.memory.memory)
+        # self.llm_regressor.update(self.memory.memory)
 
-        self.regressor.predict_scores(self.memory.memory)
+        # self.regressor.predict_scores(self.memory.memory)
 
         # Log information about the update
         info_log = {
@@ -1083,12 +1081,14 @@ class EpsilonNetPS(PrioritySearch):
     def __init__(self,
                  epsilon: float = 0.1,
                  use_summarizer: bool = False,
+                 summarizer_model_name: str = "gemini/gemini-2.0-flash",
                  *args,
                  **kwargs):
         super().__init__(*args, **kwargs)
         self.epsilon = epsilon
         self.use_summarizer = use_summarizer
-        self.summarizer = Summarizer(model_name="gemini/gemini-2.0-flash")
+        self.regressor = RegressorTemplate()
+        self.summarizer = Summarizer(model_name=summarizer_model_name)
         self.context = "Concrete recommendations for generating better agent parameters based on successful patterns observed in the trajectories: "
         
             
@@ -1234,6 +1234,75 @@ class EpsilonNetPS(PrioritySearch):
     #     info_dict['best_candidate_num_rollouts_empirical_mean'] = best_candidates['empirical_mean'].num_rollouts
         
     #     return best_candidates, priorities, info_dict
+
+class PS_veribench(EpsilonNetPS):
+    """
+    A subclass of EpsilonNetPS, which uses the Veribench domain.
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.regressor.rich_text = False # In veribench we cannot assume LLM could predict the score with only the output of Lean 4 code. We just use the similarity.
+    def compute_exploitation_priority(self, candidate) -> float:
+        """All candidates have 0 scores before succeeding. """
+        if not isinstance(candidate, ModuleCandidate):
+            raise TypeError("candidate must be an instance of ModuleCandidate.")
+        # By default, we compute the mean score of the rollouts
+        return candidate.mean_score()+1/(candidate.num_rollouts+1) if candidate.num_rollouts > 0 else 1
+
+    def explore(self, verbose: bool = False, **kwargs):
+        """ 
+        Before the task succeeds, all candidates have the same 0 priority. So in this function we randomly sample candidates based on their num_rollouts.
+        """
+        print(f"--- Generating {min(len(self.memory), self.num_candidates)} exploration candidates...")  if verbose else None
+        if len(self.memory.memory) == 1: # the first step
+            neg_priority, candidate = self.memory.pop()  # pop the top candidate from the priority queue
+            priority = - neg_priority  # remember that we stored negative scores in the priority queue
+            top_candidates = [candidate]
+            if len(top_candidates) < self.num_candidates:
+                new_num_batches = int(self.default_num_batches * self.num_candidates/len(top_candidates))
+                print(f'Setting sampler num_batches from {self.default_num_batches} to {new_num_batches} to accommodate {self.num_candidates} exploration candidates request using {len(top_candidates)} candidates.')
+                self.set_sampler_batch_size(self.default_batch_size, new_num_batches)
+            else:
+                self.set_sampler_batch_size(self.default_batch_size, self.default_num_batches)
+            return [candidate], [priority], {
+                'num_exploration_candidates': 1,
+                'exploration_candidates_mean_priority': priority,
+                'exploration_candidates_mean_score': candidate.mean_score(),
+                'exploration_candidates_average_num_rollouts': candidate.num_rollouts,
+            }
+        top_candidates = []
+        priorities = []
+        candidates = [candidate for _,candidate in self.memory.memory ]
+        assert all(candidate.num_rollouts > 0 for candidate in candidates), "All candidates must have at least one rollout."
+        weights = np.array([1/(candidate.num_rollouts) for candidate in candidates])
+        weights = weights / weights.sum()  # normalize to probabilities
+        k = min(len(candidates), self.num_candidates)
+        indices = np.random.choice(len(candidates), size=k, replace=False, p=weights)
+        top_candidates = [candidates[i] for i in indices]
+        # remove those candidates from the memory
+        initial_length = len(self.memory.memory)
+        for neg_priority, candidate in self.memory.memory.copy():
+            if candidate in top_candidates:
+                priorities.append(-neg_priority)
+                self.memory.memory.remove((neg_priority, candidate))
+        assert len(self.memory.memory) == initial_length - k, f"Error in removing {k} candidates from the memory. Initial length: {initial_length}, current length: {len(self.memory.memory)}."
+        heapq.heapify(self.memory.memory)
+
+        mean_scores = [c.mean_score() for c in top_candidates]
+        mean_scores = [s for s in mean_scores if s is not None]  # filter out None scores
+        info_dict = {
+            'num_exploration_candidates': len(top_candidates),
+            'exploration_candidates_mean_priority': safe_mean(priorities),  # list of priorities of the exploration candidates
+            'exploration_candidates_mean_score': safe_mean(mean_scores),  # list of mean scores of the exploration candidates
+            'exploration_candidates_average_num_rollouts': safe_mean([c.num_rollouts for c in top_candidates]),
+        }
+        if len(top_candidates) < self.num_candidates:
+            new_num_batches = int(self.default_num_batches * self.num_candidates/len(top_candidates))
+            print(f'Setting sampler num_batches from {self.default_num_batches} to {new_num_batches} to accommodate {self.num_candidates} exploration candidates request using {len(top_candidates)} candidates.')
+            self.set_sampler_batch_size(self.default_batch_size, new_num_batches)
+        else:
+            self.set_sampler_batch_size(self.default_batch_size, self.default_num_batches)
+        return top_candidates, priorities, info_dict
 
 class ParetobasedPS(PrioritySearch):
     """

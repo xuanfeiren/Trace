@@ -594,8 +594,7 @@ class PrioritySearch(SearchTemplate):
         # For each optimizer, containing the backward feedback, we call it n_proposals times to get the proposed parameters.
         def _step(n):
             optimizer = optimizers[n]
-            update_dict = optimizer.step(verbose=True, num_threads=self.num_threads, bypassing=True, **kwargs)
-            breakpoint()
+            update_dict = optimizer.step(verbose=verbose, num_threads=self.num_threads, bypassing=True, **kwargs)
             if not update_dict:  # if the optimizer did not propose any updates
                 return None # return None to indicate no updates were proposed
             # update_dict may only contain some of the parameters of the agent, we need to make sure it contains all the parameters
@@ -873,6 +872,23 @@ class PS_veribench(PrioritySearch):
         """ 
         Before the task succeeds, all candidates have the same 0 priority. So in this function we randomly sample candidates based on their num_rollouts.
         """
+        print(f"--- Generating {min(len(self.memory), self.num_candidates)} exploration candidates...")  if verbose else None
+        if len(self.memory.memory) == 1: # the first step
+            neg_priority, candidate = self.memory.pop()  # pop the top candidate from the priority queue
+            priority = - neg_priority  # remember that we stored negative scores in the priority queue
+            top_candidates = [candidate]
+            if len(top_candidates) < self.num_candidates:
+                new_num_batches = int(self.default_num_batches * self.num_candidates/len(top_candidates))
+                print(f'Setting sampler num_batches from {self.default_num_batches} to {new_num_batches} to accommodate {self.num_candidates} exploration candidates request using {len(top_candidates)} candidates.')
+                self.set_sampler_batch_size(self.default_batch_size, new_num_batches)
+            else:
+                self.set_sampler_batch_size(self.default_batch_size, self.default_num_batches)
+            return [candidate], [priority], {
+                'num_exploration_candidates': 1,
+                'exploration_candidates_mean_priority': priority,
+                'exploration_candidates_mean_score': candidate.mean_score(),
+                'exploration_candidates_average_num_rollouts': candidate.num_rollouts,
+            }
         top_candidates = []
         priorities = []
         candidates = [candidate for _,candidate in self.memory.memory ]
@@ -884,8 +900,7 @@ class PS_veribench(PrioritySearch):
         top_candidates = [candidates[i] for i in indices]
         # remove those candidates from the memory
         initial_length = len(self.memory.memory)
-        temporary_memory = self.memory.memory
-        for neg_priority, candidate in temporary_memory:
+        for neg_priority, candidate in self.memory.memory.copy():
             if candidate in top_candidates:
                 priorities.append(-neg_priority)
                 self.memory.memory.remove((neg_priority, candidate))
