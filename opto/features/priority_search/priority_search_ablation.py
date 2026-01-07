@@ -1073,7 +1073,6 @@ def calculate_distance_to_memory(memory, new_candidate):
         return min_distance
 
 from opto.features.priority_search.summarizer import Summarizer
-# from opto.features.priority_search.summarizer import  DetailedSummarizer as Summarizer
 class EpsilonNetPS(PrioritySearch):
     """
     A subclass of PrioritySearch, which keeps an epsilon-net as the memory. Reject new candidates that are in the epsilon-net of the memory.
@@ -1081,7 +1080,7 @@ class EpsilonNetPS(PrioritySearch):
     def __init__(self,
                  epsilon: float = 0.1,
                  use_summarizer: bool = False,
-                 summarizer_model_name: str = "gemini/gemini-2.0-flash",
+                 summarizer_model_name: str = "claude-3.5-sonnet",
                  *args,
                  **kwargs):
         super().__init__(*args, **kwargs)

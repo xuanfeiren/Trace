@@ -109,7 +109,7 @@ def get_veribench_trajectory_of_one_rollout(rollout):
 
 ## Result
 - **Score:** {score} (0 = failed, 1 = success)
-- **Compilation Feedback:** {feedback}
+- **Compilation Feedback, contains the error message for the failed lean 4 code:** {feedback}
 
 ## Optimization Note
 The Lean 4 code above is the trainable parameter. Analyze what code patterns lead to successful compilation vs. failure.
@@ -129,11 +129,13 @@ else:
 class Summarizer:
     """A class which use LLM to summarize the trajectories of the memory. It should be able to learn the patterns of the trajectories. Generate a summary to guide the optimizer to generate better candidates.
     """
-    def __init__(self, model_name: str = "gemini/gemini-2.0-flash"):
-        self.llm = LLM() # use the default model
-        self.max_candidates_in_prompt = 50
+    def __init__(self, model_name: str = "claude-3.5-sonnet"):
+        self.llm = LLM(model=model_name) # use the default model
+        self.max_candidates_in_prompt = 5
+        self.current_summary = "Concrete recommendations for generating better agent parameters based on successful patterns observed in the trajectories: "
+        self.used_candidates = set()  # Track candidates that have been summarized
 
-    def _get_trajecories_for_memory(self, memory):
+    def _get_trajectories_for_memory(self, memory):
         """
         Get trajectories for the memory. Memory is a list of (neg_score, candidate) tuples.
         We first collect rollouts from the each candidate, and then get the trajectories for each rollout.
@@ -142,9 +144,17 @@ class Summarizer:
         """
         trajectories = []
         print_color(f"Getting trajectories from {len(memory)} candidates.", "blue")
-        # copy a random shuffle of the memory
-        memory_with_rollouts = [(neg_score, candidate) for neg_score, candidate in memory if len([rollout for rollout in candidate.rollouts if rollout['score'] is not None]) > 0]
-        temporary_memory = random.sample(memory_with_rollouts, k=min(self.max_candidates_in_prompt, len(memory_with_rollouts)))
+        # Filter out candidates that have already been used and have rollouts
+        memory_with_rollouts = [(neg_score, candidate) for neg_score, candidate in memory
+                                if len([rollout for rollout in candidate.rollouts if rollout['score'] is not None]) > 0
+                                and id(candidate) not in self.used_candidates]
+        print_color(f"Memory (unseen candidates) with rollouts: {len(memory_with_rollouts)}", "blue")
+        # Sample 5 candidates (or fewer if not enough available)
+        num_to_sample = min(5, len(memory_with_rollouts))
+        temporary_memory = random.sample(memory_with_rollouts, k=num_to_sample)
+        # Mark sampled candidates as used
+        for _, candidate in temporary_memory:
+            self.used_candidates.add(id(candidate))
         for _, candidate in temporary_memory:
             rollouts = [rollout for rollout in candidate.rollouts if rollout['score'] is not None]
             if len(rollouts) == 0:
@@ -175,7 +185,7 @@ class Summarizer:
             str: The summary.
         """
 
-        history_trajectories = self._get_trajecories_for_memory(memory)
+        history_trajectories = self._get_trajectories_for_memory(memory)
 
         # print_color(f"History trajectories: {history_trajectories}", "green")
 
@@ -186,21 +196,32 @@ class Summarizer:
         
         user_prompt = f"""Analyze the following agent conversation trajectories and extract insights for optimization.
 
-        Trajectories:
+        Current Summary (from previous analysis):
+        {self.current_summary}
+
+        New Trajectories to Analyze:
         {history_trajectories}
+
+        Instructions:
+        - Keep all insights from the Current Summary above
+        - Analyze the new trajectories and identify any new patterns
+        - Add new insights to the summary while preserving existing ones
+        - Build upon and refine the current recommendations
 
         Provide your analysis in XML format:
         <reasoning>
         Analyze the key patterns and strategies that led to success or failure in these trajectories.
         </reasoning>
         <summary>
-        Concrete recommendations for generating better Lean 4 code based on successful or failed patterns observed in the trajectories.
+        Concrete recommendations for generating better Lean 4 code based on successful or failed patterns observed in the trajectories. Keep the current summary and add new insights from the new trajectories.
         </summary>"""
 
         prompt_messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
         ]
+
+        # print_color(f"User prompt: {user_prompt}", "blue")
         
         # print_color(f"System prompt: {system_prompt}", "blue")
         # print_color(f"User prompt: {user_prompt}", "blue")
@@ -212,7 +233,9 @@ class Summarizer:
         # Extract summary using XML regex
         summary_match = re.search(r'<summary>(.*?)</summary>', response, re.DOTALL)
 
-        return summary_match.group(1).strip()
+        self.current_summary = summary_match.group(1).strip()
+
+        return self.current_summary
 
 from opto.trainer.utils import async_run
 
