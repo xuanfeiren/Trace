@@ -401,7 +401,7 @@ class FunModule(Module):
         )  # This is saved for user debugging
         # Construct message to optimizer
         error_class = e.__class__.__name__
-        detail = e.args[0]
+        detail = e.args[0] if e.args else "No error message provided"
         cl, exc, tb = sys.exc_info()
         assert tb is not None  # we're in the except block, so tb should not be None
         n_fun_calls = len(traceback.extract_tb(tb))

@@ -196,6 +196,7 @@ class SearchTemplate(Trainer):
         samples = None
         train_scores = []  # to store the scores of the agent during training
         train_num_samples = []  # to store the number of samples used to compute each score
+        test_scores = [] # to store the test scores of the agent during training
         num_steps = num_steps if num_steps is not None else 0
         num_epochs = num_epochs if num_epochs is not None else 0
         # Train the agent at least for num_epochs or num_steps
@@ -211,8 +212,7 @@ class SearchTemplate(Trainer):
             # 2. Get feedback on the proposed parameters on the current batch
             # samples: Samples object containing the samples and the minibatch
             samples, info_sample = self.sample(proposals, verbose=verbose, **kwargs)
-
-            test_scores = []
+            
             # Evaluate the agent after update
             if (test_frequency is not None) and (self.n_iters % test_frequency == 0):
                 if self.n_iters == 0 and test_frequency < 0:
@@ -221,7 +221,8 @@ class SearchTemplate(Trainer):
                     info_test = self.test(test_dataset, test_guide)  # test self.agent
                     test_scores.append(info_test['test_score'])
                     self.log(info_test, prefix="Test/")
-                    self.logger.log('Test/Highest test score so far', max(test_scores), self.n_iters, color='green')
+                    highest_test_score_so_far = max(test_scores) if test_scores else 0
+                    self.logger.log('Test/Highest test score so far', highest_test_score_so_far, self.n_iters, color='green')
 
             # Save the algorithm state
             if (save_frequency is not None and save_frequency > 0) and self.n_iters % save_frequency == 0:
@@ -244,10 +245,9 @@ class SearchTemplate(Trainer):
                 # Log parameters
                 for p in self.agent.parameters():
                     self.logger.log(f"Parameter/{p.name}", p.data, self.n_iters, color='red')
-                
-                import sys
-                if (test_frequency is not None) and (self.n_iters % test_frequency == 0) and info_test['test_score'] ==1:
-                    sys.exit(0)
+                # import sys
+                # if (test_frequency is not None) and (self.n_iters % test_frequency == 0) and info_test['test_score'] ==1:
+                #     sys.exit(0)
 
             # Update counters
             self.n_epochs = info_sample['self.n_epochs']  # update the number of epochs completed

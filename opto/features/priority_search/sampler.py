@@ -131,6 +131,9 @@ def standard_forward(agent, x, guide, info, min_score=0):
     except trace.ExecutionError as e:
         target = e.exception_node
         score, feedback = min_score, target.create_feedback('full')
+        # from opto.optimizers.utils import print_color
+        # print_color(feedback, 'yellow')
+        # breakpoint()
     return target, score, feedback
 
 
