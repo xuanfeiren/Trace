@@ -1085,8 +1085,9 @@ class EpsilonNetPS(PrioritySearch):
         super().__init__(*args, **kwargs)
         self.epsilon = epsilon
         self.use_summarizer = use_summarizer
-        self.regressor.rich_text = False
         self.regressor = RegressorTemplate()
+        self.regressor.rich_text = False
+
         # Use Trace default model as summarizer model
         self.summarizer = Summarizer()
         self.context = "Concrete recommendations for generating better agent parameters based on successful patterns observed in the trajectories: "
