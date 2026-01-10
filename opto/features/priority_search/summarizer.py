@@ -3,8 +3,8 @@ from opto.utils.llm import LLM # For the selector LLM
 import json
 import random
 import re
-choices = ["tau-bench", "veribench"]
-DOMAIN = "veribench" # or ""tau-bench
+choices = ["tau-bench", "veribench", "generic"]
+DOMAIN = "generic" # or "tau-bench" or "veribench"
 # from system_prompts import SYSTEM_PROMPT, EXAMPLES
 
 def get_tau_bench_trajectory_from_output(output):
@@ -118,11 +118,36 @@ The Lean 4 code above is the trainable parameter. Analyze what code patterns lea
     # breakpoint()
     return trajectory
 
+def get_generic_trajectory_of_one_rollout(rollout):
+    """
+    Get trajectory of one rollout for the generic domain.
+    """
+    assert DOMAIN == "generic", "This function is only for generic domain."
+    assert rollout['module'] is not None, "rollout['module'] is None."
+    assert rollout['x'] is not None, "rollout['x'] is None."
+    assert rollout['target'] is not None, "rollout['target'] is None."
+    assert rollout['score'] is not None, "rollout['score'] is None."
+    assert rollout['feedback'] is not None, "rollout['feedback'] is None."
+    
+    # Extract trainable parameters
+    parameters = rollout['module'].parameters()
+    parameters_dict = {p.py_name: p.data for p in parameters}
+    
+    # Construct structured markdown trajectory
+    trajectory = f"""## Task parameters: {parameters_dict}
+## Input: {rollout['x']}
+## Output: {rollout['target']}
+## Result
+- **Score:** {rollout['score']}
+- **Feedback:** {rollout['feedback']}"""
+    return trajectory
 
 if DOMAIN == "tau-bench":
     get_trajectory_of_one_rollout = get_tau_bench_trajectory_of_one_rollout
 elif DOMAIN == "veribench":
     get_trajectory_of_one_rollout = get_veribench_trajectory_of_one_rollout
+elif DOMAIN == "generic":
+    get_trajectory_of_one_rollout = get_generic_trajectory_of_one_rollout
 else:
     raise ValueError(f"Invalid domain: {DOMAIN}")
 
@@ -130,7 +155,7 @@ class Summarizer:
     """A class which use LLM to summarize the trajectories of the memory. It should be able to learn the patterns of the trajectories. Generate a summary to guide the optimizer to generate better candidates.
     """
     def __init__(self, model_name: str = "claude-3.5-sonnet"):
-        self.llm = LLM(model=model_name) # use the default model
+        self.llm = LLM() # use the default model
         self.max_candidates_in_prompt = 5
         self.current_summary = "Concrete recommendations for generating better agent parameters based on successful patterns observed in the trajectories: "
         self.used_candidates = set()  # Track candidates that have been summarized
