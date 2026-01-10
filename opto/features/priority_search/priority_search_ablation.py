@@ -794,7 +794,6 @@ class PrioritySearch(SearchTemplate):
         """
         print(f"--- Generating {min(len(self.memory), self.num_candidates)} exploration candidates...") if verbose else None
         # in ablation study, we do not use the best candidate to explore.
-        assert not self.use_best_candidate_to_explore, "In ablation study, we do not use the best candidate to explore."
         # pop top self.num_candidates candidates from the priority queue
         # self._best_candidate is the exploited candidate from the previous iteration
         top_candidates = [self._best_candidate] if self.use_best_candidate_to_explore else []
@@ -1086,6 +1085,7 @@ class EpsilonNetPS(PrioritySearch):
         super().__init__(*args, **kwargs)
         self.epsilon = epsilon
         self.use_summarizer = use_summarizer
+        self.regressor.rich_text = False
         self.regressor = RegressorTemplate()
         # Use Trace default model as summarizer model
         self.summarizer = Summarizer()
@@ -1165,10 +1165,10 @@ class EpsilonNetPS(PrioritySearch):
         if self.use_summarizer:
             # Summarize the memory and the exploration candidates.
             exploration_memory = [(0, candidate) for candidate in self._exploration_candidates]
-            print_color(f"Summarizing the history...", "green")
+            # print_color(f"Summarizing the history...", "green")
             try: 
                 summary = self.summarizer.summarize(self.memory.memory+exploration_memory)
-                print_color(f"Summary: {summary}", "green")
+                # print_color(f"Summary: {summary}", "green")
                 self.context = f"Concrete recommendations for generating better agent parameters based on successful patterns observed in the trajectories: {summary}"
             except Exception as e:
                 print_color(f"Error: {e}", "red")
@@ -1177,6 +1177,13 @@ class EpsilonNetPS(PrioritySearch):
             for candidate in self._exploration_candidates:
                 candidate.optimizer.set_context(self.context)
         return super().propose(samples, verbose, **kwargs)
+
+    def compute_exploitation_priority(self, candidate) -> float:
+        """All candidates have 0 scores before succeeding. """
+        if not isinstance(candidate, ModuleCandidate):
+            raise TypeError("candidate must be an instance of ModuleCandidate.")
+        # By default, we compute the mean score of the rollouts
+        return candidate.mean_score() if candidate.num_rollouts > 0 else 1
 
     def _get_best_candidate_by_regressor(self, regressor_name: str) -> Tuple[float, ModuleCandidate]:
         """ Get the best candidate by the regressor. regressor_name can be 'logistic', 'linear', 'linear_ucb', or 'llm'.
@@ -1239,14 +1246,13 @@ class PS_veribench(EpsilonNetPS):
     """
     A subclass of EpsilonNetPS, which uses the Veribench domain.
     """
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.regressor.rich_text = False # In veribench we cannot assume LLM could predict the score with only the output of Lean 4 code. We just use the similarity.
+    
     def compute_exploitation_priority(self, candidate) -> float:
         """All candidates have 0 scores before succeeding. """
         if not isinstance(candidate, ModuleCandidate):
             raise TypeError("candidate must be an instance of ModuleCandidate.")
         # By default, we compute the mean score of the rollouts
+        
         return candidate.mean_score()+1/(candidate.num_rollouts+1) if candidate.num_rollouts > 0 else 1
 
     # def explore(self, verbose: bool = False, **kwargs):
@@ -1270,6 +1276,7 @@ class PS_veribench(EpsilonNetPS):
     #             'exploration_candidates_mean_score': candidate.mean_score(),
     #             'exploration_candidates_average_num_rollouts': candidate.num_rollouts,
     #         }
+    #     return super().explore(verbose, **kwargs)
     #     top_candidates = []
     #     priorities = []
     #     candidates = [candidate for _,candidate in self.memory.memory ]
