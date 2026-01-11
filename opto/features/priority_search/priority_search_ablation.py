@@ -305,6 +305,7 @@ class PrioritySearch(SearchTemplate):
               ucb_exploration_constant: float = 1.0,  # exploration constant for UCB score function
               decouple_optimizers: bool = True,  # whether to decouple the optimizers for each candidate; if True, each candidate will have its own optimizer instance; if False, all candidates share the same optimizer instance.
               # Additional keyword arguments
+
               **kwargs
               ):
         """ Train the agent using the Priority Search algorithm.
@@ -451,6 +452,12 @@ class PrioritySearch(SearchTemplate):
         self.long_term_memory = HeapMemory(size=long_term_memory_size, processing_fun=self.compress_candidate_memory)
         self.short_term_memory = HeapMemory(size=short_term_memory_size)
         self.memory_update_frequency = memory_update_frequency
+
+        # do ablation on epsilon net filtering. In the training process, keep a filtered memory and an origianl memory. Epsilon net could influence: 1. search process 2. optimizer context or both.
+        # In the following code, we will modify all the memory updated process. There are filter step in the process, we only filter the filtered memory.
+
+        self.original_memory = HeapMemory()
+        self.filtered_memory = HeapMemory()
     
     def filter_candidates(self, candidates: List[ModuleCandidate]) -> List[ModuleCandidate]:
         """ Filter candidates by their embeddings.
@@ -479,9 +486,9 @@ class PrioritySearch(SearchTemplate):
             candidates = self.propose(samples, verbose=verbose, **kwargs)  # List of ModuleCandidates
             # add embeddings to the candidates asynchronously
             self.regressor.add_embeddings_to_candidates(candidates)
-            candidates = self.filter_candidates(candidates)
+            filtered_candidates = self.filter_candidates(candidates)
             # 2. Validate the proposed parameters
-            validate_results = self.validate(candidates, samples, verbose=verbose, **kwargs)  # this updates the priority queue
+            validate_results = self.validate(filtered_candidates, samples, verbose=verbose, **kwargs)  # this updates the priority queue
             # 3. Update the priority queue with the validation results
             self.update_memory(validate_results, verbose=verbose, **kwargs)  # samples are provided here in case candidates do not capture full information
         else:  # The first iteration.
@@ -1078,12 +1085,19 @@ class EpsilonNetPS(PrioritySearch):
     """
     def __init__(self,
                  epsilon: float = 0.1,
+                 epsilon_for_summarizer: float = None,
                  use_summarizer: bool = False,
                  summarizer_model_name: str = "claude-3.5-sonnet",
                  *args,
                  **kwargs):
         super().__init__(*args, **kwargs)
         self.epsilon = epsilon
+        # Default use the same epsilon for the search process and the Summarizer
+        if epsilon_for_summarizer is None:
+            self.epsilon_for_summarizer = self.epsilon
+        else:
+            self.epsilon_for_summarizer = epsilon_for_summarizer
+
         self.use_summarizer = use_summarizer
         self.regressor = RegressorTemplate()
         self.regressor.rich_text = False
@@ -1091,25 +1105,36 @@ class EpsilonNetPS(PrioritySearch):
         # Use Trace default model as summarizer model
         self.summarizer = Summarizer()
         self.context = "Concrete recommendations for generating better agent parameters based on successful patterns observed in the trajectories: "
-        
-            
 
-    def filter_candidates(self, new_candidates: List[ModuleCandidate]) -> List[ModuleCandidate]:
+
+    def filter_candidates_against_current_memory(self, new_candidates: List[ModuleCandidate],current_memory: List[Tuple[float, ModuleCandidate]]=None,epsilon = 0) -> List[ModuleCandidate]:
         """ Filter candidates by their embeddings.
         """
-        if self.epsilon == 0: # no filtering
+
+        if epsilon == 0: # no filtering
             print_color(f"No filtering of candidates.", "green")
             return new_candidates
-        exploration_memory = [(0, candidate) for candidate in self._exploration_candidates]
-        current_memory = self.memory.memory + exploration_memory
+
+        if current_memory is None:
+            # Sometimes we just want to filter a candidate list based on itself
+            current_memory = []
 
         # filter new candidates based on the distance to the current memory.
-        num_new_candidates = len(new_candidates)
+        # num_new_candidates = len(new_candidates)
 
         added_candidates = []
         success_distances = []
         
         while len(new_candidates) > 0:
+            # If the current memory is empty, add the first new candidate to the memory.
+            if len(current_memory) == 0:
+                new_node = new_candidates[0]
+                current_memory.append((0, new_node))
+                added_candidates.append(new_node)
+                success_distances.append(0)
+                new_candidates = new_candidates[1:]
+                continue
+            
             # calculate the distance to the memory for each new candidate
             distances = [calculate_distance_to_memory(current_memory, new_candidate) for new_candidate in new_candidates]
             
@@ -1117,7 +1142,7 @@ class EpsilonNetPS(PrioritySearch):
             filtered_candidates = []
             filtered_distances = []
             for i, (candidate, distance) in enumerate(zip(new_candidates, distances)):
-                if distance > self.epsilon:
+                if distance > epsilon:
                     filtered_candidates.append(candidate)
                     filtered_distances.append(distance)
             
@@ -1135,10 +1160,22 @@ class EpsilonNetPS(PrioritySearch):
             # remove the added candidate from new_candidates list
             new_candidates = [c for c in filtered_candidates if c is not new_node]
 
-        print_color(f"Proposed {num_new_candidates} new candidates, {len(added_candidates)} of them are added to the memory.", "green")
+        
         # print the distances between the added candidates and the memory before adding them.
         print_color(f"Distances between the added candidates and the memory before adding them: {success_distances}", "green")
         return added_candidates
+
+    def filter_candidates(self, new_candidates: List[ModuleCandidate]) -> List[ModuleCandidate]:
+        """ Filter candidates by their embeddings.
+        """
+        
+        exploration_memory = [(0, candidate) for candidate in self._exploration_candidates]
+        current_memory = self.memory.memory + exploration_memory
+        filtered_candidates = self.filter_candidates_against_current_memory(new_candidates, current_memory,self.epsilon)
+        num_filtered_candidates = len(filtered_candidates)
+        print_color(f"Proposed {len(new_candidates)} new candidates, {num_filtered_candidates} of them are added to the memory.", "green")
+
+        return filtered_candidates
     
     def compress_candidate_memory(self, candidate: ModuleCandidate) -> ModuleCandidate:
         """ Keep target of each rollout for long-term memory. """
@@ -1168,7 +1205,14 @@ class EpsilonNetPS(PrioritySearch):
             exploration_memory = [(0, candidate) for candidate in self._exploration_candidates]
             # print_color(f"Summarizing the history...", "green")
             try: 
-                summary = self.summarizer.summarize(self.memory.memory+exploration_memory)
+                current_memory = self.memory.memory + exploration_memory
+                current_candidates = [candidate for _, candidate in current_memory]
+                # filter the current for the summarizer
+                filtered_candidates = self.filter_candidates_against_current_memory(current_candidates,[],self.epsilon_for_summarizer)
+                # The priority in the memory doesn't influence the summarizer, so we can use a dummy value.
+                filtered_memory = [(0, candidate) for candidate in filtered_candidates]
+                # Summarize the filtered memory
+                summary = self.summarizer.summarize(filtered_memory)
                 print_color(f"Summary: {summary}", "green")
                 self.context = f"Concrete recommendations for generating better agent parameters based on successful patterns observed in the trajectories: {summary}"
             except Exception as e:
