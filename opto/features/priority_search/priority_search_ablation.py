@@ -1169,7 +1169,7 @@ class EpsilonNetPS(PrioritySearch):
             # print_color(f"Summarizing the history...", "green")
             try: 
                 summary = self.summarizer.summarize(self.memory.memory+exploration_memory)
-                # print_color(f"Summary: {summary}", "green")
+                print_color(f"Summary: {summary}", "green")
                 self.context = f"Concrete recommendations for generating better agent parameters based on successful patterns observed in the trajectories: {summary}"
             except Exception as e:
                 print_color(f"Error: {e}", "red")
