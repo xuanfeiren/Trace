@@ -238,7 +238,7 @@ class Summarizer:
         Analyze the key patterns and strategies that led to success or failure in these trajectories.
         </reasoning>
         <summary>
-        Concrete recommendations for generating better Lean 4 code based on successful or failed patterns observed in the trajectories. Keep the current summary and add new insights from the new trajectories.
+        Concrete recommendations for generating better parameters based on successful or failed patterns observed in the trajectories. Keep the current summary and add new insights from the new trajectories. Write the entire modified summary here.
         </summary>"""
 
         prompt_messages = [
