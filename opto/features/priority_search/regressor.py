@@ -81,7 +81,7 @@ class RegressorTemplate:
     Subclasses should implement update() and predict_scores() methods.
     """
     
-    def __init__(self, embedding_model="gemini/gemini-embedding-001", num_threads=None, regularization_strength=1, linear_dim=None, rich_text=True):
+    def __init__(self, embedding_model="gemini/text-embedding-004", num_threads=None, regularization_strength=1, linear_dim=None, rich_text=True):
         # In the regressor, no need for calling LLM to make the prediction. So we could predict the entire memory at once.
         self.max_candidates_to_predict = 500
         self.embedding_model = embedding_model

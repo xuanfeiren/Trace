@@ -4,7 +4,7 @@ import json
 import random
 import re
 choices = ["tau-bench", "veribench", "generic"]
-DOMAIN = "generic" # or "tau-bench" or "veribench"
+DOMAIN = "veribench" # or "tau-bench" or "veribench"
 # from system_prompts import SYSTEM_PROMPT, EXAMPLES
 
 def get_tau_bench_trajectory_from_output(output):
@@ -228,17 +228,13 @@ class Summarizer:
         {history_trajectories}
 
         Instructions:
-        - Keep all insights from the Current Summary above
+        - Keep all information from the Current Summary above
         - Analyze the new trajectories and identify any new patterns
-        - Add new insights to the summary while preserving existing ones
-        - Build upon and refine the current recommendations
+        - Provide a better version of the summary that includes all old information plus new insights
 
-        Provide your analysis in XML format:
-        <reasoning>
-        Analyze the key patterns and strategies that led to success or failure in these trajectories.
-        </reasoning>
+        Provide your improved summary in XML format:
         <summary>
-        Concrete recommendations for generating better parameters based on successful or failed patterns observed in the trajectories. Keep the current summary and add new insights from the new trajectories. Write the entire modified summary here.
+        Write the complete improved summary here with all old information preserved and new insights added. Provide concrete recommendations for generating better parameters based on successful or failed patterns observed.
         </summary>"""
 
         prompt_messages = [
