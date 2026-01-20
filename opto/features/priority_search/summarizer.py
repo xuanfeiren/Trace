@@ -228,13 +228,19 @@ class Summarizer:
         {history_trajectories}
 
         Instructions:
-        - Keep all information from the Current Summary above
-        - Analyze the new trajectories and identify any new patterns
-        - Provide a better version of the summary that includes all old information plus new insights
+        - Review both the Current Summary and the New Trajectories
+        - Synthesize ALL insights into a single, cohesive summary
+        - Integrate new patterns with existing knowledge
+        - Reorganize and consolidate information as needed for clarity
+        - DO NOT use incremental language like "[Previous points remain valid, plus:]"
+        - Generate a complete, standalone summary that incorporates everything
 
-        Provide your improved summary in XML format:
+        Provide your analysis in XML format:
+        <reasoning>
+        Analyze the key patterns and strategies that led to success or failure in these trajectories. Consider both the current summary and new trajectories.
+        </reasoning>
         <summary>
-        Write the complete improved summary here with all old information preserved and new insights added. Provide concrete recommendations for generating better parameters based on successful or failed patterns observed.
+        A complete, consolidated summary with concrete recommendations for generating better Lean 4 code. This should be a standalone summary that integrates insights from both the current summary and new trajectories, without using incremental modification language.
         </summary>"""
 
         prompt_messages = [
