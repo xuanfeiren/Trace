@@ -4,7 +4,7 @@ import json
 import random
 import re
 choices = ["tau-bench", "veribench", "generic"]
-DOMAIN = "veribench" # or "tau-bench" or "veribench"
+DOMAIN = "generic" # or "tau-bench" or "veribench"
 # from system_prompts import SYSTEM_PROMPT, EXAMPLES
 
 def get_tau_bench_trajectory_from_output(output):

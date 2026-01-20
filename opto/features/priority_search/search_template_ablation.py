@@ -249,8 +249,9 @@ class SearchTemplate(Trainer):
                 for p in self.agent.parameters():
                     self.logger.log(f"Parameter/{p.name}", p.data, self.n_iters, color='red')
                 import sys
-                if (test_frequency is not None) and (self.n_iters % test_frequency == 0) and info_test['test_score_empirical_mean'] == 1:
-                    sys.exit(0)
+
+                # if (test_frequency is not None) and (self.n_iters % test_frequency == 0) and info_test['test_score_empirical_mean'] == 1:
+                #     sys.exit(0)
                 # if info_update['long_term_memory_size'] >= 51:
                 #     sys.exit(0)
 
