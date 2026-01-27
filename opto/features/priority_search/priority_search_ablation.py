@@ -495,10 +495,10 @@ class PrioritySearch(SearchTemplate):
         self.regressor.update(self.memory.memory)
 
         # for ablation, update for all regressors
-        self.logistic_regressor.update(self.memory.memory)
-        self.linear_regressor.update(self.memory.memory)
-        self.linear_ucb_regressor.update(self.memory.memory)
-        self.llm_regressor.update(self.memory.memory)
+        # self.logistic_regressor.update(self.memory.memory)
+        # self.linear_regressor.update(self.memory.memory)
+        # self.linear_ucb_regressor.update(self.memory.memory)
+        # self.llm_regressor.update(self.memory.memory)
 
         self.regressor.predict_scores(self.memory.memory)
 
@@ -1099,6 +1099,7 @@ class EpsilonNetPS(PrioritySearch):
         if self.epsilon == 0: # no filtering
             print_color(f"No filtering of candidates.", "green")
             return new_candidates
+        print_color(f"Filtering {len(new_candidates)} candidates with epsilon {self.epsilon}...", "green")
         exploration_memory = [(0, candidate) for candidate in self._exploration_candidates]
         current_memory = self.memory.memory + exploration_memory
 

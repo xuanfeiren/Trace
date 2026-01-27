@@ -196,6 +196,7 @@ class SearchTemplate(Trainer):
         samples = None
         train_scores = []  # to store the scores of the agent during training
         train_num_samples = []  # to store the number of samples used to compute each score
+        test_scores = []
         num_steps = num_steps if num_steps is not None else 0
         num_epochs = num_epochs if num_epochs is not None else 0
         # Train the agent at least for num_epochs or num_steps
@@ -218,7 +219,10 @@ class SearchTemplate(Trainer):
                     print("Skipping first evaluation.")
                 else:
                     info_test = self.test(test_dataset, test_guide)  # test self.agent
+                    test_scores.append(info_test['test_score_empirical_mean'])
                     self.log(info_test, prefix="Test/")
+                    highest_test_score_so_far = max(test_scores) if test_scores else 0
+                    self.logger.log('Test/Highest test score so far', highest_test_score_so_far, self.n_iters, color='green')
 
             # Save the algorithm state
             if (save_frequency is not None and save_frequency > 0) and self.n_iters % save_frequency == 0:
