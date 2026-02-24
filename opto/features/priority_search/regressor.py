@@ -81,7 +81,7 @@ class RegressorTemplate:
     Subclasses should implement update() and predict_scores() methods.
     """
     
-    def __init__(self, embedding_model="gemini/text-embedding-004", num_threads=None, regularization_strength=1, linear_dim=None, rich_text=True):
+    def __init__(self, embedding_model="gemini/gemini-embedding-001", num_threads=None, regularization_strength=1, linear_dim=None, rich_text=True):
         # In the regressor, no need for calling LLM to make the prediction. So we could predict the entire memory at once.
         self.max_candidates_to_predict = 500
         self.embedding_model = embedding_model
@@ -89,7 +89,7 @@ class RegressorTemplate:
         self.regularization_strength = regularization_strength  # L2 regularization strength (lambda)
         self.rich_text = rich_text
         
-        # Default original embedding dimension (from text-embedding-004)
+        # Default original embedding dimension (from gemini-embedding-001)
         self.original_embedding_dim = 768
         
         if linear_dim is not None:
@@ -542,7 +542,7 @@ class EnsembleLogisticRegressor(LogisticRegressor):
 
     Regressors should be trained diversely. They should be initialized with different random seeds. Since we are using Adam (SGD), at each step we use a minibatch of data to update the regressors. Ideally we should use different minibatches for each regressor.
     """
-    def __init__(self, embedding_model="gemini/text-embedding-004", num_threads=None, learning_rate=0.001, regularization_strength=1, max_iterations=20000, tolerance=5e-3, gradient_tolerance=5e-3, linear_dim=None, rich_text=True, use_children_data=False, num_regressors=5, verbose=True):
+    def __init__(self, embedding_model="gemini/gemini-embedding-001", num_threads=None, learning_rate=0.001, regularization_strength=1, max_iterations=20000, tolerance=5e-3, gradient_tolerance=5e-3, linear_dim=None, rich_text=True, use_children_data=False, num_regressors=5, verbose=True):
         # Initialize parent class to inherit shared functionality
         super().__init__(embedding_model, num_threads, learning_rate, regularization_strength, max_iterations, tolerance, gradient_tolerance, linear_dim, rich_text, use_children_data, verbose)
         
@@ -736,7 +736,7 @@ class EnsembleLogisticRegressor(LogisticRegressor):
 class LinearRegressor(RegressorTemplate):
     """Use closed-form solution for regularized linear regression."""
     
-    def __init__(self, embedding_model="gemini/text-embedding-004", num_threads=None, regularization_strength=1, transformation_exploration_factor=0.0, linear_dim=None, rich_text=True):
+    def __init__(self, embedding_model="gemini/gemini-embedding-001", num_threads=None, regularization_strength=1, transformation_exploration_factor=0.0, linear_dim=None, rich_text=True):
         super().__init__(embedding_model, num_threads, regularization_strength, linear_dim, rich_text)
         # The transformation exploration factor should lie in [0,1]
         assert 0 <= transformation_exploration_factor <= 1, "Transformation exploration factor must be between 0 and 1"
@@ -920,7 +920,7 @@ class LinearRegressor(RegressorTemplate):
 class LinearUCBRegressor(LinearRegressor):
     """Linear UCB regressor that uses Upper Confidence Bound scores for exploration-exploitation balance."""
     
-    def __init__(self, embedding_model="gemini/text-embedding-004", num_threads=None, regularization_strength=1, alpha=0.3, transformation_exploration_factor=0.0, linear_dim=None, rich_text=True):
+    def __init__(self, embedding_model="gemini/gemini-embedding-001", num_threads=None, regularization_strength=1, alpha=0.3, transformation_exploration_factor=0.0, linear_dim=None, rich_text=True):
         super().__init__(embedding_model, num_threads, regularization_strength, transformation_exploration_factor, linear_dim, rich_text)
         self.alpha = alpha  # UCB exploration parameter
         self.cov = None     # Will be set during update()
