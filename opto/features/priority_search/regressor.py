@@ -216,7 +216,7 @@ class LogisticRegressor(RegressorTemplate):
     predict_scores has no parameters, it could return predicted scores for all candidates in the memory. 
     predict_scores_for_batch has one parameter, a batch of candidates, it could return predicted scores for the batch of candidates."""
     
-    def __init__(self, embedding_model="gemini/text-embedding-004", num_threads=None, learning_rate=0.001, regularization_strength=1, max_iterations=20000, tolerance=5e-3, gradient_tolerance=5e-3, linear_dim=None, rich_text=True,use_children_data=False,verbose=True):
+    def __init__(self, embedding_model="gemini/gemini-embedding-001", num_threads=None, learning_rate=0.001, regularization_strength=1, max_iterations=20000, tolerance=5e-3, gradient_tolerance=5e-3, linear_dim=None, rich_text=True,use_children_data=False,verbose=True):
         super().__init__(embedding_model, num_threads, regularization_strength, linear_dim, rich_text)
         # Logistic regression specific parameters
         self.learning_rate = learning_rate
