@@ -252,8 +252,8 @@ class SearchTemplate(Trainer):
 
                 if (test_frequency is not None) and (self.n_iters % test_frequency == 0) and info_test['test_score_empirical_mean'] == 1:
                     sys.exit(0)
-                # if info_update['long_term_memory_size'] >= 51:
-                #     sys.exit(0)
+                if info_update['long_term_memory_size'] >= 51:
+                    sys.exit(0)
 
 
             # Update counters
