@@ -113,10 +113,8 @@ class WandbLogger(ConsoleLogger):
         
         # Log to wandb
         if isinstance(data, str):
-            # For string data, we can log it as a custom chart or just print it
-            # wandb doesn't have a direct equivalent to tensorboard's add_text
-            # but we can log it in a structured way
-            self.wandb.log({f"{name}_text": data}, step=step)
+            # Wrap string in HTML to make it visible in WandB UI panels
+            self.wandb.log({f"{name}_text": self.wandb.Html(f"<pre>{data}</pre>")}, step=step)
         else:
             # For numeric data, log as scalar
             self.wandb.log({name: data}, step=step)

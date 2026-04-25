@@ -56,6 +56,11 @@ class AbstractModel:
     LiteLLM : Concrete implementation using LiteLLM
     """
 
+    # Global token usage tracking across all instances
+    _global_input_tokens = 0
+    _global_output_tokens = 0
+    _global_total_tokens = 0
+
     def __init__(self, factory: Callable, reset_freq: Union[int, None] = None) -> None:
         """
         Args:
@@ -67,6 +72,22 @@ class AbstractModel:
         self._model = self.factory()
         self.reset_freq = reset_freq
         self._init_time = time.time()
+
+    @classmethod
+    def get_token_usage(cls):
+        """Return global cumulative token usage across all LLM instances."""
+        return {
+            "input_tokens": cls._global_input_tokens,
+            "output_tokens": cls._global_output_tokens,
+            "total_tokens": cls._global_total_tokens,
+        }
+
+    @classmethod
+    def reset_token_usage(cls):
+        """Reset global token counters to zero."""
+        cls._global_input_tokens = 0
+        cls._global_output_tokens = 0
+        cls._global_total_tokens = 0
 
     # Overwrite this `model` property when subclassing.
     @property
@@ -81,7 +102,17 @@ class AbstractModel:
         if self.reset_freq is not None and time.time() - self._init_time > self.reset_freq:
             self._model = self.factory()
             self._init_time = time.time()
-        return self.model(*args, **kwargs)
+        response = self.model(*args, **kwargs)
+        try:
+            usage = response.usage
+            AbstractModel._global_input_tokens += usage.prompt_tokens
+            AbstractModel._global_output_tokens += usage.completion_tokens
+            AbstractModel._global_total_tokens += usage.total_tokens
+            print(f"[Token Usage] This call: input={usage.prompt_tokens}, output={usage.completion_tokens}, total={usage.total_tokens} | "
+                  f"Cumulative: input={AbstractModel._global_input_tokens}, output={AbstractModel._global_output_tokens}, total={AbstractModel._global_total_tokens}")
+        except (AttributeError, TypeError):
+            pass
+        return response
 
     def __getstate__(self):
         state = self.__dict__.copy()

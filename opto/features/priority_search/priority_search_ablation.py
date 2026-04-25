@@ -648,6 +648,7 @@ class PrioritySearch(SearchTemplate):
             optimizer = optimizers[n]
             try:
                 update_dict = optimizer.step(verbose=verbose, num_threads=self.num_threads, bypassing=True, **kwargs)
+                # breakpoint()
             except Exception as e:
                 print(f"Error in optimizer.step. No update dict returned: {e}")
                 return None
